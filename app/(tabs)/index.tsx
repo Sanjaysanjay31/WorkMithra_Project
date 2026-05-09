@@ -1,98 +1,143 @@
-import { Image } from 'expo-image';
-import { Platform, StyleSheet } from 'react-native';
-
-import { HelloWave } from '@/components/hello-wave';
-import ParallaxScrollView from '@/components/parallax-scroll-view';
+import React, { useEffect, useRef } from 'react';
+import { StyleSheet, View, Dimensions, Image, Animated, Easing, TouchableOpacity, Text } from 'react-native';
+import { AIAssistant } from '@/components/ai-assistant';
 import { ThemedText } from '@/components/themed-text';
-import { ThemedView } from '@/components/themed-view';
-import { Link } from 'expo-router';
+import { useRouter } from 'expo-router';
 
-export default function HomeScreen() {
+const { width, height } = Dimensions.get('window');
+
+export default function LandingScreen() {
+  const router = useRouter();
+  const imageAnim = useRef(new Animated.Value(1)).current;
+
+  useEffect(() => {
+    // Subtle 3D-like scale animation for the hero image
+    Animated.loop(
+      Animated.sequence([
+        Animated.timing(imageAnim, {
+          toValue: 1.05,
+          duration: 4000,
+          easing: Easing.inOut(Easing.ease),
+          useNativeDriver: true,
+        }),
+        Animated.timing(imageAnim, {
+          toValue: 1,
+          duration: 4000,
+          easing: Easing.inOut(Easing.ease),
+          useNativeDriver: true,
+        }),
+      ])
+    ).start();
+  }, []);
+
   return (
-    <ParallaxScrollView
-      headerBackgroundColor={{ light: '#A1CEDC', dark: '#1D3D47' }}
-      headerImage={
-        <Image
-          source={require('@/assets/images/partial-react-logo.png')}
-          style={styles.reactLogo}
-        />
-      }>
-      <ThemedView style={styles.titleContainer}>
-        <ThemedText type="title">Welcome!</ThemedText>
-        <HelloWave />
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <ThemedText type="subtitle">Step 1: Try it</ThemedText>
-        <ThemedText>
-          Edit <ThemedText type="defaultSemiBold">app/(tabs)/index.tsx</ThemedText> to see changes.
-          Press{' '}
-          <ThemedText type="defaultSemiBold">
-            {Platform.select({
-              ios: 'cmd + d',
-              android: 'cmd + m',
-              web: 'F12',
-            })}
-          </ThemedText>{' '}
-          to open developer tools.
-        </ThemedText>
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <Link href="/modal">
-          <Link.Trigger>
-            <ThemedText type="subtitle">Step 2: Explore</ThemedText>
-          </Link.Trigger>
-          <Link.Preview />
-          <Link.Menu>
-            <Link.MenuAction title="Action" icon="cube" onPress={() => alert('Action pressed')} />
-            <Link.MenuAction
-              title="Share"
-              icon="square.and.arrow.up"
-              onPress={() => alert('Share pressed')}
-            />
-            <Link.Menu title="More" icon="ellipsis">
-              <Link.MenuAction
-                title="Delete"
-                icon="trash"
-                destructive
-                onPress={() => alert('Delete pressed')}
-              />
-            </Link.Menu>
-          </Link.Menu>
-        </Link>
+    <View style={styles.container}>
+      {/* AI Assistant Icon - Top Right */}
+      <AIAssistant />
 
-        <ThemedText>
-          {`Tap the Explore tab to learn more about what's included in this starter app.`}
-        </ThemedText>
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <ThemedText type="subtitle">Step 3: Get a fresh start</ThemedText>
-        <ThemedText>
-          {`When you're ready, run `}
-          <ThemedText type="defaultSemiBold">npm run reset-project</ThemedText> to get a fresh{' '}
-          <ThemedText type="defaultSemiBold">app</ThemedText> directory. This will move the current{' '}
-          <ThemedText type="defaultSemiBold">app</ThemedText> to{' '}
-          <ThemedText type="defaultSemiBold">app-example</ThemedText>.
-        </ThemedText>
-      </ThemedView>
-    </ParallaxScrollView>
+      {/* Hero Image Container - 4/5 Height */}
+      <View style={styles.imageContainer}>
+        <Animated.Image 
+          source={require('@/assets/images/worker_client_handshake.png')} 
+          style={[styles.heroImage, { transform: [{ scale: imageAnim }] }]}
+          resizeMode="cover"
+        />
+        <View style={styles.overlay}>
+          <ThemedText type="title" style={styles.appTitle}>WorkMithra</ThemedText>
+          <ThemedText style={styles.tagline}>Connecting Workers & Clients Nearby</ThemedText>
+        </View>
+      </View>
+
+      {/* Login & Register Buttons - 1/5 Height */}
+      <View style={styles.footer}>
+        <TouchableOpacity 
+          style={styles.button} 
+          onPress={() => router.push('/login')}
+        >
+          <Text style={styles.buttonText}>Login</Text>
+        </TouchableOpacity>
+        
+        <TouchableOpacity 
+          style={[styles.button, { marginTop: 15, backgroundColor: '#ca202b' }]} 
+          onPress={() => router.push('/register')}
+        >
+          <Text style={styles.buttonText}>Registration</Text>
+        </TouchableOpacity>
+      </View>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  titleContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
+  container: {
+    flex: 1,
+    backgroundColor: 'white',
+    // Forced dimensions for iPhone SE model
+    width: 535,
+    height: 660,
+    alignSelf: 'center',
   },
-  stepContainer: {
-    gap: 8,
-    marginBottom: 8,
+  imageContainer: {
+    height: (660 * 4) / 5,
+    width: '100%',
+    position: 'relative',
+    overflow: 'hidden',
+    borderBottomLeftRadius: 40,
+    borderBottomRightRadius: 40,
   },
-  reactLogo: {
-    height: 178,
-    width: 290,
-    bottom: 0,
-    left: 0,
+  heroImage: {
+    width: '100%',
+    height: '100%',
+  },
+  overlay: {
     position: 'absolute',
+    bottom: 40,
+    left: 20,
+    right: 20,
+    backgroundColor: 'rgba(255, 255, 255, 0.8)',
+    padding: 20,
+    borderRadius: 25,
+    elevation: 10,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 5,
+  },
+  appTitle: {
+    color: '#6f42c1',
+    fontSize: 36,
+    fontWeight: 'bold',
+    textAlign: 'center',
+  },
+  tagline: {
+    color: '#333',
+    fontSize: 18,
+    textAlign: 'center',
+    marginTop: 8,
+    fontWeight: '500',
+  },
+  footer: {
+    height: 660 / 5,
+    paddingHorizontal: 30,
+    paddingVertical: 10,
+    justifyContent: 'center',
+    backgroundColor: 'white',
+  },
+  button: {
+    backgroundColor: '#6f42c1',
+    paddingVertical: 12,
+    borderRadius: 30,
+    alignItems: 'center',
+    elevation: 3,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 2,
+  },
+  buttonText: {
+    color: 'white',
+    fontSize: 18,
+    fontWeight: 'bold',
   },
 });
+
