@@ -1,14 +1,34 @@
-import React, { useState } from 'react';
-import { StyleSheet, View, TextInput, TouchableOpacity, Text, Alert, ActivityIndicator } from 'react-native';
-import { Stack, useRouter } from 'expo-router';
+import { AIAssistant } from '@/components/ai-assistant';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
+import { Ionicons } from '@expo/vector-icons';
+import { Stack, useRouter } from 'expo-router';
+import React, { useState } from 'react';
+import {
+    ActivityIndicator,
+    Alert,
+    Dimensions,
+    KeyboardAvoidingView,
+    Platform,
+    ScrollView,
+    StyleSheet,
+    Text,
+    TextInput,
+    TouchableOpacity,
+    View,
+} from 'react-native';
+
+const { width, height } = Dimensions.get('window');
+// Use 10.0.2.2 for Android emulator to reach localhost on host machine
+const DEFAULT_API_URL = Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://localhost:8000';
+const BASE_URL = process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL;
 
 export default function LoginScreen() {
   const router = useRouter();
   const [identifier, setIdentifier] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
 
   const handleLogin = async () => {
     if (!identifier || !password) {
@@ -17,66 +37,120 @@ export default function LoginScreen() {
     }
     setLoading(true);
     try {
-      console.log('Logging in', { identifier, password });
-      // Mocking API call
-      setTimeout(() => {
+      console.log(`Connecting to: ${BASE_URL}/login`);
+      const response = await fetch(`${BASE_URL}/login`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          identifier,
+          password,
+        }),
+      });
+
+      const data = await response.json();
+
+      if (response.ok) {
         setLoading(false);
-        Alert.alert('Success', 'Login successful');
-        router.replace('/(tabs)');
-      }, 1500);
+        router.replace('/switch_role');
+      } else {
+        setLoading(false);
+        Alert.alert('Error', data.detail || 'Login failed');
+      }
     } catch (error) {
       setLoading(false);
-      Alert.alert('Error', 'Login failed');
+      Alert.alert('Connection Error', `Unable to connect to server at ${BASE_URL}. Please ensure backend is running.`);
     }
   };
 
   return (
     <ThemedView style={styles.container}>
-      <Stack.Screen options={{ title: 'Login', headerShown: true }} />
-      <View style={styles.content}>
-        <ThemedText type="title" style={styles.title}>Welcome Back</ThemedText>
-        <ThemedText style={styles.subtitle}>Login to continue</ThemedText>
+      <Stack.Screen options={{ title: 'Login', headerShown: false }} />
+      <AIAssistant />
+      <KeyboardAvoidingView
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        style={{ flex: 1 }}
+      >
+        <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
+          <View style={styles.header}>
+            <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
+              <Ionicons name="arrow-back" size={24} color="#6F42C1" />
+            </TouchableOpacity>
+          </View>
 
-        <View style={styles.form}>
-          <ThemedText type="subtitle" style={styles.label}>Phone or Email</ThemedText>
-          <TextInput
-            style={styles.input}
-            placeholder="Enter phone or email"
-            autoCapitalize="none"
-            value={identifier}
-            onChangeText={setIdentifier}
-          />
+          <View style={styles.content}>
+            <View style={styles.titleContainer}>
+              <ThemedText type="title" style={styles.title}>Welcome Back!</ThemedText>
+              <Text style={styles.subtitle}>Glad to see you again. Login to your account.</Text>
+            </View>
 
-          <ThemedText type="subtitle" style={styles.label}>Password</ThemedText>
-          <TextInput
-            style={styles.input}
-            placeholder="Enter password"
-            secureTextEntry
-            value={password}
-            onChangeText={setPassword}
-          />
+            <View style={styles.form}>
+              <View style={styles.inputGroup}>
+                <Text style={styles.label}>Email or Phone</Text>
+                <View style={styles.inputWrapper}>
+                  <Ionicons name="mail-outline" size={20} color="#6c757d" style={styles.inputIcon} />
+                  <TextInput
+                    style={styles.input}
+                    placeholder="example@mail.com"
+                    placeholderTextColor="#adb5bd"
+                    autoCapitalize="none"
+                    value={identifier}
+                    onChangeText={setIdentifier}
+                  />
+                </View>
+              </View>
 
-          <TouchableOpacity onPress={() => Alert.alert('Forgot Password', 'Password reset flow not implemented yet')} style={styles.forgotPassword}>
-            <Text style={styles.forgotPasswordText}>Forgot Password?</Text>
-          </TouchableOpacity>
+              <View style={styles.inputGroup}>
+                <Text style={styles.label}>Password</Text>
+                <View style={styles.inputWrapper}>
+                  <Ionicons name="lock-closed-outline" size={20} color="#6c757d" style={styles.inputIcon} />
+                  <TextInput
+                    style={styles.input}
+                    placeholder="Enter your password"
+                    placeholderTextColor="#adb5bd"
+                    secureTextEntry={!showPassword}
+                    value={password}
+                    onChangeText={setPassword}
+                  />
+                  <TouchableOpacity onPress={() => setShowPassword(!showPassword)} style={styles.eyeIcon}>
+                    <Ionicons name={showPassword ? "eye-off-outline" : "eye-outline"} size={20} color="#6c757d" />
+                  </TouchableOpacity>
+                </View>
+              </View>
 
-          <TouchableOpacity 
-            style={[styles.loginButton, loading && styles.disabledButton]} 
-            onPress={handleLogin}
-            disabled={loading}
-          >
-            {loading ? (
-              <ActivityIndicator color="white" />
-            ) : (
-              <Text style={styles.loginButtonText}>Login</Text>
-            )}
-          </TouchableOpacity>
+              <TouchableOpacity 
+                onPress={() => Alert.alert('Forgot Password', 'Password reset flow not implemented yet')} 
+                style={styles.forgotPassword}
+              >
+                <Text style={styles.forgotPasswordText}>Forgot Password?</Text>
+              </TouchableOpacity>
 
-          <TouchableOpacity onPress={() => router.push('/register')} style={styles.registerLink}>
-            <Text style={styles.registerLinkText}>Don't have an account? Register</Text>
-          </TouchableOpacity>
-        </View>
-      </View>
+              <TouchableOpacity 
+                style={[styles.loginButton, loading && styles.disabledButton]} 
+                onPress={handleLogin}
+                disabled={loading}
+              >
+                {loading ? (
+                  <ActivityIndicator color="white" />
+                ) : (
+                  <>
+                    <Text style={styles.loginButtonText}>Login</Text>
+                    <Ionicons name="arrow-forward" size={20} color="white" />
+                  </>
+                )}
+              </TouchableOpacity>
+
+              <View style={styles.registerContainer}>
+                <Text style={styles.registerText}>Don't have an account? </Text>
+                <TouchableOpacity onPress={() => router.push('/register')}>
+                  <Text style={styles.registerLink}>Register Now</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        </ScrollView>
+      </KeyboardAvoidingView>
     </ThemedView>
   );
 }
@@ -84,74 +158,120 @@ export default function LoginScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
+    backgroundColor: '#fff',
+  },
+  scrollContent: {
+    flexGrow: 1,
+    paddingBottom: 40,
+  },
+  header: {
+    paddingHorizontal: 20,
+    paddingTop: 50,
+    paddingBottom: 20,
+  },
+  backButton: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: '#f0e6ff',
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   content: {
-    flex: 1,
-    padding: 30,
-    justifyContent: 'center',
+    paddingHorizontal: 24,
+  },
+  titleContainer: {
+    marginBottom: 40,
   },
   title: {
-    color: '#6f42c1',
-    marginBottom: 10,
-    textAlign: 'center',
+    fontSize: 32,
+    fontWeight: 'bold',
+    color: '#212529',
+    marginBottom: 8,
   },
   subtitle: {
-    fontSize: 18,
-    color: '#666',
-    marginBottom: 40,
-    textAlign: 'center',
+    fontSize: 16,
+    color: '#6c757d',
+    lineHeight: 24,
   },
   form: {
     width: '100%',
   },
+  inputGroup: {
+    marginBottom: 20,
+  },
   label: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#212529',
     marginBottom: 8,
-    fontSize: 16,
-    color: '#6f42c1',
+    marginLeft: 4,
+  },
+  inputWrapper: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#f8f9fa',
+    borderWidth: 1.5,
+    borderColor: '#e9ecef',
+    borderRadius: 16,
+    paddingHorizontal: 16,
+  },
+  inputIcon: {
+    marginRight: 12,
   },
   input: {
-    backgroundColor: '#f8f9fa',
-    borderWidth: 1,
-    borderColor: '#dee2e6',
-    borderRadius: 10,
-    padding: 12,
+    flex: 1,
+    paddingVertical: 14,
     fontSize: 16,
-    marginBottom: 20,
+    color: '#212529',
+  },
+  eyeIcon: {
+    padding: 8,
   },
   forgotPassword: {
     alignSelf: 'flex-end',
-    marginBottom: 30,
+    marginBottom: 32,
   },
   forgotPasswordText: {
-    color: '#6f42c1',
-    fontWeight: '500',
+    color: '#6F42C1',
+    fontWeight: '600',
+    fontSize: 14,
   },
   loginButton: {
-    backgroundColor: '#6f42c1',
-    paddingVertical: 15,
-    borderRadius: 30,
+    backgroundColor: '#6F42C1',
+    flexDirection: 'row',
+    paddingVertical: 16,
+    borderRadius: 16,
     alignItems: 'center',
-    elevation: 3,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.2,
-    shadowRadius: 2,
+    justifyContent: 'center',
+    gap: 8,
+    elevation: 4,
+    shadowColor: '#6F42C1',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
   },
   disabledButton: {
     backgroundColor: '#adb5bd',
+    shadowOpacity: 0,
   },
   loginButtonText: {
     color: 'white',
     fontSize: 18,
     fontWeight: 'bold',
   },
-  registerLink: {
-    marginTop: 30,
-    alignItems: 'center',
+  registerContainer: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    marginTop: 32,
   },
-  registerLinkText: {
-    color: '#ca202b',
-    fontSize: 16,
-    fontWeight: '500',
+  registerText: {
+    fontSize: 14,
+    color: '#6c757d',
+  },
+  registerLink: {
+    fontSize: 14,
+    color: '#6F42C1',
+    fontWeight: 'bold',
   },
 });

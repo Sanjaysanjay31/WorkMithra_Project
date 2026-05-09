@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
 import models, schemas, database
@@ -16,6 +17,15 @@ load_dotenv()
 models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
+
+# Add CORS Middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], # In production, replace with specific origins
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
