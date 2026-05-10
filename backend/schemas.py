@@ -40,6 +40,11 @@ class OTPVerify(BaseModel):
     otp: str
 
 
+class PasswordReset(BaseModel):
+    email: EmailStr
+    password: str
+
+
 class UserLogin(BaseModel):
     identifier: str
     password: str

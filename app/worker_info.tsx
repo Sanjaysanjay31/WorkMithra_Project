@@ -203,9 +203,17 @@ export default function WorkerInfoPage() {
                 <Text style={styles.callButtonText}>Call Worker</Text>
               </TouchableOpacity>
 
-              <TouchableOpacity style={styles.chatButton} onPress={handleChat}>
+              <TouchableOpacity
+                style={styles.chatButton}
+                onPress={() => router.push({ pathname: '/chat', params: { workerId: String(id), workerName: worker.full_name || '' } })}
+              >
+                <Ionicons name="chatbubbles-outline" size={20} color="white" />
+                <Text style={styles.chatButtonText}>Open AI Translation Chat</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity style={[styles.chatButton, { backgroundColor: '#10b981', marginTop: 8 }]} onPress={handleChat}>
                 <Ionicons name="chatbubble-outline" size={20} color="white" />
-                <Text style={styles.chatButtonText}>Send Message</Text>
+                <Text style={styles.chatButtonText}>Send SMS</Text>
               </TouchableOpacity>
             </View>
           )}

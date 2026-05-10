@@ -8,7 +8,6 @@ import React, { useState } from 'react';
 import {
     ActivityIndicator,
     Alert,
-    Dimensions,
     KeyboardAvoidingView,
     Platform,
     ScrollView,
@@ -19,7 +18,6 @@ import {
     View,
 } from 'react-native';
 
-const { width, height } = Dimensions.get('window');
 // Use 10.0.2.2 for Android emulator to reach localhost on host machine
 const DEFAULT_API_URL = Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://localhost:8000';
 const BASE_URL = process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL;
@@ -145,8 +143,8 @@ export default function LoginScreen() {
                 </View>
               </View>
 
-              <TouchableOpacity 
-                onPress={() => Alert.alert('Forgot Password', 'Password reset flow not implemented yet')} 
+              <TouchableOpacity
+                onPress={() => router.push('/forgot-password')}
                 style={styles.forgotPassword}
               >
                 <Text style={styles.forgotPasswordText}>Forgot Password?</Text>

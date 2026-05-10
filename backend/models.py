@@ -226,3 +226,5 @@ class JobHistory(Base):
     booking = relationship("Booking", back_populates="job_history")
     worker = relationship("Worker", back_populates="job_histories")
 
+
+

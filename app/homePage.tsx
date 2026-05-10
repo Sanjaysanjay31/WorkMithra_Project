@@ -1,4 +1,5 @@
 import BottomNav from '@/components/bottom-nav';
+import { aiExtract, webSTT } from '@/lib/ai';
 import { Ionicons } from '@expo/vector-icons';
 import { Stack, useRouter } from 'expo-router';
 import React, { useEffect, useMemo, useState } from 'react';
@@ -95,28 +96,47 @@ export default function HomePage() {
     router.push({ pathname: '/worker_info', params: { id: String(w.id) } });
   }
 
-  function startVoiceSearch() {
+  function cleanQuery(s: string): string {
+    return s
+      .toLowerCase()
+      .replace(/[.,!?;:'"]+$/g, '')   // trailing punctuation
+      .replace(/^(i need|i want|find me|find|show me|show|get me|please|can you|could you)\s+(a |an |some )?/gi, '')
+      .replace(/\s+to\s+(fix|repair|help with|work on)\s+/gi, ' ')
+      .trim();
+  }
+
+  /** Run AI intent extraction in the background to map free-form text to a domain. */
+  async function refineQueryWithAI(text: string) {
+    try {
+      const result = await aiExtract(
+        text,
+        '{ "domain": one of: Plumber, Electrician, Carpenter, Painter, AC Repair, Mechanic, Cleaner, Cook, Gardener, Tailor, or null if not relevant }',
+      );
+      const d = (result?.domain || '').toString().trim();
+      if (d && d.toLowerCase() !== 'null') setSearchQuery(d);
+    } catch {
+      // network/API error — leave the cleaned text in place
+    }
+  }
+
+  async function startVoiceSearch() {
     if (Platform.OS !== 'web') {
       Alert.alert('Voice search', 'Voice input works in the web browser. Native voice support coming soon.');
       return;
     }
-    const SR: any = (globalThis as any).SpeechRecognition || (globalThis as any).webkitSpeechRecognition;
-    if (!SR) {
-      Alert.alert('Voice search', 'Your browser does not support voice input.');
-      return;
+    try {
+      setListening(true);
+      const raw = await webSTT('en-IN', 4000);
+      setListening(false);
+      if (!raw) return;
+      const cleaned = cleanQuery(raw);
+      setSearchQuery(cleaned);
+      // Then refine asynchronously via AI to map sentences → domain keyword
+      refineQueryWithAI(raw);
+    } catch (e: any) {
+      setListening(false);
+      Alert.alert('Voice search', e?.message || 'Could not capture voice');
     }
-    const recog = new SR();
-    recog.lang = 'en-IN';
-    recog.interimResults = false;
-    recog.maxAlternatives = 1;
-    setListening(true);
-    recog.onresult = (e: any) => {
-      const transcript = e.results?.[0]?.[0]?.transcript || '';
-      setSearchQuery(transcript);
-    };
-    recog.onerror = () => setListening(false);
-    recog.onend = () => setListening(false);
-    try { recog.start(); } catch { setListening(false); }
   }
 
   function clearFilters() {

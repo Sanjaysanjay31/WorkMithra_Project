@@ -5,16 +5,22 @@ from sqlalchemy import or_
 import models, schemas, database
 from database import engine, get_db
 from passlib.context import CryptContext
-import random, os
-from datetime import datetime, timedelta, timezone
-from sendgrid import SendGridAPIClient
-from sendgrid.helpers.mail import Mail
+import os
 from dotenv import load_dotenv
 
 load_dotenv()
 
 # Create tables
 models.Base.metadata.create_all(bind=engine)
+
+# One-time cleanup: drop the old assistant_* tables (no longer used).
+try:
+    with engine.begin() as _conn:
+        from sqlalchemy import text as _sql_text
+        _conn.execute(_sql_text("DROP TABLE IF EXISTS assistant_messages CASCADE"))
+        _conn.execute(_sql_text("DROP TABLE IF EXISTS assistant_sessions CASCADE"))
+except Exception as _e:
+    print("assistant table cleanup skipped:", _e)
 
 app = FastAPI()
 
@@ -32,64 +38,89 @@ from routers.workers import router as workers_router
 from routers.bookings import router as bookings_router
 from routers.profiles import router as profiles_router
 from routers.chat import router as chat_router
+from routers.ai import router as ai_router
 
 app.include_router(workers_router, prefix="/workers", tags=["workers"])
 app.include_router(bookings_router, prefix="/bookings", tags=["bookings"])
 app.include_router(profiles_router, prefix="/profiles", tags=["profiles"])
 app.include_router(chat_router, prefix="/chat", tags=["chat"])
+app.include_router(ai_router, prefix="/ai", tags=["ai"])
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
-SENDER_EMAIL = os.getenv("SENDER_EMAIL")
+import requests as _requests
 
-# OTP Store
-otp_store = {} # {email: (otp, expiry)}
-OTP_EXPIRY_MINUTES = 4
-
-def send_email_otp(to_email: str, otp: str):
-    if not SENDGRID_API_KEY or not SENDER_EMAIL:
-        # For development if keys are missing
-        print(f"DEBUG: OTP for {to_email} is {otp}")
-        return
-
-    message = Mail(
-        from_email=SENDER_EMAIL,
-        to_emails=to_email,
-        subject="WorkMithra Verification Code",
-        html_content=f"Your OTP code is <strong>{otp}</strong>. It expires in {OTP_EXPIRY_MINUTES} minutes."
-    )
-    try:
-        sg = SendGridAPIClient(SENDGRID_API_KEY)
-        sg.send(message)
-    except Exception as e:
-        print(f"Error sending email: {e}")
-        raise HTTPException(status_code=500, detail="Failed to send OTP")
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 
 @app.post("/send-otp")
 def send_otp(data: schemas.OTPRequest):
-    otp = str(random.randint(100000, 999999))
-    expiry = datetime.now(timezone.utc) + timedelta(minutes=OTP_EXPIRY_MINUTES)
-    otp_store[data.email] = (otp, expiry)
-    send_email_otp(data.email, otp)
+    """Send an OTP email via Supabase Auth."""
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        raise HTTPException(status_code=500, detail="Supabase not configured")
+    try:
+        r = _requests.post(
+            f"{SUPABASE_URL}/auth/v1/otp",
+            headers={
+                "apikey": SUPABASE_KEY,
+                "Authorization": f"Bearer {SUPABASE_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={"email": data.email, "create_user": True},
+            timeout=20,
+        )
+        if r.status_code >= 400:
+            raise HTTPException(status_code=400, detail=r.json().get("msg") or r.text)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Failed to send OTP: {e}")
     return {"message": "OTP sent successfully"}
+
 
 @app.post("/verify-otp")
 def verify_otp(data: schemas.OTPVerify):
-    record = otp_store.get(data.email)
-    if not record:
-        raise HTTPException(status_code=400, detail="OTP not found")
-    
-    otp, expiry = record
-    if datetime.now(timezone.utc) > expiry:
-        del otp_store[data.email]
-        raise HTTPException(status_code=400, detail="OTP expired")
-    
-    if otp != data.otp:
-        raise HTTPException(status_code=400, detail="Invalid OTP")
-    
-    # We keep the record for a short time to allow registration
-    return {"message": "OTP verified"}
+    """Verify the OTP via Supabase Auth."""
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        raise HTTPException(status_code=500, detail="Supabase not configured")
+    try:
+        r = _requests.post(
+            f"{SUPABASE_URL}/auth/v1/verify",
+            headers={
+                "apikey": SUPABASE_KEY,
+                "Authorization": f"Bearer {SUPABASE_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={"email": data.email, "token": data.otp, "type": "email"},
+            timeout=20,
+        )
+        if r.status_code >= 400:
+            body = {}
+            try: body = r.json()
+            except Exception: pass
+            raise HTTPException(status_code=400, detail=body.get("msg") or body.get("error_description") or r.text)
+        payload = r.json()
+        return {
+            "message": "OTP verified",
+            "access_token": payload.get("access_token"),
+            "user": payload.get("user"),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Failed to verify OTP: {e}")
+
+
+@app.post("/reset-password")
+def reset_password(data: schemas.PasswordReset, db: Session = Depends(get_db)):
+    """Reset a user's password. Caller is expected to have verified an OTP first."""
+    user = db.query(models.User).filter(models.User.email == data.email).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="No account found for this email")
+    user.hashed_password = pwd_context.hash(data.password)
+    db.commit()
+    return {"message": "Password reset successful"}
+
 
 @app.post("/register", response_model=schemas.UserResponse)
 def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
