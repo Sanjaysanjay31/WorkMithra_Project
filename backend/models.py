@@ -36,6 +36,7 @@ class User(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     is_verified = Column(Boolean, default=False)
     is_active = Column(Boolean, default=True)
+    hashed_password = Column(String(255), nullable=True)
 
     workers = relationship("Worker", back_populates="user")
     bookings = relationship("Booking", back_populates="user")

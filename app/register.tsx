@@ -5,17 +5,16 @@ import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { Stack, useRouter } from 'expo-router';
 import React, { useState } from 'react';
 import {
-    ActivityIndicator,
-    Alert,
-    Dimensions,
-    KeyboardAvoidingView,
-    Platform,
-    ScrollView,
-    StyleSheet,
-    Text,
-    TextInput,
-    TouchableOpacity,
-    View,
+  ActivityIndicator,
+  Dimensions,
+  KeyboardAvoidingView,
+  Platform,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View
 } from 'react-native';
 
 const { width } = Dimensions.get('window');
@@ -27,6 +26,14 @@ export default function RegisterScreen() {
   const router = useRouter();
 
   const [formData, setFormData] = useState({
+    name: '',
+    phone: '',
+    email: '',
+    otp: '',
+    password: '',
+    confirmPassword: '',
+  });
+  const [errors, setErrors] = useState({
     name: '',
     phone: '',
     email: '',
@@ -59,10 +66,12 @@ export default function RegisterScreen() {
       if (!res.ok) throw new Error(data.detail || 'Failed to send OTP');
       setIsOtpSent(true);
       setMessage({ type: 'success', text: data.message || 'OTP sent to your email' });
+      setErrors(prev => ({ ...prev, email: '' }));
       setLoading(false);
     } catch (error: any) {
       setLoading(false);
       setMessage({ type: 'error', text: `Connection Error: ${error.message}` });
+      setErrors(prev => ({ ...prev, email: error.message }));
     }
   };
 
@@ -83,10 +92,12 @@ export default function RegisterScreen() {
       if (!res.ok) throw new Error(data.detail || 'OTP verification failed');
       setIsOtpVerified(true);
       setMessage({ type: 'success', text: data.message || 'OTP verified successfully' });
+      setErrors(prev => ({ ...prev, otp: '' }));
       setLoading(false);
     } catch (error: any) {
       setLoading(false);
       setMessage({ type: 'error', text: `Error: ${error.message}` });
+      setErrors(prev => ({ ...prev, otp: error.message }));
     }
   };
 
@@ -102,9 +113,10 @@ export default function RegisterScreen() {
     setLoading(true);
     setMessage({ type: '', text: '' });
     try {
+      setErrors({ name: '', phone: '', email: '', otp: '', password: '', confirmPassword: '' });
       const payload = {
         full_name: formData.name,
-        phone_number: formData.phone,
+        phone: formData.phone,
         email: formData.email,
         password: formData.password,
       };
@@ -115,7 +127,27 @@ export default function RegisterScreen() {
         body: JSON.stringify(payload),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || 'Registration failed');
+      if (!res.ok) {
+        // handle validation errors from FastAPI (422)
+        if (res.status === 422 && data && Array.isArray(data.detail)) {
+          const fieldErrors: any = { name: '', phone: '', email: '', otp: '', password: '', confirmPassword: '' };
+          data.detail.forEach((err: any) => {
+            const loc = err.loc || [];
+            const field = loc[loc.length - 1];
+            // map backend field names to frontend fields
+            if (field === 'full_name') fieldErrors.name = err.msg;
+            else if (field === 'phone' || field === 'phone_number') fieldErrors.phone = err.msg;
+            else if (field === 'email') fieldErrors.email = err.msg;
+            else if (field === 'password') fieldErrors.password = err.msg;
+            else fieldErrors.name = fieldErrors.name || err.msg;
+          });
+          setErrors(fieldErrors);
+          setMessage({ type: 'error', text: 'Please fix the highlighted fields' });
+          setLoading(false);
+          return;
+        }
+        throw new Error(data.detail || 'Registration failed');
+      }
       setLoading(false);
       setMessage({ type: 'success', text: 'Registration successful!' });
       setTimeout(() => {
@@ -173,6 +205,7 @@ export default function RegisterScreen() {
                     onChangeText={(text) => setFormData({ ...formData, name: text })}
                   />
                 </View>
+                {errors.name ? <Text style={styles.fieldError}>{errors.name}</Text> : null}
               </View>
 
               <View style={styles.inputGroup}>
@@ -188,6 +221,7 @@ export default function RegisterScreen() {
                     onChangeText={(text) => setFormData({ ...formData, phone: text })}
                   />
                 </View>
+                {errors.phone ? <Text style={styles.fieldError}>{errors.phone}</Text> : null}
               </View>
 
               <View style={styles.inputGroup}>
@@ -221,6 +255,7 @@ export default function RegisterScreen() {
                     </View>
                   )}
                 </View>
+                {errors.email ? <Text style={styles.fieldError}>{errors.email}</Text> : null}
               </View>
 
               {isOtpSent && !isOtpVerified && (
@@ -243,6 +278,7 @@ export default function RegisterScreen() {
                       {loading ? <ActivityIndicator color="white" /> : <Text style={styles.verifyButtonText}>Verify</Text>}
                     </TouchableOpacity>
                   </View>
+                  {errors.otp ? <Text style={styles.fieldError}>{errors.otp}</Text> : null}
                 </View>
               )}
 
@@ -262,6 +298,7 @@ export default function RegisterScreen() {
                     <Ionicons name={showPassword ? "eye-off-outline" : "eye-outline"} size={20} color="#6c757d" />
                   </TouchableOpacity>
                 </View>
+                {errors.password ? <Text style={styles.fieldError}>{errors.password}</Text> : null}
               </View>
 
               <View style={styles.inputGroup}>
@@ -277,6 +314,7 @@ export default function RegisterScreen() {
                     onChangeText={(text) => setFormData({ ...formData, confirmPassword: text })} 
                   />
                 </View>
+                {errors.confirmPassword ? <Text style={styles.fieldError}>{errors.confirmPassword}</Text> : null}
               </View>
 
               <TouchableOpacity 
@@ -346,6 +384,13 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: '#6c757d',
     lineHeight: 24,
+  },
+  fieldError: {
+    color: '#FF6B6B',
+    marginTop: 6,
+    marginLeft: 8,
+    fontSize: 13,
+    fontWeight: '600',
   },
   form: {
     width: '100%',
