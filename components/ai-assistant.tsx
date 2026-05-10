@@ -36,36 +36,29 @@ export function AIAssistant() {
                 </TouchableOpacity>
               </View>
 
-              <ScrollView style={styles.scrollContent}>
+              <ScrollView style={styles.scrollContent} showsVerticalScrollIndicator={false}>
                 <ThemedView style={styles.card}>
                   <ThemedText type="defaultSemiBold" style={styles.cardTitle}>How to use this app?</ThemedText>
-                  <ThemedText style={styles.cardText}>
-                    1. Choose if you are a Worker (looking for work) or a Client (looking for help).
-                  </ThemedText>
-                  <ThemedText style={styles.cardText}>
-                    2. Register with your details.
-                  </ThemedText>
-                  <ThemedText style={styles.cardText}>
-                    3. Connect with people nearby for quick jobs!
-                  </ThemedText>
+                  <ThemedText style={styles.cardText}>1. Pick Worker or Client.</ThemedText>
+                  <ThemedText style={styles.cardText}>2. Register your details.</ThemedText>
+                  <ThemedText style={styles.cardText}>3. Connect nearby for quick jobs!</ThemedText>
                 </ThemedView>
 
                 <ThemedView style={styles.card}>
                   <ThemedText type="defaultSemiBold" style={styles.cardTitle}>Voice Help</ThemedText>
                   <ThemedText style={styles.cardText}>
-                    Tap the microphone icon to talk to me. I can help you find jobs or workers just by listening!
+                    Tap the mic to talk. I'll help find jobs or workers.
                   </ThemedText>
                   <TouchableOpacity style={styles.voiceButton}>
-                    <Ionicons name="mic" size={40} color="white" />
+                    <Ionicons name="mic" size={20} color="white" />
                     <Text style={styles.voiceButtonText}>Tap to Speak</Text>
                   </TouchableOpacity>
                 </ThemedView>
 
                 <ThemedView style={styles.card}>
-                  <ThemedText type="defaultSemiBold" style={styles.cardTitle}>AI Backend Configuration</ThemedText>
+                  <ThemedText type="defaultSemiBold" style={styles.cardTitle}>AI Backend</ThemedText>
                   <ThemedText style={styles.cardText}>
-                    Note: To enable full AI chat, get a free API key from Google AI Studio (Gemini Flash). 
-                    It's free and perfect for this assistant!
+                    Add a free Gemini Flash API key to enable full AI chat.
                   </ThemedText>
                 </ThemedView>
               </ScrollView>
@@ -102,62 +95,76 @@ const styles = StyleSheet.create({
     justifyContent: 'flex-end',
   },
   blurContainer: {
-    height: height * 0.7,
+    width: '100%',
+    maxWidth: 360,
+    height: '100%',
+    maxHeight: 803,
+    alignSelf: 'center',
     borderTopLeftRadius: 30,
     borderTopRightRadius: 30,
     overflow: 'hidden',
   },
   modalContent: {
     flex: 1,
-    padding: 20,
-    backgroundColor: 'rgba(255, 255, 255, 0.8)',
+    paddingHorizontal: 12,
+    paddingTop: 10,
+    paddingBottom: 8,
+    backgroundColor: 'rgba(255, 255, 255, 0.95)',
   },
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 20,
+    marginBottom: 8,
   },
   headerTitle: {
     color: '#6f42c1',
+    fontSize: 15,
+    lineHeight: 18,
+    fontWeight: '700',
   },
   scrollContent: {
     flex: 1,
   },
   card: {
     backgroundColor: 'white',
-    borderRadius: 15,
-    padding: 15,
-    marginBottom: 15,
-    elevation: 2,
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    marginBottom: 8,
+    elevation: 1,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.2,
-    shadowRadius: 1.41,
+    shadowOpacity: 0.15,
+    shadowRadius: 1,
   },
   cardTitle: {
-    marginBottom: 10,
+    marginBottom: 4,
     color: '#333',
+    fontSize: 13,
+    lineHeight: 16,
   },
   cardText: {
-    fontSize: 16,
-    lineHeight: 22,
+    fontSize: 12,
+    lineHeight: 15,
     color: '#555',
-    marginBottom: 5,
+    marginBottom: 1,
   },
   voiceButton: {
     backgroundColor: '#ca202b',
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    padding: 15,
-    borderRadius: 30,
-    marginTop: 10,
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 18,
+    marginTop: 6,
+    alignSelf: 'center',
   },
   voiceButtonText: {
     color: 'white',
-    fontSize: 18,
+    fontSize: 12,
     fontWeight: 'bold',
-    marginLeft: 10,
+    marginLeft: 6,
   },
 });

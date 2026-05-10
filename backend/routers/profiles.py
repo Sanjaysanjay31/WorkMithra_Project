@@ -1,9 +1,37 @@
-from fastapi import APIRouter, Depends, HTTPException
-from typing import List
+from fastapi import APIRouter, Depends, HTTPException, Header, Body
+from typing import List, Optional, Dict, Any
 from sqlalchemy.orm import Session
 import database, models, schemas
 
 router = APIRouter()
+
+# In-memory dev store for /profiles/me (keyed by X-User-Id header, default "guest")
+_me_store: Dict[str, Dict[str, Any]] = {}
+
+
+@router.get("/me")
+def get_my_profile(x_user_id: Optional[str] = Header(default="guest")):
+    """Return the current user's profile, or empty if none saved."""
+    return _me_store.get(x_user_id or "guest", {})
+
+
+@router.post("/me")
+def create_my_profile(
+    payload: Dict[str, Any] = Body(...),
+    x_user_id: Optional[str] = Header(default="guest"),
+):
+    _me_store[x_user_id or "guest"] = payload
+    return _me_store[x_user_id or "guest"]
+
+
+@router.put("/me")
+def update_my_profile(
+    payload: Dict[str, Any] = Body(...),
+    x_user_id: Optional[str] = Header(default="guest"),
+):
+    key = x_user_id or "guest"
+    _me_store[key] = {**_me_store.get(key, {}), **payload}
+    return _me_store[key]
 
 
 @router.get("/user/{user_id}", response_model=schemas.UserResponse)

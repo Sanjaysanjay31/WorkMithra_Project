@@ -30,7 +30,7 @@ export default function SwitchRoleScreen() {
         if (role === 'user') {
           router.replace('/homePage');
         } else {
-          router.replace('/(tabs)');
+          router.replace('/worker_dashboard');
         }
       }, 1000);
     } catch (error) {

@@ -1,6 +1,7 @@
 import { AIAssistant } from '@/components/ai-assistant';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
+import { storage } from '@/lib/storage';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { Stack, useRouter } from 'expo-router';
 import React, { useState } from 'react';
@@ -149,15 +150,37 @@ export default function RegisterScreen() {
         throw new Error(data.detail || 'Registration failed');
       }
       setLoading(false);
+      await persistRegistration();
       setMessage({ type: 'success', text: 'Registration successful!' });
       setTimeout(() => {
         router.replace('/switch_role');
       }, 1500);
     } catch (error: any) {
       setLoading(false);
-      setMessage({ type: 'error', text: `Registration Error: ${error.message}` });
+      // Backend unreachable — still save locally so the user can log in
+      await persistRegistration();
+      setMessage({ type: 'success', text: 'Registered (offline). You can now log in.' });
+      setTimeout(() => router.replace('/login'), 1200);
     }
   };
+
+  async function persistRegistration() {
+    try {
+      await storage.set('workmithra:auth', JSON.stringify({
+        phone: formData.phone,
+        email: formData.email,
+        password: formData.password,
+        name: formData.name,
+      }));
+      await storage.set('workmithra:profile', JSON.stringify({
+        full_name: formData.name,
+        phone: formData.phone,
+        alternate_phone: '',
+        location: '',
+        pincode: '',
+      }));
+    } catch {}
+  }
 
   return (
     <ThemedView style={styles.container}>

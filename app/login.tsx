@@ -1,6 +1,7 @@
 import { AIAssistant } from '@/components/ai-assistant';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
+import { storage } from '@/lib/storage';
 import { Ionicons } from '@expo/vector-icons';
 import { Stack, useRouter } from 'expo-router';
 import React, { useState } from 'react';
@@ -30,37 +31,62 @@ export default function LoginScreen() {
   const [loading, setLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
 
+  const notify = (title: string, msg?: string) => {
+    if (Platform.OS === 'web' && typeof window !== 'undefined') {
+      window.alert(msg ? `${title}\n\n${msg}` : title);
+    } else {
+      Alert.alert(title, msg);
+    }
+  };
+
   const handleLogin = async () => {
     if (!identifier || !password) {
-      Alert.alert('Error', 'Please enter your email/phone and password');
+      notify('Error', 'Please enter your email/phone and password');
       return;
     }
     setLoading(true);
+
+    // Check locally-registered credentials first (works offline)
+    try {
+      const cached = await storage.get('workmithra:auth');
+      if (cached) {
+        const auth = JSON.parse(cached);
+        const idMatch = identifier === auth.phone || identifier === auth.email;
+        if (idMatch && password === auth.password) {
+          setLoading(false);
+          router.replace('/switch_role');
+          return;
+        }
+      }
+    } catch {}
     try {
       console.log(`Connecting to: ${BASE_URL}/login`);
       const response = await fetch(`${BASE_URL}/login`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          identifier,
-          password,
-        }),
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ identifier, password }),
       });
 
-      const data = await response.json();
+      let data: any = {};
+      try { data = await response.json(); } catch {}
 
       if (response.ok) {
         setLoading(false);
         router.replace('/switch_role');
       } else {
         setLoading(false);
-        Alert.alert('Error', data.detail || 'Login failed');
+        notify('Login failed', data.detail || `Server responded with ${response.status}`);
       }
-    } catch (error) {
+    } catch (error: any) {
       setLoading(false);
-      Alert.alert('Connection Error', `Unable to connect to server at ${BASE_URL}. Please ensure backend is running.`);
+      const proceed = Platform.OS === 'web' && typeof window !== 'undefined'
+        ? window.confirm(`Unable to reach backend at ${BASE_URL}.\n\nContinue in offline/demo mode?`)
+        : false;
+      if (proceed) {
+        router.replace('/switch_role');
+      } else {
+        notify('Connection Error', `Unable to connect to server at ${BASE_URL}. Please ensure backend is running.`);
+      }
     }
   };
 

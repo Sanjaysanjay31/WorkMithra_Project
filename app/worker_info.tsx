@@ -1,3 +1,4 @@
+import { AIAssistant } from '@/components/ai-assistant';
 import BottomNav from '@/components/bottom-nav';
 import { Ionicons } from '@expo/vector-icons';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
@@ -126,27 +127,42 @@ export default function WorkerInfoPage() {
         <ScrollView style={styles.tabContent} showsVerticalScrollIndicator={false}>
           {activeTab === 'profile' && (
             <View style={styles.tabPane}>
-              <Text style={styles.sectionTitle}>About</Text>
-              <Text style={styles.sectionText}>
-                {worker.bio || 'Experienced professional ready to help you with your needs.'}
-              </Text>
-
-              <Text style={styles.sectionTitle} style={{ marginTop: 16 }}>
-                Experience
-              </Text>
-              <Text style={styles.sectionText}>
-                {worker.experience_years} years of professional experience
-              </Text>
-
-              <Text style={styles.sectionTitle} style={{ marginTop: 16 }}>
-                Location
-              </Text>
-              <Text style={styles.sectionText}>{worker.location || worker.city || 'City not specified'}</Text>
-
-              <Text style={styles.sectionTitle} style={{ marginTop: 16 }}>
-                Hourly Rate
-              </Text>
-              <Text style={styles.sectionText}>₹{worker.hourly_rate || '500'} / hour</Text>
+              <View style={styles.detailRow}>
+                <Text style={styles.detailLabel}>Name</Text>
+                <Text style={styles.detailValue}>{worker.full_name || '—'}</Text>
+              </View>
+              <View style={styles.detailRow}>
+                <Text style={styles.detailLabel}>Age</Text>
+                <Text style={styles.detailValue}>{worker.age ? `${worker.age} years` : '—'}</Text>
+              </View>
+              <View style={styles.detailRow}>
+                <Text style={styles.detailLabel}>Domain</Text>
+                <Text style={styles.detailValue}>{worker.skill || 'General'}</Text>
+              </View>
+              <View style={styles.detailRow}>
+                <Text style={styles.detailLabel}>Wage</Text>
+                <Text style={styles.detailValue}>₹{worker.hourly_rate || '—'} / hour</Text>
+              </View>
+              <View style={styles.detailRow}>
+                <Text style={styles.detailLabel}>Experience</Text>
+                <Text style={styles.detailValue}>{worker.experience_years ?? 0} years</Text>
+              </View>
+              <View style={styles.detailRow}>
+                <Text style={styles.detailLabel}>Previous Jobs</Text>
+                <Text style={styles.detailValue}>{worker.completed_jobs ?? worker.total_jobs ?? 0}</Text>
+              </View>
+              <View style={styles.detailRow}>
+                <Text style={styles.detailLabel}>Phone</Text>
+                <Text style={styles.detailValue}>{worker.phone || '—'}</Text>
+              </View>
+              <View style={styles.detailRow}>
+                <Text style={styles.detailLabel}>Alt. Phone</Text>
+                <Text style={styles.detailValue}>{worker.alternate_phone || worker.alt_phone || '—'}</Text>
+              </View>
+              <View style={styles.detailRow}>
+                <Text style={styles.detailLabel}>Address</Text>
+                <Text style={styles.detailValue}>{worker.address || worker.location || worker.city || '—'}</Text>
+              </View>
             </View>
           )}
 
@@ -219,6 +235,7 @@ export default function WorkerInfoPage() {
           )}
         </ScrollView>
       </View>
+      <AIAssistant />
       <BottomNav currentRoute="home" />
     </View>
   );
@@ -227,7 +244,7 @@ export default function WorkerInfoPage() {
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: '#fff' },
   container: { flex: 1, backgroundColor: '#fff', justifyContent: 'center', alignItems: 'center' },
-  designFrame: { flex: 1, width: 360, height: 803, alignSelf: 'center', backgroundColor: '#fff' },
+  designFrame: { flex: 1, width: '100%', maxWidth: 360, alignSelf: 'center', backgroundColor: '#fff' },
   errorText: { fontSize: 16, color: '#999' },
   headerRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingTop: 16, paddingBottom: 12 },
   headerTitle: { fontSize: 18, fontWeight: '800', color: '#333' },
@@ -247,6 +264,9 @@ const styles = StyleSheet.create({
   tabPane: { paddingBottom: 20 },
   sectionTitle: { fontSize: 14, fontWeight: '800', color: '#333', marginVertical: 12 },
   sectionText: { fontSize: 13, color: '#666', lineHeight: 20 },
+  detailRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#f0f0f0' },
+  detailLabel: { fontSize: 13, fontWeight: '700', color: '#666', flex: 1 },
+  detailValue: { fontSize: 13, color: '#333', flex: 1.4, textAlign: 'right' },
   reviewCard: { backgroundColor: '#f8f8f8', padding: 12, borderRadius: 12, marginBottom: 12 },
   reviewHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
   reviewRating: { fontSize: 14, fontWeight: '800', color: '#FFB800' },

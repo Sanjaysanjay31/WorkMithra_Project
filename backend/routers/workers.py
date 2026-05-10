@@ -6,7 +6,7 @@ import database, models, schemas
 router = APIRouter()
 
 
-@router.get("/", response_model=List[schemas.WorkerResponse])
+@router.get("", response_model=List[schemas.WorkerResponse])
 def list_workers(skip: int = 0, limit: int = 20, db: Session = Depends(database.get_db)):
     """Return a paginated list of workers."""
     workers = db.query(models.Worker).offset(skip).limit(limit).all()

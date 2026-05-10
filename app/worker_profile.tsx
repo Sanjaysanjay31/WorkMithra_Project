@@ -1,11 +1,10 @@
-import BottomNav from '@/components/bottom-nav';
+import WorkerBottomNav from '@/components/worker-bottom-nav';
 import { storage } from '@/lib/storage';
 import { Ionicons } from '@expo/vector-icons';
 import { Stack } from 'expo-router';
 import React, { useEffect, useState } from 'react';
 import {
     Alert,
-    Platform,
     ScrollView,
     StyleSheet,
     Text,
@@ -14,102 +13,67 @@ import {
     View,
 } from 'react-native';
 
-const DEFAULT_API_URL = Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://localhost:8000';
-const BASE_URL = process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL;
-const PROFILE_KEY = 'workmithra:profile';
+const WORKER_PROFILE_KEY = 'workmithra:worker_profile';
 
-type ProfileForm = {
+type WorkerForm = {
   full_name: string;
+  age: string;
+  skill: string;
+  hourly_rate: string;
+  experience_years: string;
   phone: string;
   alternate_phone: string;
   location: string;
   pincode: string;
 };
 
-const EMPTY: ProfileForm = {
+const EMPTY: WorkerForm = {
   full_name: '',
+  age: '',
+  skill: '',
+  hourly_rate: '',
+  experience_years: '',
   phone: '',
   alternate_phone: '',
   location: '',
   pincode: '',
 };
 
-export default function ProfilePage() {
-  const [profile, setProfile] = useState<ProfileForm>(EMPTY);
+export default function WorkerProfilePage() {
+  const [profile, setProfile] = useState<WorkerForm>(EMPTY);
   const [exists, setExists] = useState(false);
   const [editMode, setEditMode] = useState(true);
   const [saving, setSaving] = useState(false);
 
-  useEffect(() => {
-    loadProfile();
-  }, []);
+  useEffect(() => { load(); }, []);
 
-  async function loadProfile() {
-    // Local cache first — survives reloads/logins
-    try {
-      const cached = await storage.get(PROFILE_KEY);
-      if (cached) {
-        const parsed = JSON.parse(cached) as ProfileForm;
+  async function load() {
+    const cached = await storage.get(WORKER_PROFILE_KEY);
+    if (cached) {
+      try {
+        const parsed = JSON.parse(cached);
         setProfile({ ...EMPTY, ...parsed });
         setExists(true);
         setEditMode(false);
-      }
-    } catch {}
-
-    // Then try backend (overrides cache if available)
-    try {
-      const res = await fetch(`${BASE_URL}/profiles/me`);
-      if (res.ok) {
-        const data = await res.json();
-        if (data && data.full_name) {
-          const next: ProfileForm = {
-            full_name: data.full_name || '',
-            phone: data.phone || '',
-            alternate_phone: data.alternate_phone || '',
-            location: data.location || data.address || '',
-            pincode: data.pincode || '',
-          };
-          setProfile(next);
-          setExists(true);
-          setEditMode(false);
-          await storage.set(PROFILE_KEY, JSON.stringify(next));
-        }
-      }
-    } catch {
-      // backend unreachable — keep cached version
+      } catch {}
     }
   }
 
-  function update<K extends keyof ProfileForm>(key: K, value: string) {
+  function update<K extends keyof WorkerForm>(key: K, value: string) {
     setProfile((p) => ({ ...p, [key]: value }));
   }
 
-  async function handleSave() {
+  async function save() {
     if (!profile.full_name.trim() || !profile.phone.trim()) {
-      Alert.alert('Missing info', 'Name and phone number are required.');
+      Alert.alert('Missing info', 'Name and phone are required.');
       return;
     }
     setSaving(true);
-    // Always persist locally first so it survives reloads
     try {
-      await storage.set(PROFILE_KEY, JSON.stringify(profile));
-    } catch {}
-
-    try {
-      const method = exists ? 'PUT' : 'POST';
-      const res = await fetch(`${BASE_URL}/profiles/me`, {
-        method,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(profile),
-      });
-      if (!res.ok) throw new Error('save failed');
+      await storage.set(WORKER_PROFILE_KEY, JSON.stringify(profile));
       setExists(true);
       setEditMode(false);
-      Alert.alert('Saved', 'Profile saved successfully.');
-    } catch {
-      setExists(true);
-      setEditMode(false);
-      Alert.alert('Saved', 'Profile saved on this device.');
+      Alert.alert('Saved', 'Profile saved.');
     } finally {
       setSaving(false);
     }
@@ -117,7 +81,7 @@ export default function ProfilePage() {
 
   const renderField = (
     label: string,
-    key: keyof ProfileForm,
+    key: keyof WorkerForm,
     placeholder?: string,
     keyboardType: 'default' | 'phone-pad' | 'numeric' = 'default',
   ) => (
@@ -140,7 +104,7 @@ export default function ProfilePage() {
 
   return (
     <View style={styles.screen}>
-      <Stack.Screen options={{ title: 'Profile', headerShown: false }} />
+      <Stack.Screen options={{ headerShown: false }} />
       <View style={styles.frame}>
         <View style={styles.header}>
           <Text style={styles.title}>My Profile</Text>
@@ -152,37 +116,32 @@ export default function ProfilePage() {
           )}
         </View>
 
-        {!exists && (
-          <Text style={styles.subtitle}>Create your profile</Text>
-        )}
+        {!exists && <Text style={styles.subtitle}>Create your worker profile</Text>}
 
         <ScrollView contentContainerStyle={styles.form} showsVerticalScrollIndicator={false}>
           {renderField('Name', 'full_name', 'Full name')}
+          {renderField('Age', 'age', 'Age', 'numeric')}
+          {renderField('Domain / Skill', 'skill', 'e.g. Plumber')}
+          {renderField('Wage (₹/hr)', 'hourly_rate', 'e.g. 500', 'numeric')}
+          {renderField('Experience (years)', 'experience_years', 'e.g. 5', 'numeric')}
           {renderField('Phone Number', 'phone', '+91 XXXXXXXXXX', 'phone-pad')}
-          {renderField('Alternative Phone Number', 'alternate_phone', 'Optional', 'phone-pad')}
+          {renderField('Alternative Number', 'alternate_phone', 'Optional', 'phone-pad')}
           {renderField('Location', 'location', 'City, Area')}
           {renderField('Pincode', 'pincode', '6-digit pincode', 'numeric')}
 
           {editMode && (
-            <TouchableOpacity
-              style={[styles.saveBtn, saving && { opacity: 0.6 }]}
-              onPress={handleSave}
-              disabled={saving}
-            >
-              <Text style={styles.saveBtnText}>
-                {saving ? 'Saving...' : exists ? 'Save Changes' : 'Create Profile'}
-              </Text>
+            <TouchableOpacity style={[styles.saveBtn, saving && { opacity: 0.6 }]} onPress={save} disabled={saving}>
+              <Text style={styles.saveBtnText}>{saving ? 'Saving...' : exists ? 'Save Changes' : 'Create Profile'}</Text>
             </TouchableOpacity>
           )}
-
           {editMode && exists && (
-            <TouchableOpacity style={styles.cancelBtn} onPress={() => { setEditMode(false); loadProfile(); }}>
+            <TouchableOpacity style={styles.cancelBtn} onPress={() => { setEditMode(false); load(); }}>
               <Text style={styles.cancelBtnText}>Cancel</Text>
             </TouchableOpacity>
           )}
         </ScrollView>
       </View>
-      <BottomNav currentRoute="profile" />
+      <WorkerBottomNav currentRoute="profile" />
     </View>
   );
 }
@@ -196,7 +155,7 @@ const styles = StyleSheet.create({
   editBtn: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#6F42C1', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 8, gap: 4 },
   editBtnText: { color: '#fff', fontSize: 12, fontWeight: '700' },
   form: { paddingBottom: 100 },
-  field: { marginBottom: 14 },
+  field: { marginBottom: 12 },
   label: { fontSize: 12, fontWeight: '700', color: '#333', marginBottom: 6 },
   input: { backgroundColor: '#f5f5f5', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 10, fontSize: 13, color: '#333' },
   readOnly: { fontSize: 14, color: '#333', paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: '#f0f0f0' },
