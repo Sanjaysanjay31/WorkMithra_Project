@@ -27,6 +27,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Include routers (keeps main.py small)
+from routers.workers import router as workers_router
+from routers.bookings import router as bookings_router
+from routers.profiles import router as profiles_router
+from routers.chat import router as chat_router
+
+app.include_router(workers_router, prefix="/workers", tags=["workers"])
+app.include_router(bookings_router, prefix="/bookings", tags=["bookings"])
+app.include_router(profiles_router, prefix="/profiles", tags=["profiles"])
+app.include_router(chat_router, prefix="/chat", tags=["chat"])
+
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")

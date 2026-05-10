@@ -26,8 +26,12 @@ export default function SwitchRoleScreen() {
       // Mocking role assignment API call
       setTimeout(() => {
         setLoading(false);
-        // Navigate to the main app (tabs)
-        router.replace('/(tabs)');
+        // Navigate to the HomePage for users, tabs for workers
+        if (role === 'user') {
+          router.replace('/homePage');
+        } else {
+          router.replace('/(tabs)');
+        }
       }, 1000);
     } catch (error) {
       setLoading(false);
