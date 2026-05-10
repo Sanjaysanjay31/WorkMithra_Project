@@ -86,7 +86,7 @@ def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
     # In a real app, you'd mark the email as verified in the DB or a cache
     
     db_user = db.query(models.User).filter(
-        or_(models.User.email == user.email, models.User.phone_number == user.phone_number)
+        or_(models.User.email == user.email, models.User.phone == user.phone)
     ).first()
     if db_user:
         raise HTTPException(status_code=400, detail="Email or Phone already registered")
@@ -94,7 +94,7 @@ def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
     hashed_password = pwd_context.hash(user.password)
     new_user = models.User(
         full_name=user.full_name,
-        phone_number=user.phone_number,
+        phone=user.phone,
         email=user.email,
         hashed_password=hashed_password
     )
@@ -106,7 +106,7 @@ def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
 @app.post("/login")
 def login(user: schemas.UserLogin, db: Session = Depends(get_db)):
     db_user = db.query(models.User).filter(
-        or_(models.User.email == user.identifier, models.User.phone_number == user.identifier)
+        or_(models.User.email == user.identifier, models.User.phone == user.identifier)
     ).first()
 
     if not db_user or not pwd_context.verify(user.password, db_user.hashed_password):
@@ -117,7 +117,7 @@ def login(user: schemas.UserLogin, db: Session = Depends(get_db)):
         "user": {
             "id": db_user.id,
             "full_name": db_user.full_name,
-            "email": db_user.email
+            "email": db_user.email,
         }
     }
 

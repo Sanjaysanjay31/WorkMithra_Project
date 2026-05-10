@@ -3,7 +3,7 @@ from typing import Optional
 
 class UserCreate(BaseModel):
     full_name: str
-    phone_number: str
+    phone: str
     email: EmailStr
     password: str
 
@@ -25,7 +25,7 @@ class UserResponse(BaseModel):
     id: int
     full_name: str
     email: EmailStr
-    phone_number: str
+    phone: str
 
     class Config:
         orm_mode = True
