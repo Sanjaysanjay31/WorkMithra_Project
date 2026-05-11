@@ -26,10 +26,24 @@ except Exception as _e:
 app = FastAPI()
 
 # Add CORS Middleware
+# NOTE: allow_origins=["*"] and allow_credentials=True cannot be combined —
+# browsers reject the preflight response. We either enumerate origins (with
+# credentials) or keep wildcard (without credentials). For a public API that
+# uses bearer tokens in the body / headers (not cookies), wildcard + no
+# credentials is the correct choice.
+ALLOWED_ORIGINS = [
+    "http://localhost:8081",      # Expo web dev server
+    "http://localhost:19006",     # Expo web alt port
+    "http://localhost:3000",      # any web frontend dev
+    "http://localhost:8000",
+    "http://127.0.0.1:8000"
+    # Add your production frontend URL here when deployed
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # In production, replace with specific origins
-    allow_credentials=True,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=False,   # set True only if you use httpOnly cookies
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -237,6 +251,16 @@ def login(user: schemas.UserLogin, db: Session = Depends(get_db)):
         }
     }
 
+
+
+import socketio
+from socket_events import sio
+
+# Wrap FastAPI app with Socket.IO ASGI application.
+# Re-assign `app` so that `uvicorn main:app --reload` serves Socket.IO too.
+_fastapi_app = app
+app = socketio.ASGIApp(sio, other_asgi_app=_fastapi_app)
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

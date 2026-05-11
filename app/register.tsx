@@ -1,6 +1,7 @@
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { storage } from '@/lib/storage';
+import { platformNoShadow, platformShadow } from '@/lib/shadow';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { Stack, useRouter } from 'expo-router';
 import React, { useState } from 'react';
@@ -520,15 +521,11 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     gap: 8,
     marginTop: 24,
-    elevation: 4,
-    shadowColor: '#FF6B6B',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
+    ...platformShadow('0px 4px 16px rgba(255,107,107,0.3)', '#FF6B6B', 0, 4, 0.3, 8, 4),
   },
   disabledButton: {
     backgroundColor: '#adb5bd',
-    shadowOpacity: 0,
+    ...platformNoShadow,
   },
   registerButtonText: {
     color: 'white',

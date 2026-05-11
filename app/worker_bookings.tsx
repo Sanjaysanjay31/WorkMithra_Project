@@ -1,5 +1,6 @@
 import WorkerBottomNav from '@/components/worker-bottom-nav';
 import { addNotification } from '@/lib/notifications';
+import { platformShadow } from '@/lib/shadow';
 import { Ionicons } from '@expo/vector-icons';
 import { Stack, useRouter } from 'expo-router';
 import React, { useState } from 'react';
@@ -135,7 +136,7 @@ const styles = StyleSheet.create({
   tabText: { fontSize: 12, fontWeight: '700', color: '#666' },
   tabTextActive: { color: '#fff' },
 
-  card: { flexDirection: 'row', backgroundColor: '#fff', borderRadius: 12, padding: 10, marginBottom: 10, borderWidth: 1, borderColor: '#eee', elevation: 1, shadowColor: '#000', shadowOffset: { width: 0, height: 1 }, shadowOpacity: 0.06, shadowRadius: 2 },
+  card: { flexDirection: 'row', backgroundColor: '#fff', borderRadius: 12, padding: 10, marginBottom: 10, borderWidth: 1, borderColor: '#eee', ...platformShadow('0px 1px 4px rgba(0,0,0,0.06)', '#000', 0, 1, 0.06, 2, 1) },
   leftCol: { width: 64, alignItems: 'center', justifyContent: 'flex-start' },
   avatar: { width: 60, height: 60, borderRadius: 30, backgroundColor: '#e9ecef' },
   rightCol: { flex: 1, paddingLeft: 10 },

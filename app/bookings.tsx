@@ -1,4 +1,5 @@
 import BottomNav from '@/components/bottom-nav';
+import { platformShadow } from '@/lib/shadow';
 import { Stack, useRouter } from 'expo-router';
 import React, { useEffect, useMemo, useState } from 'react';
 import {
@@ -207,11 +208,7 @@ const styles = StyleSheet.create({
     marginBottom: 10,
     borderWidth: 1,
     borderColor: '#eee',
-    elevation: 1,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.06,
-    shadowRadius: 2,
+    ...platformShadow('0px 1px 4px rgba(0,0,0,0.06)', '#000', 0, 1, 0.06, 2, 1),
   },
   leftCol: { width: '30%', alignItems: 'center', justifyContent: 'center' },
   avatar: { width: 70, height: 70, borderRadius: 35, backgroundColor: '#e9ecef' },

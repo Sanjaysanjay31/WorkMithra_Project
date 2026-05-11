@@ -1,20 +1,21 @@
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
+import { platformNoShadow, platformShadow } from '@/lib/shadow';
 import { storage } from '@/lib/storage';
 import { Ionicons } from '@expo/vector-icons';
 import { Stack, useRouter } from 'expo-router';
 import React, { useState } from 'react';
 import {
-    ActivityIndicator,
-    Alert,
-    KeyboardAvoidingView,
-    Platform,
-    ScrollView,
-    StyleSheet,
-    Text,
-    TextInput,
-    TouchableOpacity,
-    View,
+  ActivityIndicator,
+  Alert,
+  KeyboardAvoidingView,
+  Platform,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
 } from 'react-native';
 
 // Use 10.0.2.2 for Android emulator to reach localhost on host machine
@@ -55,7 +56,7 @@ export default function LoginScreen() {
           return;
         }
       }
-    } catch {}
+    } catch { }
     try {
       console.log(`Connecting to: ${BASE_URL}/login`);
       const response = await fetch(`${BASE_URL}/login`, {
@@ -65,7 +66,7 @@ export default function LoginScreen() {
       });
 
       let data: any = {};
-      try { data = await response.json(); } catch {}
+      try { data = await response.json(); } catch { }
 
       if (response.ok) {
         setLoading(false);
@@ -148,8 +149,8 @@ export default function LoginScreen() {
                 <Text style={styles.forgotPasswordText}>Forgot Password?</Text>
               </TouchableOpacity>
 
-              <TouchableOpacity 
-                style={[styles.loginButton, loading && styles.disabledButton]} 
+              <TouchableOpacity
+                style={[styles.loginButton, loading && styles.disabledButton]}
                 onPress={handleLogin}
                 disabled={loading}
               >
@@ -267,15 +268,11 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     gap: 8,
-    elevation: 4,
-    shadowColor: '#6F42C1',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
+    ...platformShadow('0px 4px 16px rgba(111,66,193,0.3)', '#6F42C1', 0, 4, 0.3, 8, 4),
   },
   disabledButton: {
     backgroundColor: '#adb5bd',
-    shadowOpacity: 0,
+    ...platformNoShadow,
   },
   loginButtonText: {
     color: 'white',

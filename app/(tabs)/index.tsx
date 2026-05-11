@@ -1,5 +1,6 @@
 import React, { useEffect, useRef } from 'react';
 import { StyleSheet, View, Dimensions, Image, Animated, Easing, TouchableOpacity, Text } from 'react-native';
+import { platformShadow } from '@/lib/shadow';
 import { ThemedText } from '@/components/themed-text';
 import { useRouter } from 'expo-router';
 
@@ -94,11 +95,7 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(255, 255, 255, 0.8)',
     padding: 20,
     borderRadius: 25,
-    elevation: 10,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 5,
+    ...platformShadow('0px 4px 10px rgba(0,0,0,0.3)', '#000', 0, 4, 0.3, 5, 10),
   },
   appTitle: {
     color: '#6f42c1',
@@ -128,11 +125,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     alignSelf: 'center',
     width: '80%',
-    elevation: 3,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.2,
-    shadowRadius: 2,
+    ...platformShadow('0px 2px 4px rgba(0,0,0,0.2)', '#000', 0, 2, 0.2, 2, 3),
   },
   buttonText: {
     color: 'white',

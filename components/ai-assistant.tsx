@@ -17,6 +17,7 @@ import {
 } from 'react-native';
 import { aiChat, aiDetectLang, aiExtract, aiTranslate, ALL_LANGS, LANGS, LangCode, pauseAudio, resumeAudio, setMuted, speakLong, stopAudio, webSTT } from '@/lib/ai';
 import { assistantBus } from '@/lib/assistant-bus';
+import { platformShadow } from '@/lib/shadow';
 import { storage } from '@/lib/storage';
 
 type Msg = { who: 'ai' | 'me'; text: string };
@@ -686,7 +687,7 @@ export function AIAssistant() {
   }
 
   return (
-    <View style={styles.container} pointerEvents="box-none">
+    <View style={styles.container}>
       {!hideFab && (
         <Animated.View
           style={[styles.fabDraggable, { transform: fabPos.getTranslateTransform() }]}
@@ -843,17 +844,18 @@ export function AIAssistant() {
 }
 
 const styles = StyleSheet.create({
-  container: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 1000 },
+  // pointerEvents in style (not prop) is the new API for react-native-web
+  container: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 1000, pointerEvents: 'box-none' as any },
   fab: {
     backgroundColor: '#6f42c1', width: 46, height: 46, borderRadius: 23,
-    justifyContent: 'center', alignItems: 'center', elevation: 5,
-    shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.25, shadowRadius: 3.84,
+    justifyContent: 'center', alignItems: 'center',
+    ...platformShadow('0px 2px 8px rgba(0,0,0,0.25)', '#000', 0, 2, 0.25, 3.84, 5),
   },
   fabDraggable: { position: 'absolute', top: 0, left: 0, zIndex: 1000 },
   fabInner: {
     backgroundColor: '#6f42c1', width: 52, height: 52, borderRadius: 26,
-    justifyContent: 'center', alignItems: 'center', elevation: 6,
-    shadowColor: '#6f42c1', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.35, shadowRadius: 6,
+    justifyContent: 'center', alignItems: 'center',
+    ...platformShadow('0px 4px 12px rgba(111,66,193,0.35)', '#6f42c1', 0, 4, 0.35, 6, 6),
   },
   overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' },
   sheet: { width: '100%', maxWidth: 360, alignSelf: 'center', height: '85%', backgroundColor: '#fff', borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: 12 },

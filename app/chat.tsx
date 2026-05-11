@@ -12,6 +12,7 @@ import {
     View,
 } from 'react-native';
 import { aiDetectLang, aiTranslate, LangCode, LANGS, speak as speakTTS, webSTT } from '@/lib/ai';
+import { platformShadow } from '@/lib/shadow';
 
 type Side = 'client' | 'worker';
 
@@ -240,7 +241,7 @@ const styles = StyleSheet.create({
   rowR: { justifyContent: 'flex-end' },
   rowL: { justifyContent: 'flex-start' },
   avatar: { width: 24, height: 24, borderRadius: 12, backgroundColor: '#6F42C1', justifyContent: 'center', alignItems: 'center', marginRight: 6 },
-  bubble: { maxWidth: '78%', borderRadius: 14, paddingHorizontal: 12, paddingVertical: 8, paddingRight: 30, position: 'relative', elevation: 1, shadowColor: '#000', shadowOffset: { width: 0, height: 1 }, shadowOpacity: 0.08, shadowRadius: 1.5 },
+  bubble: { maxWidth: '78%', borderRadius: 14, paddingHorizontal: 12, paddingVertical: 8, paddingRight: 30, position: 'relative', ...platformShadow('0px 1px 3px rgba(0,0,0,0.08)', '#000', 0, 1, 0.08, 1.5, 1) },
   // Sender (me): WhatsApp-green
   bMine: { backgroundColor: '#dcf8c6', borderBottomRightRadius: 2 },
   // Receiver (worker): soft lavender to contrast with the sender's green

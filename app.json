@@ -48,7 +48,8 @@
       "router": {},
       "eas": {
         "projectId": "0bbd76ca-52d8-409f-ae0e-05bc38b227ee"
-      }
+      },
+      "EXPO_PUBLIC_BASE_URL": "http://10.0.2.2:8000"
     },
     "owner": "sanjaysanjay31"
   }

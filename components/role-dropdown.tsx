@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { StyleSheet, TouchableOpacity, View, Text, Animated } from 'react-native';
+import { platformShadow } from '@/lib/shadow';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 
@@ -89,11 +90,7 @@ const styles = StyleSheet.create({
     paddingVertical: 15,
     paddingHorizontal: 25,
     borderRadius: 30,
-    elevation: 3,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.2,
-    shadowRadius: 2,
+    ...platformShadow('0px 2px 4px rgba(0,0,0,0.2)', '#000', 0, 2, 0.2, 2, 3),
   },
   mainButtonExpanded: {
     backgroundColor: '#ca202b',
@@ -110,11 +107,7 @@ const styles = StyleSheet.create({
     borderBottomLeftRadius: 20,
     borderBottomRightRadius: 20,
     overflow: 'hidden',
-    elevation: 5,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 4,
+    ...platformShadow('0px 4px 8px rgba(0,0,0,0.3)', '#000', 0, 4, 0.3, 4, 5),
   },
   option: {
     flexDirection: 'row',

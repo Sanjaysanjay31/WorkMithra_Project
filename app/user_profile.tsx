@@ -1,5 +1,6 @@
 import WorkerBottomNav from '@/components/worker-bottom-nav';
 import { storage } from '@/lib/storage';
+import { platformShadow } from '@/lib/shadow';
 import { Ionicons } from '@expo/vector-icons';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useEffect, useMemo, useState } from 'react';
@@ -392,7 +393,7 @@ const styles = StyleSheet.create({
   openMapsBtn: { flexDirection: 'row', backgroundColor: '#6F42C1', paddingVertical: 11, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
   openMapsBtnText: { color: '#fff', fontWeight: '800', fontSize: 13 },
 
-  reqCard: { backgroundColor: '#fff', borderRadius: 12, padding: 12, marginBottom: 10, borderWidth: 1, borderColor: '#eee', elevation: 1, shadowColor: '#000', shadowOffset: { width: 0, height: 1 }, shadowOpacity: 0.06, shadowRadius: 2 },
+  reqCard: { backgroundColor: '#fff', borderRadius: 12, padding: 12, marginBottom: 10, borderWidth: 1, borderColor: '#eee', ...platformShadow('0px 1px 4px rgba(0,0,0,0.06)', '#000', 0, 1, 0.06, 2, 1) },
   reqHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 },
   reqService: { fontSize: 13, fontWeight: '800', color: '#333', flex: 1, marginRight: 8 },
   statusPill: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 10 },

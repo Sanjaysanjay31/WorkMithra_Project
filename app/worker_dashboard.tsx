@@ -1,6 +1,7 @@
 import WorkerBottomNav from '@/components/worker-bottom-nav';
 import { unreadCount } from '@/lib/notifications';
 import { storage } from '@/lib/storage';
+import { platformShadow } from '@/lib/shadow';
 import { Ionicons } from '@expo/vector-icons';
 import { Stack, useRouter } from 'expo-router';
 import React, { useEffect, useState } from 'react';
@@ -316,7 +317,7 @@ const styles = StyleSheet.create({
   detailLabel: { fontSize: 12, fontWeight: '700', color: '#666', width: 110 },
   detailValue: { fontSize: 12, color: '#333', flex: 1, textAlign: 'right' },
 
-  pastCard: { backgroundColor: '#fff', borderRadius: 14, marginBottom: 14, overflow: 'hidden', borderWidth: 1, borderColor: '#eee', elevation: 1, shadowColor: '#000', shadowOffset: { width: 0, height: 1 }, shadowOpacity: 0.07, shadowRadius: 2 },
+  pastCard: { backgroundColor: '#fff', borderRadius: 14, marginBottom: 14, overflow: 'hidden', borderWidth: 1, borderColor: '#eee', ...platformShadow('0px 1px 4px rgba(0,0,0,0.07)', '#000', 0, 1, 0.07, 2, 1) },
   workPhoto: { width: '100%', height: 140, backgroundColor: '#e9ecef' },
   workBody: { padding: 12 },
   workHeaderRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
