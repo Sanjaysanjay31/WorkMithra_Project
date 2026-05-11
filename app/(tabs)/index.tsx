@@ -1,6 +1,5 @@
 import React, { useEffect, useRef } from 'react';
 import { StyleSheet, View, Dimensions, Image, Animated, Easing, TouchableOpacity, Text } from 'react-native';
-import { AIAssistant } from '@/components/ai-assistant';
 import { ThemedText } from '@/components/themed-text';
 import { useRouter } from 'expo-router';
 
@@ -33,7 +32,6 @@ export default function LandingScreen() {
   return (
     <View style={styles.container}>
       {/* AI Assistant Icon - Top Right */}
-      <AIAssistant />
 
       {/* Hero Image Container - 4/5 Height */}
       <View style={styles.imageContainer}>

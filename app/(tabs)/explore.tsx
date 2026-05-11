@@ -8,7 +8,6 @@ import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { IconSymbol } from '@/components/ui/icon-symbol';
 import { Fonts } from '@/constants/theme';
-import { AIAssistant } from '@/components/ai-assistant';
 
 export default function TabTwoScreen() {
   return (
@@ -22,7 +21,6 @@ export default function TabTwoScreen() {
           style={styles.headerImage}
         />
       }>
-      <AIAssistant />
       <ThemedView style={styles.titleContainer}>
         <ThemedText
           type="title"

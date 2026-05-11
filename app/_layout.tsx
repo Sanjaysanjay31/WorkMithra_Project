@@ -1,3 +1,4 @@
+import { AIAssistant } from '@/components/ai-assistant';
 import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native';
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
@@ -49,10 +50,16 @@ export default function RootLayout() {
     <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
       {Platform.OS === 'web' ? (
         <View style={styles.webBackdrop}>
-          <View style={styles.webFrame}>{stack}</View>
+          <View style={styles.webFrame}>
+            {stack}
+            <AIAssistant />
+          </View>
         </View>
       ) : (
-        <View style={styles.nativeFrame}>{stack}</View>
+        <View style={styles.nativeFrame}>
+          {stack}
+          <AIAssistant />
+        </View>
       )}
       <StatusBar style="auto" />
     </ThemeProvider>

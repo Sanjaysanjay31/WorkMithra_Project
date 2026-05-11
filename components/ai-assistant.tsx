@@ -3,8 +3,11 @@ import { usePathname } from 'expo-router';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
     ActivityIndicator,
+    Animated,
+    Dimensions,
     FlatList,
     Modal,
+    PanResponder,
     Platform,
     StyleSheet,
     Text,
@@ -204,6 +207,58 @@ export function AIAssistant() {
 
   const listRef = useRef<FlatList<Msg>>(null);
   const greetTimerRef = useRef<any>(null);
+
+  // --- Draggable FAB ---
+  const FAB_SIZE = 52;
+  const FAB_PAD = 14;
+  const frameW = Math.min(Dimensions.get('window').width, 360);
+  const frameH = Math.min(Dimensions.get('window').height, 803);
+  const initX = frameW - FAB_SIZE - FAB_PAD;
+  const initY = frameH - FAB_SIZE - 86; // above bottom nav
+
+  const panRef = useRef(new Animated.ValueXY({ x: initX, y: initY })).current;
+  const dragDistRef = useRef(0);
+
+  const panResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: (_, g) => Math.abs(g.dx) > 3 || Math.abs(g.dy) > 3,
+      onPanResponderGrant: () => {
+        dragDistRef.current = 0;
+        const x = (panRef.x as any)._value || 0;
+        const y = (panRef.y as any)._value || 0;
+        panRef.setOffset({ x, y });
+        panRef.setValue({ x: 0, y: 0 });
+      },
+      onPanResponderMove: (_, g) => {
+        dragDistRef.current = Math.max(dragDistRef.current, Math.hypot(g.dx, g.dy));
+        panRef.setValue({ x: g.dx, y: g.dy });
+      },
+      onPanResponderRelease: () => {
+        panRef.flattenOffset();
+        let x = (panRef.x as any)._value;
+        let y = (panRef.y as any)._value;
+        x = Math.max(0, Math.min(x, frameW - FAB_SIZE));
+        y = Math.max(0, Math.min(y, frameH - FAB_SIZE));
+        panRef.setValue({ x, y });
+        storage.set('workmithra:assistant_pos', JSON.stringify({ x, y })).catch(() => {});
+      },
+    }),
+  ).current;
+
+  // Load saved position once
+  useEffect(() => {
+    (async () => {
+      try {
+        const raw = await storage.get('workmithra:assistant_pos');
+        if (raw) {
+          const p = JSON.parse(raw);
+          if (typeof p?.x === 'number' && typeof p?.y === 'number') panRef.setValue(p);
+        }
+      } catch {}
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Translated suggestion labels for the current language
   const [translatedSuggestions, setTranslatedSuggestions] = useState<string[]>(ctx.suggestions);
@@ -603,10 +658,19 @@ export function AIAssistant() {
   }
 
   return (
-    <View style={styles.container} pointerEvents="box-none">
-      <TouchableOpacity style={styles.fab} onPress={openModal} activeOpacity={0.8}>
-        <Ionicons name="sparkles" size={22} color="white" />
-      </TouchableOpacity>
+    <View style={StyleSheet.absoluteFill} pointerEvents="box-none">
+      <Animated.View
+        style={[styles.fabWrap, { transform: panRef.getTranslateTransform() }]}
+        {...panResponder.panHandlers}
+      >
+        <TouchableOpacity
+          style={styles.fab}
+          activeOpacity={0.8}
+          onPress={() => { if (dragDistRef.current < 5) openModal(); }}
+        >
+          <Ionicons name="sparkles" size={22} color="white" />
+        </TouchableOpacity>
+      </Animated.View>
 
       <Modal animationType="slide" transparent visible={visible} onRequestClose={closeModal}>
         <View style={styles.overlay}>
@@ -748,11 +812,11 @@ export function AIAssistant() {
 }
 
 const styles = StyleSheet.create({
-  container: { position: 'absolute', top: 50, right: 20, zIndex: 1000 },
+  fabWrap: { position: 'absolute', zIndex: 1000 },
   fab: {
-    backgroundColor: '#6f42c1', width: 46, height: 46, borderRadius: 23,
-    justifyContent: 'center', alignItems: 'center', elevation: 5,
-    shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.25, shadowRadius: 3.84,
+    backgroundColor: '#6f42c1', width: 52, height: 52, borderRadius: 26,
+    justifyContent: 'center', alignItems: 'center', elevation: 6,
+    shadowColor: '#6f42c1', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.35, shadowRadius: 6,
   },
   overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' },
   sheet: { width: '100%', maxWidth: 360, alignSelf: 'center', height: '85%', backgroundColor: '#fff', borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: 12 },

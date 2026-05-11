@@ -1,4 +1,3 @@
-import { AIAssistant } from '@/components/ai-assistant';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { storage } from '@/lib/storage';
@@ -91,7 +90,6 @@ export default function LoginScreen() {
   return (
     <ThemedView style={styles.container}>
       <Stack.Screen options={{ title: 'Login', headerShown: false }} />
-      <AIAssistant />
       <KeyboardAvoidingView
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         style={{ flex: 1 }}

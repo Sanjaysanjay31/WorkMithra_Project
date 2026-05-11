@@ -231,6 +231,82 @@ function splitForTTS(text: string, maxLen: number): string[] {
 }
 
 /**
+ * Caller-controlled STT: starts the mic and returns a controller. The caller
+ * decides when to stop (e.g. when the user taps the mic again). Continuous
+ * mode so pauses don't end it. Captures the running transcript until stop().
+ */
+export function webSTTControlled(
+  lang: LangCode = 'en-IN',
+  opts: { silenceMs?: number } = {},
+): { stop: () => void; result: Promise<string> } {
+  const silenceMs = opts.silenceMs ?? 0; // 0 = no silence auto-stop
+  let settled = false;
+  let bestTranscript = '';
+  let silenceTimer: any = null;
+  let recog: any;
+  let resolveFn!: (v: string) => void;
+  let rejectFn!: (e: any) => void;
+  const result = new Promise<string>((res, rej) => { resolveFn = res; rejectFn = rej; });
+
+  if (Platform.OS !== 'web') {
+    rejectFn(new Error('web only'));
+    return { stop: () => {}, result };
+  }
+  const SR: any = (globalThis as any).SpeechRecognition || (globalThis as any).webkitSpeechRecognition;
+  if (!SR) {
+    rejectFn(new Error('Speech recognition not supported in this browser'));
+    return { stop: () => {}, result };
+  }
+
+  recog = new SR();
+  recog.lang = lang === 'auto' ? 'en-IN' : lang;
+  recog.interimResults = true;
+  recog.continuous = true;
+  recog.maxAlternatives = 1;
+
+  const armSilenceTimer = () => {
+    if (!silenceMs) return;
+    if (silenceTimer) clearTimeout(silenceTimer);
+    silenceTimer = setTimeout(() => { try { recog.stop(); } catch {} }, silenceMs);
+  };
+
+  recog.onresult = (e: any) => {
+    try {
+      let txt = '';
+      for (let i = 0; i < e.results.length; i++) txt += e.results[i][0].transcript || '';
+      if (txt) bestTranscript = txt;
+      armSilenceTimer();  // any new speech resets the silence countdown
+    } catch {}
+  };
+  recog.onspeechstart = () => armSilenceTimer();
+  recog.onerror = (e: any) => {
+    if (silenceTimer) clearTimeout(silenceTimer);
+    if (settled) return;
+    settled = true;
+    rejectFn(e?.error || new Error('stt error'));
+  };
+  recog.onend = () => {
+    if (silenceTimer) clearTimeout(silenceTimer);
+    if (!settled) { settled = true; resolveFn(bestTranscript); }
+  };
+
+  try {
+    recog.start();
+    armSilenceTimer();
+  } catch (e) {
+    if (!settled) { settled = true; rejectFn(e); }
+  }
+
+  return {
+    stop: () => {
+      if (silenceTimer) clearTimeout(silenceTimer);
+      try { recog.stop(); } catch {}
+    },
+    result,
+  };
+}
+
+/**
  * Browser STT via Web Speech API. Hard-stops after `maxMs` so the mic never
  * stays on indefinitely (default 4s). Resolves with the transcript captured
  * up to that point (or '' if nothing).

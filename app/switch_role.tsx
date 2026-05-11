@@ -1,4 +1,3 @@
-import { AIAssistant } from '@/components/ai-assistant';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
@@ -42,7 +41,6 @@ export default function SwitchRoleScreen() {
   return (
     <ThemedView style={styles.container}>
       <Stack.Screen options={{ title: 'Select Role', headerShown: false }} />
-      <AIAssistant />
       
       <View style={styles.content}>
         <View style={styles.header}>

@@ -1,8 +1,8 @@
 import BottomNav from '@/components/bottom-nav';
-import { aiExtract, webSTT } from '@/lib/ai';
+import { aiExtract, webSTTControlled } from '@/lib/ai';
 import { Ionicons } from '@expo/vector-icons';
 import { Stack, useRouter } from 'expo-router';
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
     ActivityIndicator,
     Alert,
@@ -10,6 +10,7 @@ import {
     Image,
     Modal,
     Platform,
+    ScrollView,
     StyleSheet,
     Text,
     TextInput,
@@ -20,7 +21,8 @@ import {
 const DEFAULT_API_URL = Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://localhost:8000';
 const BASE_URL = process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL;
 
-type SortKey = 'wage_asc' | 'wage_desc' | 'experience' | 'rating' | 'location';
+type SortKey = 'wage_asc' | 'wage_desc' | 'experience' | 'rating' | 'location' | 'jobs';
+type AvailNow = 'now' | 'today' | null;
 
 export default function HomePage() {
   const router = useRouter();
@@ -36,6 +38,9 @@ export default function HomePage() {
   const [maxDistance, setMaxDistance] = useState('');
   const [minExperience, setMinExperience] = useState('');
   const [minRating, setMinRating] = useState('');
+  const [minJobs, setMinJobs] = useState('');
+  const [availability, setAvailability] = useState<AvailNow>(null);
+  const [verifiedOnly, setVerifiedOnly] = useState(false);
   const [sortBy, setSortBy] = useState<SortKey | null>(null);
 
   useEffect(() => {
@@ -71,6 +76,14 @@ export default function HomePage() {
     if (!isNaN(minR)) list = list.filter((w: any) => Number(w.rating ?? 0) >= minR);
     const maxD = parseFloat(maxDistance);
     if (!isNaN(maxD)) list = list.filter((w: any) => (w.distance_km == null) || Number(w.distance_km) <= maxD);
+    const minJ = parseInt(minJobs, 10);
+    if (!isNaN(minJ)) list = list.filter((w: any) => Number(w.completed_jobs ?? w.total_jobs ?? 0) >= minJ);
+    if (verifiedOnly) list = list.filter((w: any) => Boolean(w.aadhaar_verified));
+    if (availability === 'now') {
+      list = list.filter((w: any) => w.availability === true || (w.current_status || '').toLowerCase() === 'available');
+    } else if (availability === 'today') {
+      list = list.filter((w: any) => (w.current_status || '').toLowerCase() !== 'offline');
+    }
 
     switch (sortBy) {
       case 'wage_asc':
@@ -88,9 +101,12 @@ export default function HomePage() {
       case 'location':
         list.sort((a, b) => Number(a.distance_km ?? 9999) - Number(b.distance_km ?? 9999));
         break;
+      case 'jobs':
+        list.sort((a, b) => Number(b.completed_jobs ?? b.total_jobs ?? 0) - Number(a.completed_jobs ?? a.total_jobs ?? 0));
+        break;
     }
     return list;
-  }, [workers, searchQuery, minWage, maxWage, maxDistance, minExperience, minRating, sortBy]);
+  }, [workers, searchQuery, minWage, maxWage, maxDistance, minExperience, minRating, minJobs, verifiedOnly, availability, sortBy]);
 
   function onPressWorker(w: any) {
     router.push({ pathname: '/worker_info', params: { id: String(w.id) } });
@@ -119,21 +135,31 @@ export default function HomePage() {
     }
   }
 
+  const sttRef = useRef<{ stop: () => void; result: Promise<string> } | null>(null);
+
   async function startVoiceSearch() {
     if (Platform.OS !== 'web') {
       Alert.alert('Voice search', 'Voice input works in the web browser. Native voice support coming soon.');
       return;
     }
+    // Toggle: if already listening, stop and process.
+    if (sttRef.current) {
+      sttRef.current.stop();
+      return;
+    }
     try {
+      const ctrl = webSTTControlled('en-IN', { silenceMs: 4000 });
+      sttRef.current = ctrl;
       setListening(true);
-      const raw = await webSTT('en-IN', 4000);
+      const raw = await ctrl.result;
+      sttRef.current = null;
       setListening(false);
       if (!raw) return;
       const cleaned = cleanQuery(raw);
       setSearchQuery(cleaned);
-      // Then refine asynchronously via AI to map sentences → domain keyword
       refineQueryWithAI(raw);
     } catch (e: any) {
+      sttRef.current = null;
       setListening(false);
       Alert.alert('Voice search', e?.message || 'Could not capture voice');
     }
@@ -145,6 +171,9 @@ export default function HomePage() {
     setMaxDistance('');
     setMinExperience('');
     setMinRating('');
+    setMinJobs('');
+    setAvailability(null);
+    setVerifiedOnly(false);
     setSortBy(null);
   }
 
@@ -186,10 +215,17 @@ export default function HomePage() {
             <Ionicons name="search" size={16} color="#999" style={styles.searchIcon} />
             <TextInput
               style={styles.searchInput}
-              placeholder="Search by domain (Plumber, Electrician...)"
+              placeholder="Say or type what you need — AI will find it"
               placeholderTextColor="#999"
               value={searchQuery}
               onChangeText={setSearchQuery}
+              onSubmitEditing={() => {
+                const raw = searchQuery;
+                if (!raw.trim()) return;
+                setSearchQuery(cleanQuery(raw));
+                refineQueryWithAI(raw);
+              }}
+              returnKeyType="search"
             />
             <TouchableOpacity onPress={startVoiceSearch} style={styles.micBtn}>
               <Ionicons
@@ -201,9 +237,6 @@ export default function HomePage() {
           </View>
           <TouchableOpacity style={styles.filterBtn} onPress={() => setFilterVisible(true)}>
             <Ionicons name="options" size={18} color="white" />
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.aiBtn} onPress={() => router.push('/ai-assistant')}>
-            <Ionicons name="sparkles" size={18} color="white" />
           </TouchableOpacity>
         </View>
 
@@ -237,66 +270,102 @@ export default function HomePage() {
               </TouchableOpacity>
             </View>
 
-            <Text style={styles.fieldLabel}>Wage range (₹/hour)</Text>
-            <View style={styles.row}>
-              <TextInput
-                style={[styles.input, { flex: 1, marginRight: 8 }]}
-                placeholder="Min"
-                placeholderTextColor="#999"
-                keyboardType="numeric"
-                value={minWage}
-                onChangeText={setMinWage}
-              />
-              <TextInput
-                style={[styles.input, { flex: 1 }]}
-                placeholder="Max"
-                placeholderTextColor="#999"
-                keyboardType="numeric"
-                value={maxWage}
-                onChangeText={setMaxWage}
-              />
-            </View>
+            <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 12 }} showsVerticalScrollIndicator={false}>
+              <Text style={styles.fieldLabel}>Availability</Text>
+              <View style={styles.chipsWrap}>
+                <TouchableOpacity style={[styles.chip, availability === 'now' && styles.chipActive]} onPress={() => setAvailability(availability === 'now' ? null : 'now')}>
+                  <Text style={[styles.chipText, availability === 'now' && styles.chipTextActive]}>Available now</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={[styles.chip, availability === 'today' && styles.chipActive]} onPress={() => setAvailability(availability === 'today' ? null : 'today')}>
+                  <Text style={[styles.chipText, availability === 'today' && styles.chipTextActive]}>Today</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={[styles.chip, verifiedOnly && styles.chipActive]} onPress={() => setVerifiedOnly((v) => !v)}>
+                  <Text style={[styles.chipText, verifiedOnly && styles.chipTextActive]}>✓ Verified only</Text>
+                </TouchableOpacity>
+              </View>
 
-            <Text style={styles.fieldLabel}>Nearby distance (km)</Text>
-            <TextInput
-              style={styles.input}
-              placeholder="Max distance"
-              placeholderTextColor="#999"
-              keyboardType="numeric"
-              value={maxDistance}
-              onChangeText={setMaxDistance}
-            />
+              <Text style={styles.fieldLabel}>Wage range (₹/hour)</Text>
+              <View style={styles.row}>
+                <TextInput
+                  style={[styles.input, { flex: 1, marginRight: 8 }]}
+                  placeholder="Min"
+                  placeholderTextColor="#999"
+                  keyboardType="numeric"
+                  value={minWage}
+                  onChangeText={setMinWage}
+                />
+                <TextInput
+                  style={[styles.input, { flex: 1 }]}
+                  placeholder="Max"
+                  placeholderTextColor="#999"
+                  keyboardType="numeric"
+                  value={maxWage}
+                  onChangeText={setMaxWage}
+                />
+              </View>
 
-            <Text style={styles.fieldLabel}>Minimum experience (years)</Text>
-            <TextInput
-              style={styles.input}
-              placeholder="e.g. 2"
-              placeholderTextColor="#999"
-              keyboardType="numeric"
-              value={minExperience}
-              onChangeText={setMinExperience}
-            />
+              <View style={styles.row}>
+                <View style={{ flex: 1, marginRight: 8 }}>
+                  <Text style={styles.fieldLabel}>Distance (km)</Text>
+                  <TextInput
+                    style={styles.input}
+                    placeholder="e.g. 5"
+                    placeholderTextColor="#999"
+                    keyboardType="numeric"
+                    value={maxDistance}
+                    onChangeText={setMaxDistance}
+                  />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.fieldLabel}>Min experience (yrs)</Text>
+                  <TextInput
+                    style={styles.input}
+                    placeholder="e.g. 2"
+                    placeholderTextColor="#999"
+                    keyboardType="numeric"
+                    value={minExperience}
+                    onChangeText={setMinExperience}
+                  />
+                </View>
+              </View>
 
-            <Text style={styles.fieldLabel}>Minimum rating</Text>
-            <TextInput
-              style={styles.input}
-              placeholder="e.g. 4.0"
-              placeholderTextColor="#999"
-              keyboardType="numeric"
-              value={minRating}
-              onChangeText={setMinRating}
-            />
+              <View style={styles.row}>
+                <View style={{ flex: 1, marginRight: 8 }}>
+                  <Text style={styles.fieldLabel}>Min rating</Text>
+                  <TextInput
+                    style={styles.input}
+                    placeholder="e.g. 4.0"
+                    placeholderTextColor="#999"
+                    keyboardType="numeric"
+                    value={minRating}
+                    onChangeText={setMinRating}
+                  />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.fieldLabel}>Min completed jobs</Text>
+                  <TextInput
+                    style={styles.input}
+                    placeholder="e.g. 10"
+                    placeholderTextColor="#999"
+                    keyboardType="numeric"
+                    value={minJobs}
+                    onChangeText={setMinJobs}
+                  />
+                </View>
+              </View>
 
-            <Text style={styles.fieldLabel}>Sort by</Text>
-            <View style={styles.chipsWrap}>
-              <SortChip k="wage_asc" label="Wage ↑" />
-              <SortChip k="wage_desc" label="Wage ↓" />
-              <SortChip k="location" label="Nearest" />
-              <SortChip k="experience" label="Experience" />
-              <SortChip k="rating" label="Rating" />
-            </View>
+              <Text style={styles.fieldLabel}>Sort by</Text>
+              <View style={styles.chipsWrap}>
+                <SortChip k="rating" label="⭐ Rating" />
+                <SortChip k="location" label="📍 Nearest" />
+                <SortChip k="wage_asc" label="₹ Low → High" />
+                <SortChip k="wage_desc" label="₹ High → Low" />
+                <SortChip k="experience" label="🧰 Experience" />
+                <SortChip k="jobs" label="🔥 Most active" />
+              </View>
+            </ScrollView>
 
-            <View style={[styles.row, { marginTop: 16 }]}>
+            <View style={[styles.row, { marginTop: 12 }]}>
               <TouchableOpacity style={[styles.modalBtn, styles.clearBtn]} onPress={clearFilters}>
                 <Text style={styles.clearBtnText}>Clear</Text>
               </TouchableOpacity>
@@ -322,9 +391,8 @@ const styles = StyleSheet.create({
   searchInput: { flex: 1, fontSize: 13, color: '#333' },
   micBtn: { paddingHorizontal: 6, paddingVertical: 4, marginLeft: 4 },
   filterBtn: { width: 42, height: 42, borderRadius: 21, backgroundColor: '#6F42C1', justifyContent: 'center', alignItems: 'center' },
-  aiBtn: { width: 42, height: 42, borderRadius: 21, backgroundColor: '#10b981', justifyContent: 'center', alignItems: 'center' },
   logoSection: { alignItems: 'center', paddingVertical: 12 },
-  logo: { fontSize: 22, fontWeight: '800', color: '#e8d5f2' },
+  logo: { fontSize: 24, fontWeight: '900', color: '#6F42C1', letterSpacing: 0.5 },
   workersTitle: { fontSize: 15, fontWeight: '800', color: '#333', marginBottom: 12 },
   noResults: { fontSize: 13, color: '#999', textAlign: 'center', marginTop: 24 },
   list: { paddingBottom: 100 },
@@ -338,8 +406,8 @@ const styles = StyleSheet.create({
   workerWage: { fontSize: 11, color: '#10b981', fontWeight: '700' },
   moreBtn: { backgroundColor: '#6F42C1', paddingHorizontal: 11, paddingVertical: 5, borderRadius: 7 },
   moreBtnText: { color: '#fff', fontSize: 11, fontWeight: '700' },
-  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' },
-  modalCard: { backgroundColor: '#fff', borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: 20, paddingBottom: 30 },
+  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end', alignItems: 'center' },
+  modalCard: { width: '100%', maxWidth: 360, maxHeight: '85%', alignSelf: 'center', backgroundColor: '#fff', borderTopLeftRadius: 20, borderTopRightRadius: 20, paddingHorizontal: 16, paddingTop: 14, paddingBottom: 16 },
   modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 },
   modalTitle: { fontSize: 18, fontWeight: '800', color: '#333' },
   fieldLabel: { fontSize: 12, fontWeight: '700', color: '#333', marginTop: 12, marginBottom: 6 },

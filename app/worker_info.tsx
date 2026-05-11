@@ -1,4 +1,3 @@
-import { AIAssistant } from '@/components/ai-assistant';
 import BottomNav from '@/components/bottom-nav';
 import { Ionicons } from '@expo/vector-icons';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
@@ -57,7 +56,7 @@ export default function WorkerInfoPage() {
   };
 
   const handleBooking = () => {
-    router.push({ pathname: '/booking', params: { workerId: String(id) } });
+    router.push({ pathname: '/bookings', params: { workerId: String(id) } });
   };
 
   if (loading) {
@@ -243,7 +242,6 @@ export default function WorkerInfoPage() {
           )}
         </ScrollView>
       </View>
-      <AIAssistant />
       <BottomNav currentRoute="home" />
     </View>
   );
