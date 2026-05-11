@@ -1,5 +1,6 @@
 import BottomNav from '@/components/bottom-nav';
 import { aiExtract, webSTTControlled } from '@/lib/ai';
+import { unreadCount } from '@/lib/notifications';
 import { Ionicons } from '@expo/vector-icons';
 import { Stack, useRouter } from 'expo-router';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
@@ -30,6 +31,15 @@ export default function HomePage() {
   const [workers, setWorkers] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [listening, setListening] = useState(false);
+  const [unread, setUnread] = useState(0);
+
+  useEffect(() => {
+    let alive = true;
+    const tick = () => unreadCount('user', '1').then((n) => { if (alive) setUnread(n); }).catch(() => {});
+    tick();
+    const id = setInterval(tick, 4000);
+    return () => { alive = false; clearInterval(id); };
+  }, []);
 
   // Filter state
   const [filterVisible, setFilterVisible] = useState(false);
@@ -235,8 +245,20 @@ export default function HomePage() {
               />
             </TouchableOpacity>
           </View>
-          <TouchableOpacity style={styles.filterBtn} onPress={() => setFilterVisible(true)}>
-            <Ionicons name="options" size={18} color="white" />
+          <TouchableOpacity style={styles.filterBtn} onPress={() => setFilterVisible(true)} activeOpacity={0.85}>
+            <Ionicons name="options" size={18} color="#fff" />
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.bellBtn}
+            onPress={() => router.push({ pathname: '/notifications', params: { as: 'user', id: '1' } })}
+            activeOpacity={0.85}
+          >
+            <Ionicons name="notifications-outline" size={18} color="#fff" />
+            {unread > 0 && (
+              <View style={styles.bellBadge}>
+                <Text style={styles.bellBadgeText}>{unread > 9 ? '9+' : unread}</Text>
+              </View>
+            )}
           </TouchableOpacity>
         </View>
 
@@ -390,7 +412,10 @@ const styles = StyleSheet.create({
   searchIcon: { marginRight: 8 },
   searchInput: { flex: 1, fontSize: 13, color: '#333' },
   micBtn: { paddingHorizontal: 6, paddingVertical: 4, marginLeft: 4 },
-  filterBtn: { width: 42, height: 42, borderRadius: 21, backgroundColor: '#6F42C1', justifyContent: 'center', alignItems: 'center' },
+  filterBtn: { width: 38, height: 38, borderRadius: 19, backgroundColor: '#6F42C1', justifyContent: 'center', alignItems: 'center' },
+  bellBtn: { width: 38, height: 38, borderRadius: 19, backgroundColor: '#FF6B6B', justifyContent: 'center', alignItems: 'center' },
+  bellBadge: { position: 'absolute', top: -2, right: -2, minWidth: 16, height: 16, borderRadius: 8, backgroundColor: '#fff', borderWidth: 1, borderColor: '#FF6B6B', paddingHorizontal: 3, justifyContent: 'center', alignItems: 'center' },
+  bellBadgeText: { fontSize: 9, fontWeight: '800', color: '#FF6B6B' },
   logoSection: { alignItems: 'center', paddingVertical: 12 },
   logo: { fontSize: 24, fontWeight: '900', color: '#6F42C1', letterSpacing: 0.5 },
   workersTitle: { fontSize: 15, fontWeight: '800', color: '#333', marginBottom: 12 },

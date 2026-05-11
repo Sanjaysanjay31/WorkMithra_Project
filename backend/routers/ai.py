@@ -50,7 +50,15 @@ def translate(payload: Dict[str, Any] = Body(...)):
     try:
         return ai_svc.sarvam_translate(text, source_lang=src, target_lang=tgt)
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Translate failed: {e}")
+        # Graceful fallback: return original text + the error so the UI doesn't
+        # break, and we can still see what failed in the response.
+        print(f"[/ai/translate] failed: {e}")
+        return {
+            "translated_text": text,
+            "source_language_code": src,
+            "target_language_code": tgt,
+            "error": str(e),
+        }
 
 
 @router.post("/extract")

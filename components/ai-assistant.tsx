@@ -16,6 +16,7 @@ import {
     View,
 } from 'react-native';
 import { aiChat, aiDetectLang, aiExtract, aiTranslate, ALL_LANGS, LANGS, LangCode, pauseAudio, resumeAudio, setMuted, speakLong, stopAudio, webSTT } from '@/lib/ai';
+import { assistantBus } from '@/lib/assistant-bus';
 import { storage } from '@/lib/storage';
 
 type Msg = { who: 'ai' | 'me'; text: string };
@@ -208,58 +209,6 @@ export function AIAssistant() {
   const listRef = useRef<FlatList<Msg>>(null);
   const greetTimerRef = useRef<any>(null);
 
-  // --- Draggable FAB ---
-  const FAB_SIZE = 52;
-  const FAB_PAD = 14;
-  const frameW = Math.min(Dimensions.get('window').width, 360);
-  const frameH = Math.min(Dimensions.get('window').height, 803);
-  const initX = frameW - FAB_SIZE - FAB_PAD;
-  const initY = frameH - FAB_SIZE - 86; // above bottom nav
-
-  const panRef = useRef(new Animated.ValueXY({ x: initX, y: initY })).current;
-  const dragDistRef = useRef(0);
-
-  const panResponder = useRef(
-    PanResponder.create({
-      onStartShouldSetPanResponder: () => true,
-      onMoveShouldSetPanResponder: (_, g) => Math.abs(g.dx) > 3 || Math.abs(g.dy) > 3,
-      onPanResponderGrant: () => {
-        dragDistRef.current = 0;
-        const x = (panRef.x as any)._value || 0;
-        const y = (panRef.y as any)._value || 0;
-        panRef.setOffset({ x, y });
-        panRef.setValue({ x: 0, y: 0 });
-      },
-      onPanResponderMove: (_, g) => {
-        dragDistRef.current = Math.max(dragDistRef.current, Math.hypot(g.dx, g.dy));
-        panRef.setValue({ x: g.dx, y: g.dy });
-      },
-      onPanResponderRelease: () => {
-        panRef.flattenOffset();
-        let x = (panRef.x as any)._value;
-        let y = (panRef.y as any)._value;
-        x = Math.max(0, Math.min(x, frameW - FAB_SIZE));
-        y = Math.max(0, Math.min(y, frameH - FAB_SIZE));
-        panRef.setValue({ x, y });
-        storage.set('workmithra:assistant_pos', JSON.stringify({ x, y })).catch(() => {});
-      },
-    }),
-  ).current;
-
-  // Load saved position once
-  useEffect(() => {
-    (async () => {
-      try {
-        const raw = await storage.get('workmithra:assistant_pos');
-        if (raw) {
-          const p = JSON.parse(raw);
-          if (typeof p?.x === 'number' && typeof p?.y === 'number') panRef.setValue(p);
-        }
-      } catch {}
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
   // Translated suggestion labels for the current language
   const [translatedSuggestions, setTranslatedSuggestions] = useState<string[]>(ctx.suggestions);
   const [guideMeLabel, setGuideMeLabel] = useState<string>('Guide me');
@@ -397,6 +346,69 @@ export function AIAssistant() {
     setVisible(true);
   }
 
+  // Allow any screen to programmatically open the assistant via the event bus.
+  useEffect(() => {
+    const off = assistantBus.subscribe(() => openModal());
+    return () => { off(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // FAB is always visible — it's draggable so users can move it out of the way
+  // if it ever covers a button on a particular screen.
+  const hideFab = false;
+
+  // --- Draggable FAB ---
+  const FAB_SIZE = 52;
+  const frameW = Math.min(Dimensions.get('window').width, 360);
+  const frameH = Math.min(Dimensions.get('window').height, 803);
+  const fabPos = useRef(new Animated.ValueXY({ x: frameW - FAB_SIZE - 14, y: frameH - FAB_SIZE - 86 })).current;
+  const movedRef = useRef(false);
+
+  const fabPan = useRef(
+    PanResponder.create({
+      // Don't claim on touch-start so the TouchableOpacity gets the tap.
+      onStartShouldSetPanResponder: () => false,
+      onStartShouldSetPanResponderCapture: () => false,
+      // Use the CAPTURE phase so we intercept the move from TouchableOpacity
+      // (which otherwise refuses to give up the responder once it has it).
+      onMoveShouldSetPanResponder: (_, g) => Math.hypot(g.dx, g.dy) > 4,
+      onMoveShouldSetPanResponderCapture: (_, g) => Math.hypot(g.dx, g.dy) > 4,
+      onPanResponderTerminationRequest: () => false,
+      onPanResponderGrant: () => {
+        movedRef.current = true;
+        const x = (fabPos.x as any)._value || 0;
+        const y = (fabPos.y as any)._value || 0;
+        fabPos.setOffset({ x, y });
+        fabPos.setValue({ x: 0, y: 0 });
+      },
+      onPanResponderMove: Animated.event([null, { dx: fabPos.x, dy: fabPos.y }], { useNativeDriver: false }),
+      onPanResponderRelease: () => {
+        fabPos.flattenOffset();
+        let x = (fabPos.x as any)._value;
+        let y = (fabPos.y as any)._value;
+        x = Math.max(0, Math.min(x, frameW - FAB_SIZE));
+        y = Math.max(0, Math.min(y, frameH - FAB_SIZE));
+        fabPos.setValue({ x, y });
+        storage.set('workmithra:assistant_pos', JSON.stringify({ x, y })).catch(() => {});
+        // movedRef stays true briefly; reset after a tick so any pending tap is cancelled.
+        setTimeout(() => { movedRef.current = false; }, 0);
+      },
+    }),
+  ).current;
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const raw = await storage.get('workmithra:assistant_pos');
+        if (raw) {
+          const p = JSON.parse(raw);
+          if (typeof p?.x === 'number' && typeof p?.y === 'number') fabPos.setValue(p);
+        }
+      } catch {}
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   async function greet() {
     setOnboardActive(false);
     const greetEn = `You are on the ${ctx.name} screen. ${ctx.purpose} How can I help you here?`;
@@ -418,7 +430,15 @@ export function AIAssistant() {
     setMuted(false);
     setPaused(false);
     setSpeaking(true);
-    try { await speakLong(text, lang); } catch {} finally { setSpeaking(false); setPaused(false); }
+    try {
+      await speakLong(text, lang);
+    } catch (e: any) {
+      console.error('TTS error:', e);
+      appendMsgPersist({ who: 'ai', text: `🔊 Speaker error: ${e?.message || e}` });
+    } finally {
+      setSpeaking(false);
+      setPaused(false);
+    }
   }
 
   function stopSpeaking() {
@@ -525,27 +545,35 @@ export function AIAssistant() {
     }
     // Cut off whatever the assistant is saying so it can listen.
     if (greetTimerRef.current) { clearTimeout(greetTimerRef.current); greetTimerRef.current = null; }
-    stopSpeaking();
-    setMuted(false);  // unmute so the upcoming answer can play
+    stopAudio();      // stop audio without flipping mute on
+    setSpeaking(false);
+    setPaused(false);
+    setMuted(false);  // ensure mute is OFF before mic/answer
 
     try {
       setListening(true);
-      // STT works best with a hint, but we'll re-detect from the resulting text
-      // in handleAsk so the reply matches the user's actual spoken language.
       const text = await webSTT(lang);
       setListening(false);
-      if (text) {
+      if (text && text.trim()) {
         if (onboardActive) submitOnboard(text);
         else handleAsk(text);
+      } else {
+        appendMsgPersist({ who: 'ai', text: '🎤 I did not catch that. Please try again.' });
       }
-    } catch {
+    } catch (e: any) {
       setListening(false);
+      console.error('STT error:', e);
+      appendMsgPersist({ who: 'ai', text: `🎤 Mic error: ${e?.message || e}. Allow microphone access in your browser.` });
     }
   }
 
   async function onSpeakLast() {
+    setMuted(false);
     const last = [...msgs].reverse().find((m) => m.who === 'ai');
-    if (!last) return;
+    if (!last) {
+      appendMsgPersist({ who: 'ai', text: '🔊 Nothing to speak yet.' });
+      return;
+    }
     startSpeaking(last.text);
   }
 
@@ -658,19 +686,22 @@ export function AIAssistant() {
   }
 
   return (
-    <View style={StyleSheet.absoluteFill} pointerEvents="box-none">
-      <Animated.View
-        style={[styles.fabWrap, { transform: panRef.getTranslateTransform() }]}
-        {...panResponder.panHandlers}
-      >
-        <TouchableOpacity
-          style={styles.fab}
-          activeOpacity={0.8}
-          onPress={() => { if (dragDistRef.current < 5) openModal(); }}
+    <View style={styles.container} pointerEvents="box-none">
+      {!hideFab && (
+        <Animated.View
+          style={[styles.fabDraggable, { transform: fabPos.getTranslateTransform() }]}
+          {...fabPan.panHandlers}
         >
-          <Ionicons name="sparkles" size={22} color="white" />
-        </TouchableOpacity>
-      </Animated.View>
+          <TouchableOpacity
+            style={styles.fabInner}
+            activeOpacity={0.8}
+            onPress={openModal}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          >
+            <Ionicons name="sparkles" size={22} color="white" />
+          </TouchableOpacity>
+        </Animated.View>
+      )}
 
       <Modal animationType="slide" transparent visible={visible} onRequestClose={closeModal}>
         <View style={styles.overlay}>
@@ -812,8 +843,14 @@ export function AIAssistant() {
 }
 
 const styles = StyleSheet.create({
-  fabWrap: { position: 'absolute', zIndex: 1000 },
+  container: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 1000 },
   fab: {
+    backgroundColor: '#6f42c1', width: 46, height: 46, borderRadius: 23,
+    justifyContent: 'center', alignItems: 'center', elevation: 5,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.25, shadowRadius: 3.84,
+  },
+  fabDraggable: { position: 'absolute', top: 0, left: 0, zIndex: 1000 },
+  fabInner: {
     backgroundColor: '#6f42c1', width: 52, height: 52, borderRadius: 26,
     justifyContent: 'center', alignItems: 'center', elevation: 6,
     shadowColor: '#6f42c1', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.35, shadowRadius: 6,

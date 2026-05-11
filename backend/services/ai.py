@@ -58,20 +58,33 @@ def sarvam_stt(audio_bytes: bytes, filename: str = "audio.wav", lang: str = "unk
 def sarvam_translate(text: str, source_lang: str, target_lang: str) -> Dict[str, Any]:
     if not SARVAM_API_KEY:
         raise RuntimeError("SARVAM_API_KEY is not set")
+
+    # Normalize: Sarvam expects values like "en-IN", "te-IN", or "auto" for source.
+    # If source is empty / unknown, fall back to "auto" so Sarvam can detect.
+    src = (source_lang or "").strip() or "auto"
+    if src in ("unknown", ""):
+        src = "auto"
+    tgt = (target_lang or "").strip() or "en-IN"
+    if src == tgt:
+        return {"translated_text": text, "source_language_code": src}
+
+    body = {
+        "input": text,
+        "source_language_code": src,
+        "target_language_code": tgt,
+        # Keep the body minimal — optional fields like speaker_gender / mode /
+        # enable_preprocessing were causing 4xx with current Sarvam API.
+    }
     r = requests.post(
         f"{SARVAM_BASE}/translate",
         headers={**_sarvam_headers(), "Content-Type": "application/json"},
-        json={
-            "input": text,
-            "source_language_code": source_lang,
-            "target_language_code": target_lang,
-            "speaker_gender": "Female",
-            "mode": "formal",
-            "enable_preprocessing": True,
-        },
+        json=body,
         timeout=30,
     )
-    r.raise_for_status()
+    if r.status_code >= 400:
+        # Log so we can see what's wrong server-side, then raise with detail.
+        print(f"[Sarvam translate] {r.status_code} body={body} resp={r.text[:300]}")
+        raise RuntimeError(f"Sarvam translate {r.status_code}: {r.text[:200]}")
     return r.json()
 
 

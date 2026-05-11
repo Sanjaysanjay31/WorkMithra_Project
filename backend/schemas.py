@@ -45,6 +45,12 @@ class PasswordReset(BaseModel):
     password: str
 
 
+class PasswordChange(BaseModel):
+    email: EmailStr
+    current_password: str
+    new_password: str
+
+
 class UserLogin(BaseModel):
     identifier: str
     password: str

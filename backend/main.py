@@ -1,12 +1,13 @@
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
 import models, schemas, database
 from database import engine, get_db
 from passlib.context import CryptContext
-import os
+import os, time
 from dotenv import load_dotenv
+import requests as _requests_storage
 
 load_dotenv()
 
@@ -109,6 +110,79 @@ def verify_otp(data: schemas.OTPVerify):
         raise
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Failed to verify OTP: {e}")
+
+
+@app.post("/change-password")
+def change_password(data: schemas.PasswordChange, db: Session = Depends(get_db)):
+    """Change password using the current password for verification."""
+    user = db.query(models.User).filter(models.User.email == data.email).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="No account found for this email")
+    if not pwd_context.verify(data.current_password, user.hashed_password):
+        raise HTTPException(status_code=400, detail="Current password is incorrect")
+    user.hashed_password = pwd_context.hash(data.new_password)
+    db.commit()
+    return {"message": "Password updated successfully"}
+
+
+@app.post("/upload-profile-image")
+async def upload_profile_image(
+    file: UploadFile = File(...),
+    user_id: str = Form("guest"),
+    db: Session = Depends(get_db),
+):
+    """Upload an avatar to Supabase Storage (bucket: all_images) and save URL on the user row."""
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        raise HTTPException(status_code=500, detail="Supabase not configured")
+    content = await file.read()
+    safe_name = (file.filename or "image").replace("/", "_").replace(" ", "_")
+    path = f"{user_id}/{int(time.time())}_{safe_name}"
+    try:
+        r = _requests_storage.post(
+            f"{SUPABASE_URL}/storage/v1/object/all_images/{path}",
+            headers={
+                "apikey": SUPABASE_KEY,
+                "Authorization": f"Bearer {SUPABASE_KEY}",
+                "Content-Type": file.content_type or "application/octet-stream",
+                "x-upsert": "true",
+            },
+            data=content,
+            timeout=30,
+        )
+        if r.status_code >= 400:
+            print(f"[Supabase upload] {r.status_code} {r.text}")
+            err = r.text[:500]
+            try:
+                j = r.json()
+                err = j.get("message") or j.get("error") or err
+            except Exception:
+                pass
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Supabase storage rejected upload ({r.status_code}): {err}. "
+                    f"Check: (1) bucket 'all_images' exists, (2) it is PUBLIC, "
+                    f"(3) an INSERT policy allows the anon role to upload."
+                ),
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Upload failed: {e}")
+
+    public_url = f"{SUPABASE_URL}/storage/v1/object/public/all_images/{path}"
+
+    # Best-effort: persist URL on the user row if user_id is a numeric id
+    try:
+        uid = int(user_id)
+        u = db.query(models.User).filter(models.User.id == uid).first()
+        if u:
+            u.profile_image = public_url
+            db.commit()
+    except Exception:
+        pass
+
+    return {"url": public_url, "path": path}
 
 
 @app.post("/reset-password")

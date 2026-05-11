@@ -1,78 +1,42 @@
 import BottomNav from '@/components/bottom-nav';
-import { Stack } from 'expo-router';
-import React, { useState } from 'react';
-import { Image, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { Stack, useRouter } from 'expo-router';
+import React, { useEffect, useMemo, useState } from 'react';
+import {
+    ActivityIndicator,
+    Image,
+    Platform,
+    ScrollView,
+    StyleSheet,
+    Text,
+    TouchableOpacity,
+    View,
+} from 'react-native';
+
+const DEFAULT_API_URL = Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://localhost:8000';
+const BASE_URL = process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL;
+
+const CURRENT_USER_ID = 1; // Sanjay
 
 type Tab = 'present' | 'past';
 type Status = 'upcoming' | 'success' | 'rejected';
 
+type Worker = {
+  id: number;
+  full_name?: string;
+  skill?: string;
+  hourly_rate?: number;
+  rating?: number;
+  profile_image?: string;
+};
+
 type Booking = {
   id: string;
-  worker_name: string;
-  worker_image: string;
-  role: string;
-  rating: number;
+  user_id: number;
+  worker: Worker;
   status: Status;
   amount: number;
   date: string;
 };
-
-// Sample data for user_id = 6 (Sanjay)
-const PRESENT_BOOKINGS: Booking[] = [
-  {
-    id: 'p1',
-    worker_name: 'Ravi Kumar',
-    worker_image: 'https://i.pravatar.cc/100?img=12',
-    role: 'Plumber',
-    rating: 4.7,
-    status: 'upcoming',
-    amount: 600,
-    date: '2026-05-14 · 10:00 AM',
-  },
-  {
-    id: 'p2',
-    worker_name: 'Anita Sharma',
-    worker_image: 'https://i.pravatar.cc/100?img=47',
-    role: 'Electrician',
-    rating: 4.9,
-    status: 'upcoming',
-    amount: 800,
-    date: '2026-05-16 · 3:30 PM',
-  },
-];
-
-const PAST_BOOKINGS: Booking[] = [
-  {
-    id: 'h1',
-    worker_name: 'Mohan Reddy',
-    worker_image: 'https://i.pravatar.cc/100?img=33',
-    role: 'Carpenter',
-    rating: 4.8,
-    status: 'success',
-    amount: 1500,
-    date: '2026-04-22 · 11:00 AM',
-  },
-  {
-    id: 'h2',
-    worker_name: 'Priya Singh',
-    worker_image: 'https://i.pravatar.cc/100?img=25',
-    role: 'Painter',
-    rating: 4.6,
-    status: 'success',
-    amount: 2200,
-    date: '2026-03-15 · 9:30 AM',
-  },
-  {
-    id: 'h3',
-    worker_name: 'Karthik Iyer',
-    worker_image: 'https://i.pravatar.cc/100?img=8',
-    role: 'AC Repair',
-    rating: 4.2,
-    status: 'rejected',
-    amount: 0,
-    date: '2026-02-28 · 4:00 PM',
-  },
-];
 
 function statusColor(s: Status) {
   if (s === 'success') return { bg: '#dcfce7', fg: '#166534', label: '✓ Success' };
@@ -80,22 +44,103 @@ function statusColor(s: Status) {
   return { bg: '#dbeafe', fg: '#1e40af', label: '⏳ Upcoming' };
 }
 
+/** Build sample bookings deterministically from the real worker list. */
+function buildBookings(workers: Worker[]): { present: Booking[]; past: Booking[] } {
+  if (workers.length === 0) return { present: [], past: [] };
+  const pick = (i: number) => workers[i % workers.length];
+
+  const present: Booking[] = [
+    {
+      id: 'p1',
+      user_id: CURRENT_USER_ID,
+      worker: pick(0),
+      status: 'upcoming',
+      amount: Math.round(Number(pick(0).hourly_rate || 500) * 1.2),
+      date: '2026-05-14 · 10:00 AM',
+    },
+    {
+      id: 'p2',
+      user_id: CURRENT_USER_ID,
+      worker: pick(1),
+      status: 'upcoming',
+      amount: Math.round(Number(pick(1).hourly_rate || 500) * 1.5),
+      date: '2026-05-16 · 3:30 PM',
+    },
+  ];
+
+  const past: Booking[] = [
+    {
+      id: 'h1',
+      user_id: CURRENT_USER_ID,
+      worker: pick(2),
+      status: 'success',
+      amount: Math.round(Number(pick(2).hourly_rate || 500) * 2),
+      date: '2026-04-22 · 11:00 AM',
+    },
+    {
+      id: 'h2',
+      user_id: CURRENT_USER_ID,
+      worker: pick(3),
+      status: 'success',
+      amount: Math.round(Number(pick(3).hourly_rate || 500) * 3),
+      date: '2026-03-15 · 9:30 AM',
+    },
+    {
+      id: 'h3',
+      user_id: CURRENT_USER_ID,
+      worker: pick(4),
+      status: 'rejected',
+      amount: 0,
+      date: '2026-02-28 · 4:00 PM',
+    },
+  ];
+
+  return { present, past };
+}
+
 export default function BookingsPage() {
+  const router = useRouter();
   const [tab, setTab] = useState<Tab>('present');
-  const data = tab === 'present' ? PRESENT_BOOKINGS : PAST_BOOKINGS;
+  const [workers, setWorkers] = useState<Worker[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch(`${BASE_URL}/workers`);
+        if (res.ok) {
+          const data = await res.json();
+          setWorkers(Array.isArray(data) ? data : []);
+        }
+      } catch {} finally {
+        setLoading(false);
+      }
+    })();
+  }, []);
+
+  const { present, past } = useMemo(() => buildBookings(workers), [workers]);
+  const data = tab === 'present' ? present : past;
 
   const renderCard = (b: Booking) => {
     const sc = statusColor(b.status);
     return (
-      <View key={b.id} style={styles.card}>
+      <TouchableOpacity
+        key={b.id}
+        style={styles.card}
+        activeOpacity={0.85}
+        onPress={() => router.push({ pathname: '/worker_info', params: { id: String(b.worker.id) } })}
+      >
         <View style={styles.leftCol}>
-          <Image source={{ uri: b.worker_image }} style={styles.avatar} />
+          <Image
+            source={{ uri: b.worker.profile_image || 'https://placehold.co/70x70' }}
+            style={styles.avatar}
+          />
         </View>
         <View style={styles.rightCol}>
-          <Text style={styles.name} numberOfLines={1}>{b.worker_name}</Text>
-          <Text style={styles.role}>{b.role}</Text>
+          <Text style={styles.name} numberOfLines={1}>{b.worker.full_name || 'Worker'}</Text>
+          <Text style={styles.role}>{b.worker.skill || 'General'}</Text>
           <View style={styles.metaRow}>
-            <Text style={styles.rating}>⭐ {b.rating.toFixed(1)}</Text>
+            <Text style={styles.rating}>⭐ {(b.worker.rating ?? 0).toFixed(1)}</Text>
             <View style={[styles.statusPill, { backgroundColor: sc.bg }]}>
               <Text style={[styles.statusText, { color: sc.fg }]}>{sc.label}</Text>
             </View>
@@ -107,7 +152,7 @@ export default function BookingsPage() {
             </Text>
           </View>
         </View>
-      </View>
+      </TouchableOpacity>
     );
   };
 
@@ -118,31 +163,25 @@ export default function BookingsPage() {
         <Text style={styles.title}>My Bookings</Text>
 
         <View style={styles.tabRow}>
-          <TouchableOpacity
-            style={[styles.tabBtn, tab === 'present' && styles.tabBtnActive]}
-            onPress={() => setTab('present')}
-          >
-            <Text style={[styles.tabText, tab === 'present' && styles.tabTextActive]}>
-              Present Bookings
-            </Text>
+          <TouchableOpacity style={[styles.tabBtn, tab === 'present' && styles.tabBtnActive]} onPress={() => setTab('present')}>
+            <Text style={[styles.tabText, tab === 'present' && styles.tabTextActive]}>Present Bookings</Text>
           </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.tabBtn, tab === 'past' && styles.tabBtnActive]}
-            onPress={() => setTab('past')}
-          >
-            <Text style={[styles.tabText, tab === 'past' && styles.tabTextActive]}>
-              Past Bookings
-            </Text>
+          <TouchableOpacity style={[styles.tabBtn, tab === 'past' && styles.tabBtnActive]} onPress={() => setTab('past')}>
+            <Text style={[styles.tabText, tab === 'past' && styles.tabTextActive]}>Past Bookings</Text>
           </TouchableOpacity>
         </View>
 
-        <ScrollView contentContainerStyle={{ paddingBottom: 100 }} showsVerticalScrollIndicator={false}>
-          {data.length === 0 ? (
-            <Text style={styles.placeholder}>No bookings here yet</Text>
-          ) : (
-            data.map(renderCard)
-          )}
-        </ScrollView>
+        {loading ? (
+          <ActivityIndicator color="#6F42C1" style={{ marginTop: 30 }} />
+        ) : (
+          <ScrollView contentContainerStyle={{ paddingBottom: 100 }} showsVerticalScrollIndicator={false}>
+            {data.length === 0 ? (
+              <Text style={styles.placeholder}>No bookings here yet</Text>
+            ) : (
+              data.map(renderCard)
+            )}
+          </ScrollView>
+        )}
       </View>
       <BottomNav currentRoute="bookings" />
     </View>

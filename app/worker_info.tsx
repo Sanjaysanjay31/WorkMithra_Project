@@ -1,7 +1,9 @@
 import BottomNav from '@/components/bottom-nav';
+import { addNotification } from '@/lib/notifications';
+import { storage } from '@/lib/storage';
 import { Ionicons } from '@expo/vector-icons';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
     ActivityIndicator,
     Alert,
@@ -11,6 +13,7 @@ import {
     ScrollView,
     StyleSheet,
     Text,
+    TextInput,
     TouchableOpacity,
     View,
 } from 'react-native';
@@ -18,16 +21,56 @@ import {
 const DEFAULT_API_URL = Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://localhost:8000';
 const BASE_URL = process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL;
 
+type Tab = 'profile' | 'reviews' | 'chat' | 'booking' | 'map';
+
+type ReviewItem = { id: string; name: string; rating: number; date: string; text: string };
+type HistoryItem = { id: string; date: string; time: string; price: number; status: 'completed' | 'cancelled' };
+
+const SAMPLE_REVIEWS: ReviewItem[] = [
+  { id: 'r1', name: 'Ravi K.', rating: 5, date: '2026-04-22', text: 'Excellent work, on time and very polite. Will book again!' },
+  { id: 'r2', name: 'Priya S.', rating: 4.5, date: '2026-03-15', text: 'Did the job neatly. Good value for money.' },
+  { id: 'r3', name: 'Anil R.', rating: 4, date: '2026-02-10', text: 'Fixed the issue quickly. Communication could be better.' },
+];
+
+const SAMPLE_HISTORY_FACTORY = (workerId: string): HistoryItem[] => [
+  { id: `${workerId}-h1`, date: '2026-04-22', time: '11:00 AM', price: 1500, status: 'completed' },
+  { id: `${workerId}-h2`, date: '2026-03-15', time: '9:30 AM', price: 2200, status: 'completed' },
+];
+
+function toRad(d: number) { return (d * Math.PI) / 180; }
+function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number) {
+  const R = 6371;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+
 export default function WorkerInfoPage() {
   const router = useRouter();
   const { id } = useLocalSearchParams();
-  const [activeTab, setActiveTab] = useState<'profile' | 'reviews' | 'chat' | 'booking'>('profile');
+  const workerId = String(id || '');
+  const [activeTab, setActiveTab] = useState<Tab>('profile');
   const [worker, setWorker] = useState<any>(null);
   const [loading, setLoading] = useState(true);
 
+  // Booking form state
+  const [bookDate, setBookDate] = useState('');
+  const [bookTime, setBookTime] = useState('');
+  const [bookNote, setBookNote] = useState('');
+  const [history, setHistory] = useState<HistoryItem[]>([]);
+
+  // Map state
+  const [clientLoc, setClientLoc] = useState<{ lat: number; lng: number } | null>(null);
+
   useEffect(() => {
     fetchWorkerDetails();
+    loadHistory();
   }, [id]);
+
+  useEffect(() => {
+    if (activeTab === 'map') tryGetLocation();
+  }, [activeTab]);
 
   async function fetchWorkerDetails() {
     setLoading(true);
@@ -43,21 +86,73 @@ export default function WorkerInfoPage() {
     }
   }
 
-  const handleCall = () => {
-    if (worker?.phone) {
-      Linking.openURL(`tel:${worker.phone}`);
+  async function loadHistory() {
+    try {
+      const raw = await storage.get(`workmithra:history:${workerId}`);
+      if (raw) {
+        setHistory(JSON.parse(raw));
+      } else {
+        setHistory(SAMPLE_HISTORY_FACTORY(workerId));
+      }
+    } catch {
+      setHistory(SAMPLE_HISTORY_FACTORY(workerId));
     }
-  };
+  }
 
-  const handleChat = () => {
-    if (worker?.phone) {
-      Linking.openURL(`sms:${worker.phone}`);
+  async function tryGetLocation() {
+    if (Platform.OS !== 'web' || typeof navigator === 'undefined' || !navigator.geolocation) return;
+    navigator.geolocation.getCurrentPosition(
+      (pos) => setClientLoc({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
+      () => setClientLoc({ lat: 17.385, lng: 78.4867 }), // fallback to Hyderabad
+      { enableHighAccuracy: false, timeout: 5000 },
+    );
+  }
+
+  const distanceKm = useMemo(() => {
+    if (!clientLoc || !worker?.latitude || !worker?.longitude) return null;
+    return haversineKm(clientLoc.lat, clientLoc.lng, Number(worker.latitude), Number(worker.longitude));
+  }, [clientLoc, worker]);
+
+  const handleCall = () => worker?.phone && Linking.openURL(`tel:${worker.phone}`);
+
+  async function handleBookNow() {
+    if (!bookDate.trim() || !bookTime.trim()) {
+      Alert.alert('Booking', 'Please enter both date and time.');
+      return;
     }
-  };
-
-  const handleBooking = () => {
-    router.push({ pathname: '/bookings', params: { workerId: String(id) } });
-  };
+    const price = Math.round(Number(worker?.hourly_rate || 500) * 2);
+    const newItem: HistoryItem = {
+      id: `${workerId}-${Date.now()}`,
+      date: bookDate,
+      time: bookTime,
+      price,
+      status: 'completed',
+    };
+    const next = [newItem, ...history];
+    setHistory(next);
+    try { await storage.set(`workmithra:history:${workerId}`, JSON.stringify(next)); } catch {}
+    // Notify the worker about this new request, and confirm to the user.
+    try {
+      await addNotification({
+        audience: 'worker',
+        recipient_id: String(worker.id || workerId),
+        kind: 'booking_request',
+        title: 'New booking request',
+        body: `Booking for ${newItem.date} at ${newItem.time} · ₹${price}${bookNote ? ` — ${bookNote}` : ''}`,
+        data: { worker_id: workerId, ...newItem, note: bookNote },
+      });
+      await addNotification({
+        audience: 'user',
+        recipient_id: '1', // current demo user (Sanjay)
+        kind: 'info',
+        title: 'Request sent',
+        body: `Your booking with ${worker.full_name || 'the worker'} for ${newItem.date} at ${newItem.time} was sent. ₹${price}.`,
+        data: { worker_id: workerId, ...newItem },
+      });
+    } catch {}
+    setBookDate(''); setBookTime(''); setBookNote('');
+    Alert.alert('Booked', `Booking confirmed for ${newItem.date} at ${newItem.time}. ₹${price}`);
+  }
 
   if (loading) {
     return (
@@ -66,7 +161,6 @@ export default function WorkerInfoPage() {
       </View>
     );
   }
-
   if (!worker) {
     return (
       <View style={styles.container}>
@@ -75,11 +169,13 @@ export default function WorkerInfoPage() {
     );
   }
 
+  const repeatBooking = history.length >= 2;
+  const estimatedPrice = Math.round(Number(worker.hourly_rate || 500) * 2);
+
   return (
     <View style={styles.screen}>
       <Stack.Screen options={{ title: 'Worker Details', headerShown: false }} />
       <View style={styles.designFrame}>
-        {/* Header */}
         <View style={styles.headerRow}>
           <TouchableOpacity onPress={() => router.back()}>
             <Ionicons name="arrow-back" size={24} color="#6F42C1" />
@@ -88,7 +184,6 @@ export default function WorkerInfoPage() {
           <View style={{ width: 24 }} />
         </View>
 
-        {/* Worker Header Card */}
         <View style={styles.workerHeader}>
           <Image
             source={{ uri: worker.profile_image || 'https://placehold.co/100x100' }}
@@ -98,151 +193,205 @@ export default function WorkerInfoPage() {
           <Text style={styles.workerSkill}>{worker.skill || 'Professional'}</Text>
           <View style={styles.ratingRow}>
             <Text style={styles.ratingText}>⭐ {(worker.rating ?? 0).toFixed(1)}</Text>
-            <Text style={styles.jobsText}>• {worker.completed_jobs} completed jobs</Text>
+            <Text style={styles.jobsText}>• {worker.completed_jobs ?? worker.total_jobs ?? 0} jobs</Text>
           </View>
         </View>
 
-        {/* Tabs */}
         <View style={styles.tabsContainer}>
-          {['profile', 'reviews', 'chat', 'booking'].map((tab) => (
-            <TouchableOpacity
-              key={tab}
-              style={[styles.tab, activeTab === tab && styles.activeTab]}
-              onPress={() => setActiveTab(tab as any)}
-            >
-              <Text
-                style={[styles.tabText, activeTab === tab && styles.activeTabText]}
-              >
-                {tab === 'profile' && 'Profile'}
-                {tab === 'reviews' && 'Reviews'}
-                {tab === 'chat' && 'Chat'}
-                {tab === 'booking' && 'Booking'}
+          {(['profile', 'reviews', 'chat', 'booking', 'map'] as Tab[]).map((t) => (
+            <TouchableOpacity key={t} style={[styles.tab, activeTab === t && styles.activeTab]} onPress={() => setActiveTab(t)}>
+              <Text style={[styles.tabText, activeTab === t && styles.activeTabText]}>
+                {t.charAt(0).toUpperCase() + t.slice(1)}
               </Text>
             </TouchableOpacity>
           ))}
         </View>
 
-        {/* Tab Content */}
-        <ScrollView style={styles.tabContent} showsVerticalScrollIndicator={false}>
+        <ScrollView style={styles.tabContent} showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 100 }}>
           {activeTab === 'profile' && (
             <View style={styles.tabPane}>
-              <View style={styles.detailRow}>
-                <Text style={styles.detailLabel}>Name</Text>
-                <Text style={styles.detailValue}>{worker.full_name || '—'}</Text>
-              </View>
-              <View style={styles.detailRow}>
-                <Text style={styles.detailLabel}>Age</Text>
-                <Text style={styles.detailValue}>{worker.age ? `${worker.age} years` : '—'}</Text>
-              </View>
-              <View style={styles.detailRow}>
-                <Text style={styles.detailLabel}>Domain</Text>
-                <Text style={styles.detailValue}>{worker.skill || 'General'}</Text>
-              </View>
-              <View style={styles.detailRow}>
-                <Text style={styles.detailLabel}>Wage</Text>
-                <Text style={styles.detailValue}>₹{worker.hourly_rate || '—'} / hour</Text>
-              </View>
-              <View style={styles.detailRow}>
-                <Text style={styles.detailLabel}>Experience</Text>
-                <Text style={styles.detailValue}>{worker.experience_years ?? 0} years</Text>
-              </View>
-              <View style={styles.detailRow}>
-                <Text style={styles.detailLabel}>Previous Jobs</Text>
-                <Text style={styles.detailValue}>{worker.completed_jobs ?? worker.total_jobs ?? 0}</Text>
-              </View>
-              <View style={styles.detailRow}>
-                <Text style={styles.detailLabel}>Phone</Text>
-                <Text style={styles.detailValue}>{worker.phone || '—'}</Text>
-              </View>
-              <View style={styles.detailRow}>
-                <Text style={styles.detailLabel}>Alt. Phone</Text>
-                <Text style={styles.detailValue}>{worker.alternate_phone || worker.alt_phone || '—'}</Text>
-              </View>
-              <View style={styles.detailRow}>
-                <Text style={styles.detailLabel}>Address</Text>
-                <Text style={styles.detailValue}>{worker.address || worker.location || worker.city || '—'}</Text>
-              </View>
+              <Detail label="Name" value={worker.full_name} />
+              <Detail label="Age" value={worker.age ? `${worker.age} years` : '—'} />
+              <Detail label="Domain" value={worker.skill || 'General'} />
+              <Detail label="Wage" value={`₹${worker.hourly_rate || '—'} / hour`} />
+              <Detail label="Experience" value={`${worker.experience_years ?? 0} years`} />
+              <Detail label="Completed Jobs" value={String(worker.completed_jobs ?? worker.total_jobs ?? 0)} />
+              <Detail label="Phone" value={worker.phone} />
+              <Detail label="Alt. Phone" value={worker.alternate_phone || worker.alt_phone || '—'} />
+              <Detail label="City" value={worker.city || '—'} />
+              <Detail label="Address" value={worker.address || worker.location || '—'} />
+              <Detail label="Verified" value={worker.aadhaar_verified ? '✓ Aadhaar Verified' : 'Not verified'} />
             </View>
           )}
 
           {activeTab === 'reviews' && (
             <View style={styles.tabPane}>
-              <Text style={styles.sectionTitle}>Reviews & Ratings</Text>
-              <View style={styles.reviewCard}>
-                <View style={styles.reviewHeader}>
-                  <Text style={styles.reviewRating}>⭐ {(worker.rating ?? 0).toFixed(1)}</Text>
-                  <Text style={styles.reviewCount}>Based on {worker.completed_jobs} reviews</Text>
+              <Text style={styles.sectionTitle}>What clients say</Text>
+              {SAMPLE_REVIEWS.map((r) => (
+                <View key={r.id} style={styles.reviewCard}>
+                  <View style={styles.reviewHeader}>
+                    <Text style={styles.reviewName}>{r.name}</Text>
+                    <Text style={styles.reviewRating}>⭐ {r.rating.toFixed(1)}</Text>
+                  </View>
+                  <Text style={styles.reviewDate}>{r.date}</Text>
+                  <Text style={styles.reviewText}>"{r.text}"</Text>
                 </View>
-                <Text style={styles.reviewText}>
-                  Great work! Highly recommended professional with excellent skills and reliability.
-                </Text>
-              </View>
-              <View style={styles.reviewCard}>
-                <View style={styles.reviewHeader}>
-                  <Text style={styles.reviewRating}>⭐⭐⭐⭐⭐</Text>
-                  <Text style={styles.reviewCount}>Recent feedback</Text>
-                </View>
-                <Text style={styles.reviewText}>
-                  Very professional and completed the work on time. Perfect!
-                </Text>
-              </View>
+              ))}
             </View>
           )}
 
           {activeTab === 'chat' && (
             <View style={styles.tabPane}>
-              <Text style={styles.sectionTitle}>Contact Worker</Text>
+              <Text style={styles.sectionTitle}>Talk to the worker</Text>
               <View style={styles.contactInfo}>
                 <Ionicons name="call-outline" size={24} color="#6F42C1" />
                 <Text style={styles.phoneText}>{worker.phone || '+91 XXXX XXX XXX'}</Text>
               </View>
-
               <TouchableOpacity style={styles.callButton} onPress={handleCall}>
                 <Ionicons name="call" size={20} color="white" />
                 <Text style={styles.callButtonText}>Call Worker</Text>
               </TouchableOpacity>
-
               <TouchableOpacity
-                style={styles.chatButton}
-                onPress={() => router.push({ pathname: '/chat', params: { workerId: String(id), workerName: worker.full_name || '' } })}
+                style={[styles.chatButton]}
+                onPress={() => router.push({ pathname: '/chat', params: { workerId, workerName: worker.full_name || '' } })}
               >
                 <Ionicons name="chatbubbles-outline" size={20} color="white" />
                 <Text style={styles.chatButtonText}>Open AI Translation Chat</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity style={[styles.chatButton, { backgroundColor: '#10b981', marginTop: 8 }]} onPress={handleChat}>
-                <Ionicons name="chatbubble-outline" size={20} color="white" />
-                <Text style={styles.chatButtonText}>Send SMS</Text>
               </TouchableOpacity>
             </View>
           )}
 
           {activeTab === 'booking' && (
             <View style={styles.tabPane}>
-              <Text style={styles.sectionTitle}>Booking Status</Text>
-              <View style={styles.bookingCard}>
-                <View style={styles.bookingRow}>
-                  <Text style={styles.bookingLabel}>Current Status</Text>
-                  <Text style={styles.bookingStatus}>{worker.current_status || 'Available'}</Text>
+              {history.length > 0 && (
+                <>
+                  <Text style={styles.sectionTitle}>
+                    {repeatBooking ? `You've booked ${worker.full_name} ${history.length} times` : 'Your history with this worker'}
+                  </Text>
+                  {history.map((h) => (
+                    <View key={h.id} style={styles.historyCard}>
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.historyDate}>{h.date}  ·  {h.time}</Text>
+                        <Text style={styles.historyStatus}>
+                          {h.status === 'completed' ? '✓ Completed' : '✗ Cancelled'}
+                        </Text>
+                      </View>
+                      <Text style={styles.historyPrice}>₹{h.price}</Text>
+                    </View>
+                  ))}
+                </>
+              )}
+
+              <Text style={[styles.sectionTitle, { marginTop: 16 }]}>Book a new slot</Text>
+              <View style={styles.bookForm}>
+                <View style={styles.formRow}>
+                  <Ionicons name="calendar-outline" size={18} color="#6F42C1" />
+                  <TextInput
+                    style={styles.formInput}
+                    placeholder="Date (e.g. 2026-05-20)"
+                    placeholderTextColor="#999"
+                    value={bookDate}
+                    onChangeText={setBookDate}
+                  />
                 </View>
-                <View style={styles.bookingRow}>
-                  <Text style={styles.bookingLabel}>Available Hours</Text>
-                  <Text style={styles.bookingValue}>9 AM - 6 PM</Text>
+                <View style={styles.formRow}>
+                  <Ionicons name="time-outline" size={18} color="#6F42C1" />
+                  <TextInput
+                    style={styles.formInput}
+                    placeholder="Time (e.g. 10:30 AM)"
+                    placeholderTextColor="#999"
+                    value={bookTime}
+                    onChangeText={setBookTime}
+                  />
                 </View>
-                <View style={styles.bookingRow}>
-                  <Text style={styles.bookingLabel}>Response Time</Text>
-                  <Text style={styles.bookingValue}>Usually within 1 hour</Text>
+                <View style={styles.formRow}>
+                  <Ionicons name="document-text-outline" size={18} color="#6F42C1" />
+                  <TextInput
+                    style={styles.formInput}
+                    placeholder="Note (optional)"
+                    placeholderTextColor="#999"
+                    value={bookNote}
+                    onChangeText={setBookNote}
+                  />
+                </View>
+
+                <View style={styles.priceBox}>
+                  <Text style={styles.priceLabel}>Estimated price</Text>
+                  <Text style={styles.priceValue}>₹{estimatedPrice}</Text>
+                </View>
+
+                <TouchableOpacity style={styles.bookNowButton} onPress={handleBookNow}>
+                  <Text style={styles.bookNowButtonText}>Book Now</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          )}
+
+          {activeTab === 'map' && (
+            <View style={styles.tabPane}>
+              <Text style={styles.sectionTitle}>Route to worker</Text>
+              <View style={styles.mapInfoCard}>
+                <View style={styles.mapRow}>
+                  <Ionicons name="navigate" size={18} color="#6F42C1" />
+                  <Text style={styles.mapLabel}>You</Text>
+                  <Text style={styles.mapValue}>{clientLoc ? `${clientLoc.lat.toFixed(3)}, ${clientLoc.lng.toFixed(3)}` : 'Locating…'}</Text>
+                </View>
+                <View style={styles.mapRow}>
+                  <Ionicons name="location" size={18} color="#FF6B6B" />
+                  <Text style={styles.mapLabel}>Worker</Text>
+                  <Text style={styles.mapValue}>
+                    {worker.latitude && worker.longitude
+                      ? `${Number(worker.latitude).toFixed(3)}, ${Number(worker.longitude).toFixed(3)}`
+                      : worker.city || worker.location || '—'}
+                  </Text>
+                </View>
+                <View style={styles.distanceRow}>
+                  <Text style={styles.distanceLabel}>Distance</Text>
+                  <Text style={styles.distanceValue}>
+                    {distanceKm != null ? `${distanceKm.toFixed(1)} km` : '—'}
+                  </Text>
                 </View>
               </View>
 
-              <TouchableOpacity style={styles.bookNowButton} onPress={handleBooking}>
-                <Text style={styles.bookNowButtonText}>Book Now</Text>
+              {Platform.OS === 'web' && clientLoc && worker.latitude && worker.longitude && (
+                <View style={styles.mapEmbedWrap}>
+                  {/* OpenStreetMap embed with both pins */}
+                  <iframe
+                    style={{ width: '100%', height: 260, border: 0, borderRadius: 12 } as any}
+                    src={`https://www.openstreetmap.org/export/embed.html?bbox=${Math.min(clientLoc.lng, worker.longitude) - 0.02},${Math.min(clientLoc.lat, worker.latitude) - 0.02},${Math.max(clientLoc.lng, worker.longitude) + 0.02},${Math.max(clientLoc.lat, worker.latitude) + 0.02}&layer=mapnik&marker=${worker.latitude},${worker.longitude}`}
+                  />
+                </View>
+              )}
+
+              <TouchableOpacity
+                style={styles.openMapsBtn}
+                onPress={() => {
+                  if (!worker.latitude || !worker.longitude) {
+                    Alert.alert('Map', 'Worker location not available');
+                    return;
+                  }
+                  const origin = clientLoc ? `${clientLoc.lat},${clientLoc.lng}` : '';
+                  const dest = `${worker.latitude},${worker.longitude}`;
+                  Linking.openURL(`https://www.google.com/maps/dir/?api=1&origin=${origin}&destination=${dest}&travelmode=driving`);
+                }}
+              >
+                <Ionicons name="map" size={18} color="#fff" />
+                <Text style={styles.openMapsBtnText}>Open Route in Google Maps</Text>
               </TouchableOpacity>
             </View>
           )}
         </ScrollView>
       </View>
       <BottomNav currentRoute="home" />
+    </View>
+  );
+}
+
+function Detail({ label, value }: { label: string; value?: string }) {
+  return (
+    <View style={styles.detailRow}>
+      <Text style={styles.detailLabel}>{label}</Text>
+      <Text style={styles.detailValue}>{value || '—'}</Text>
     </View>
   );
 }
@@ -254,41 +403,61 @@ const styles = StyleSheet.create({
   errorText: { fontSize: 16, color: '#999' },
   headerRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingTop: 16, paddingBottom: 12 },
   headerTitle: { fontSize: 18, fontWeight: '800', color: '#333' },
-  workerHeader: { alignItems: 'center', paddingVertical: 20, backgroundColor: '#f8f8f8' },
-  largeAvatar: { width: 100, height: 100, borderRadius: 50, marginBottom: 12, backgroundColor: '#e9ecef' },
-  workerNameLarge: { fontSize: 20, fontWeight: '800', color: '#333' },
-  workerSkill: { fontSize: 14, color: '#666', marginTop: 4 },
-  ratingRow: { flexDirection: 'row', alignItems: 'center', marginTop: 8 },
-  ratingText: { fontSize: 14, fontWeight: '700', color: '#FFB800' },
-  jobsText: { fontSize: 12, color: '#999', marginLeft: 4 },
-  tabsContainer: { flexDirection: 'row', backgroundColor: '#fff', borderBottomWidth: 1, borderBottomColor: '#e9ecef' },
-  tab: { flex: 1, paddingVertical: 12, alignItems: 'center', borderBottomWidth: 2, borderBottomColor: 'transparent' },
+  workerHeader: { alignItems: 'center', paddingVertical: 16, backgroundColor: '#f8f8f8' },
+  largeAvatar: { width: 90, height: 90, borderRadius: 45, marginBottom: 10, backgroundColor: '#e9ecef' },
+  workerNameLarge: { fontSize: 18, fontWeight: '800', color: '#333' },
+  workerSkill: { fontSize: 13, color: '#666', marginTop: 2 },
+  ratingRow: { flexDirection: 'row', alignItems: 'center', marginTop: 6 },
+  ratingText: { fontSize: 13, fontWeight: '700', color: '#FFB800' },
+  jobsText: { fontSize: 11, color: '#999', marginLeft: 4 },
+  tabsContainer: { flexDirection: 'row', justifyContent: 'space-between', backgroundColor: '#fff', borderBottomWidth: 1, borderBottomColor: '#e9ecef' },
+  tab: { flex: 1, paddingVertical: 9, alignItems: 'center', borderBottomWidth: 2, borderBottomColor: 'transparent' },
   activeTab: { borderBottomColor: '#6F42C1' },
-  tabText: { fontSize: 12, fontWeight: '600', color: '#999' },
+  tabText: { fontSize: 11, fontWeight: '600', color: '#999' },
   activeTabText: { color: '#6F42C1' },
-  tabContent: { flex: 1, paddingHorizontal: 16, paddingTop: 16, marginBottom: 80 },
+  tabContent: { flex: 1, paddingHorizontal: 16, paddingTop: 10 },
   tabPane: { paddingBottom: 20 },
-  sectionTitle: { fontSize: 14, fontWeight: '800', color: '#333', marginVertical: 12 },
-  sectionText: { fontSize: 13, color: '#666', lineHeight: 20 },
-  detailRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#f0f0f0' },
+  sectionTitle: { fontSize: 14, fontWeight: '800', color: '#333', marginBottom: 10 },
+  detailRow: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#f0f0f0' },
   detailLabel: { fontSize: 13, fontWeight: '700', color: '#666', flex: 1 },
   detailValue: { fontSize: 13, color: '#333', flex: 1.4, textAlign: 'right' },
-  reviewCard: { backgroundColor: '#f8f8f8', padding: 12, borderRadius: 12, marginBottom: 12 },
-  reviewHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
-  reviewRating: { fontSize: 14, fontWeight: '800', color: '#FFB800' },
-  reviewCount: { fontSize: 11, color: '#999' },
-  reviewText: { fontSize: 12, color: '#666', lineHeight: 18 },
-  contactInfo: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#f8f8f8', padding: 16, borderRadius: 12, marginBottom: 16 },
-  phoneText: { fontSize: 14, fontWeight: '600', color: '#333', marginLeft: 12 },
-  callButton: { flexDirection: 'row', backgroundColor: '#10b981', paddingVertical: 12, paddingHorizontal: 20, borderRadius: 12, alignItems: 'center', justifyContent: 'center', marginBottom: 12 },
-  callButtonText: { color: 'white', fontWeight: '700', marginLeft: 8, fontSize: 14 },
-  chatButton: { flexDirection: 'row', backgroundColor: '#6F42C1', paddingVertical: 12, paddingHorizontal: 20, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
-  chatButtonText: { color: 'white', fontWeight: '700', marginLeft: 8, fontSize: 14 },
-  bookingCard: { backgroundColor: '#f8f8f8', padding: 16, borderRadius: 12, marginBottom: 16 },
-  bookingRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#e9ecef' },
-  bookingLabel: { fontSize: 13, fontWeight: '600', color: '#666' },
-  bookingStatus: { fontSize: 13, fontWeight: '700', color: '#10b981' },
-  bookingValue: { fontSize: 13, fontWeight: '600', color: '#333' },
-  bookNowButton: { backgroundColor: '#FF6B6B', paddingVertical: 14, borderRadius: 12, alignItems: 'center' },
-  bookNowButtonText: { color: 'white', fontWeight: '800', fontSize: 16 },
+
+  reviewCard: { backgroundColor: '#fafafa', padding: 12, borderRadius: 12, marginBottom: 10, borderWidth: 1, borderColor: '#eee' },
+  reviewHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  reviewName: { fontSize: 13, fontWeight: '800', color: '#333' },
+  reviewRating: { fontSize: 12, fontWeight: '800', color: '#FFB800' },
+  reviewDate: { fontSize: 11, color: '#999', marginTop: 2 },
+  reviewText: { fontSize: 12, color: '#444', lineHeight: 18, marginTop: 6, fontStyle: 'italic' },
+
+  contactInfo: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#f8f8f8', padding: 14, borderRadius: 12, marginBottom: 12 },
+  phoneText: { fontSize: 14, fontWeight: '600', color: '#333', marginLeft: 10 },
+  callButton: { flexDirection: 'row', backgroundColor: '#10b981', paddingVertical: 12, borderRadius: 12, alignItems: 'center', justifyContent: 'center', marginBottom: 10 },
+  callButtonText: { color: '#fff', fontWeight: '700', marginLeft: 8, fontSize: 14 },
+  chatButton: { flexDirection: 'row', backgroundColor: '#6F42C1', paddingVertical: 12, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
+  chatButtonText: { color: '#fff', fontWeight: '700', marginLeft: 8, fontSize: 14 },
+
+  historyCard: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#fafafa', padding: 10, borderRadius: 10, marginBottom: 8, borderWidth: 1, borderColor: '#eee' },
+  historyDate: { fontSize: 12, fontWeight: '700', color: '#333' },
+  historyStatus: { fontSize: 11, color: '#10b981', fontWeight: '700', marginTop: 2 },
+  historyPrice: { fontSize: 14, fontWeight: '800', color: '#6F42C1' },
+
+  bookForm: { backgroundColor: '#fafafa', borderRadius: 12, padding: 12, borderWidth: 1, borderColor: '#eee' },
+  formRow: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#fff', borderRadius: 8, paddingHorizontal: 10, marginBottom: 8, borderWidth: 1, borderColor: '#eee', gap: 8 },
+  formInput: { flex: 1, paddingVertical: 10, fontSize: 13, color: '#333' },
+  priceBox: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', backgroundColor: '#fff', borderRadius: 8, padding: 10, marginVertical: 6 },
+  priceLabel: { fontSize: 12, color: '#666', fontWeight: '700' },
+  priceValue: { fontSize: 16, color: '#10b981', fontWeight: '800' },
+  bookNowButton: { backgroundColor: '#FF6B6B', paddingVertical: 13, borderRadius: 12, alignItems: 'center', marginTop: 6 },
+  bookNowButtonText: { color: '#fff', fontWeight: '800', fontSize: 15 },
+
+  mapInfoCard: { backgroundColor: '#fafafa', padding: 12, borderRadius: 12, marginBottom: 12, borderWidth: 1, borderColor: '#eee' },
+  mapRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 6, gap: 8 },
+  mapLabel: { fontSize: 12, fontWeight: '700', color: '#666', width: 60 },
+  mapValue: { fontSize: 12, color: '#333', flex: 1 },
+  distanceRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 8, paddingTop: 8, borderTopWidth: 1, borderTopColor: '#eee' },
+  distanceLabel: { fontSize: 13, fontWeight: '700', color: '#666' },
+  distanceValue: { fontSize: 16, fontWeight: '800', color: '#6F42C1' },
+  mapEmbedWrap: { borderRadius: 12, overflow: 'hidden', marginBottom: 12, borderWidth: 1, borderColor: '#eee' },
+  openMapsBtn: { flexDirection: 'row', backgroundColor: '#6F42C1', paddingVertical: 12, borderRadius: 12, alignItems: 'center', justifyContent: 'center', gap: 8 },
+  openMapsBtnText: { color: '#fff', fontWeight: '700', fontSize: 14 },
 });
