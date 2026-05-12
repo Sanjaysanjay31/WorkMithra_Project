@@ -132,43 +132,109 @@ export default function WorkerInfoPage() {
 
   const handleCall = () => worker?.phone && Linking.openURL(`tel:${worker.phone}`);
 
+  useEffect(() => {
+    (async () => {
+      try {
+        const authRaw = await storage.get('workmithra:auth');
+        if (authRaw) {
+          const auth = JSON.parse(authRaw);
+          if (auth.id) {
+            const { initializeSocket } = require('@/lib/socket');
+            initializeSocket(auth.id);
+          }
+        }
+      } catch {}
+    })();
+  }, []);
+
   async function handleBookNow() {
     if (!bookDate.trim() || !bookTime.trim()) {
       Alert.alert('Booking', 'Please enter both date and time.');
       return;
     }
-    const price = Math.round(Number(worker?.hourly_rate || 500) * 2);
-    const newItem: HistoryItem = {
-      id: `${workerId}-${Date.now()}`,
-      date: bookDate,
-      time: bookTime,
-      price,
-      status: 'completed',
-    };
-    const next = [newItem, ...history];
-    setHistory(next);
-    try { await storage.set(`workmithra:history:${workerId}`, JSON.stringify(next)); } catch {}
-    // Notify the worker about this new request, and confirm to the user.
+    
+    let currentUid = 0;
     try {
+      const authRaw = await storage.get('workmithra:auth');
+      if (authRaw) {
+        const auth = JSON.parse(authRaw);
+        if (auth.id) currentUid = auth.id;
+      }
+    } catch {}
+
+    if (!currentUid) {
+      Alert.alert('Authentication', 'Please login to book a worker');
+      return;
+    }
+
+    const estimatedPrice = Math.round(Number(worker?.hourly_rate || 500) * 2);
+    
+    setLoading(true);
+    try {
+      // 1. Create booking in DB
+      const res = await fetch(`${BASE_URL}/bookings`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          user_id: currentUid,
+          worker_id: Number(workerId),
+          service_id: 1, // Default service for now
+          booking_date: bookDate,
+          booking_time: bookTime,
+          problem_description: bookNote,
+          estimated_price: estimatedPrice,
+          customer_address: 'Home Address (Default)', // In real app, get from user profile
+          status: 'pending'
+        })
+      });
+      
+      if (!res.ok) throw new Error('Failed to create booking');
+      const bookingData = await res.json();
+
+      // 2. Send real-time notification via Socket.IO
+      const { sendBookingRequest } = require('@/lib/socket');
+      sendBookingRequest({
+        booking_id: bookingData.id,
+        worker_id: Number(workerId),
+        client_id: currentUid,
+        service_id: 1,
+        booking_date: bookDate,
+        booking_time: bookTime,
+        problem_description: bookNote,
+        estimated_price: estimatedPrice
+      });
+
+      // 3. Update local history
+      const newItem: HistoryItem = {
+        id: String(bookingData.id),
+        date: bookDate,
+        time: bookTime,
+        price: estimatedPrice,
+        status: 'completed', // For history tab, we show it as success/completed usually
+      };
+      const next = [newItem, ...history];
+      setHistory(next);
+      await storage.set(`workmithra:history:${workerId}`, JSON.stringify(next));
+
+      // 4. Add push-style notifications (local lib)
       await addNotification({
         audience: 'worker',
-        recipient_id: String(worker.id || workerId),
+        recipient_id: workerId,
         kind: 'booking_request',
         title: 'New booking request',
-        body: `Booking for ${newItem.date} at ${newItem.time} · ₹${price}${bookNote ? ` — ${bookNote}` : ''}`,
-        data: { worker_id: workerId, ...newItem, note: bookNote },
+        body: `Booking for ${bookDate} at ${bookTime} · ₹${estimatedPrice}`,
+        data: { booking_id: bookingData.id, ...newItem, note: bookNote },
       });
-      await addNotification({
-        audience: 'user',
-        recipient_id: '1', // current demo user (Sanjay)
-        kind: 'info',
-        title: 'Request sent',
-        body: `Your booking with ${worker.full_name || 'the worker'} for ${newItem.date} at ${newItem.time} was sent. ₹${price}.`,
-        data: { worker_id: workerId, ...newItem },
-      });
-    } catch {}
-    setBookDate(''); setBookTime(''); setBookNote('');
-    Alert.alert('Booked', `Booking confirmed for ${newItem.date} at ${newItem.time}. ₹${price}`);
+
+      Alert.alert('Booked', `Booking request sent for ${bookDate} at ${bookTime}. ₹${estimatedPrice}`);
+      setBookDate(''); setBookTime(''); setBookNote('');
+      setActiveTab('profile');
+    } catch (e) {
+      console.error('Booking failed', e);
+      Alert.alert('Error', 'Failed to create booking. Please try again.');
+    } finally {
+      setLoading(false);
+    }
   }
 
   if (loading) {

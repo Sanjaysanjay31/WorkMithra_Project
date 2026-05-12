@@ -192,6 +192,21 @@ export default function ProfilePage() {
             </TouchableOpacity>
           </View>
 
+          {/* Switch Role */}
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>Account Settings</Text>
+            <TouchableOpacity style={styles.pwdOption} onPress={() => { storage.delete('workmithra:auth'); router.replace('/login'); }}>
+              <View style={[styles.pwdIcon, { backgroundColor: '#e0f2fe' }]}>
+                <Ionicons name="swap-horizontal" size={18} color="#0284c7" />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.pwdTitle}>Switch Role</Text>
+                <Text style={styles.pwdSub}>Log out and switch between User and Worker</Text>
+              </View>
+              <Ionicons name="chevron-forward" size={18} color="#999" />
+            </TouchableOpacity>
+          </View>
+
           {/* Password change */}
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>Change Password</Text>

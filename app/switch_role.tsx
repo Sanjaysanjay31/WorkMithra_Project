@@ -1,7 +1,7 @@
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { platformShadow } from '@/lib/shadow';
-import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
+import { Ionicons } from '@expo/vector-icons';
 import { Stack, useRouter } from 'expo-router';
 import React, { useState } from 'react';
 import {
@@ -19,8 +19,9 @@ const { width } = Dimensions.get('window');
 export default function SwitchRoleScreen() {
   const router = useRouter();
   const [loading, setLoading] = useState(false);
+  const [role, setRole] = useState<'user' | 'worker'>('user');
 
-  const handleRoleSelection = async (role: 'user' | 'worker') => {
+  const handleRoleSelection = async () => {
     setLoading(true);
     try {
       // Mocking role assignment API call
@@ -43,52 +44,51 @@ export default function SwitchRoleScreen() {
     <ThemedView style={styles.container}>
       <Stack.Screen options={{ title: 'Select Role', headerShown: false }} />
       
+      <View style={styles.headerTop}>
+        <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
+          <Ionicons name="arrow-back" size={24} color="#6F42C1" />
+        </TouchableOpacity>
+      </View>
+
       <View style={styles.content}>
         <View style={styles.header}>
-          <ThemedText type="title" style={styles.title}>Choose Your Role</ThemedText>
-          <ThemedText style={styles.subtitle}>How do you want to use WorkMithra today?</ThemedText>
+          <ThemedText type="title" style={styles.title}>Switch Role</ThemedText>
+          <ThemedText style={styles.subtitle}>Choose your active profile to continue</ThemedText>
         </View>
 
-        <View style={styles.optionsContainer}>
-          {/* User Role Option */}
-          <TouchableOpacity
-            style={styles.roleCard}
-            onPress={() => handleRoleSelection('user')}
-            disabled={loading}
-          >
-            <View style={[styles.iconContainer, { backgroundColor: '#f0e6ff' }]}>
-              <Ionicons name="person" size={40} color="#6F42C1" />
-            </View>
-            <View style={styles.roleInfo}>
-              <Text style={styles.roleTitle}>I am a User</Text>
-              <Text style={styles.roleDescription}>I want to find and hire skilled workers for my tasks.</Text>
-            </View>
-            <Ionicons name="chevron-forward" size={24} color="#adb5bd" />
-          </TouchableOpacity>
-
-          {/* Worker Role Option */}
-          <TouchableOpacity
-            style={styles.roleCard}
-            onPress={() => handleRoleSelection('worker')}
-            disabled={loading}
-          >
-            <View style={[styles.iconContainer, { backgroundColor: '#ffe8e8' }]}>
-              <MaterialCommunityIcons name="hammer-wrench" size={40} color="#FF6B6B" />
-            </View>
-            <View style={styles.roleInfo}>
-              <Text style={styles.roleTitle}>I am a Worker</Text>
-              <Text style={styles.roleDescription}>I want to offer my skills and find work opportunities.</Text>
-            </View>
-            <Ionicons name="chevron-forward" size={24} color="#adb5bd" />
-          </TouchableOpacity>
-        </View>
-
-        {loading && (
-          <View style={styles.loadingOverlay}>
-            <ActivityIndicator size="large" color="#6F42C1" />
-            <Text style={styles.loadingText}>Setting up your profile...</Text>
+        <View style={styles.form}>
+          <View style={styles.roleContainer}>
+            <TouchableOpacity 
+              style={[styles.roleButton, role === 'user' && styles.roleButtonActive]}
+              onPress={() => setRole('user')}
+            >
+              <Ionicons name="person" size={18} color={role === 'user' ? '#fff' : '#6F42C1'} />
+              <Text style={[styles.roleText, role === 'user' && styles.roleTextActive]}>Client (User)</Text>
+            </TouchableOpacity>
+            <TouchableOpacity 
+              style={[styles.roleButton, role === 'worker' && styles.roleButtonActive]}
+              onPress={() => setRole('worker')}
+            >
+              <Ionicons name="briefcase" size={18} color={role === 'worker' ? '#fff' : '#6F42C1'} />
+              <Text style={[styles.roleText, role === 'worker' && styles.roleTextActive]}>Worker</Text>
+            </TouchableOpacity>
           </View>
-        )}
+
+          <TouchableOpacity
+            style={[styles.submitButton, loading && styles.disabledButton]}
+            onPress={handleRoleSelection}
+            disabled={loading}
+          >
+            {loading ? (
+              <ActivityIndicator color="white" />
+            ) : (
+              <>
+                <Text style={styles.submitButtonText}>Switch Profile</Text>
+                <Ionicons name="arrow-forward" size={20} color="white" />
+              </>
+            )}
+          </TouchableOpacity>
+        </View>
       </View>
     </ThemedView>
   );
@@ -99,13 +99,27 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#fff',
   },
+  headerTop: {
+    paddingHorizontal: 20,
+    paddingTop: 50,
+    paddingBottom: 10,
+  },
+  backButton: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: '#f0e6ff',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
   content: {
     flex: 1,
     padding: 24,
     justifyContent: 'center',
+    marginTop: -80,
   },
   header: {
-    marginBottom: 48,
+    marginBottom: 40,
     alignItems: 'center',
   },
   title: {
@@ -120,52 +134,55 @@ const styles = StyleSheet.create({
     color: '#6c757d',
     textAlign: 'center',
   },
-  optionsContainer: {
-    gap: 20,
+  form: {
+    width: '100%',
   },
-  roleCard: {
+  roleContainer: {
     flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#fff',
-    borderRadius: 20,
-    padding: 20,
+    backgroundColor: '#f8f9fa',
+    borderRadius: 16,
+    padding: 6,
+    marginBottom: 30,
     borderWidth: 1,
     borderColor: '#e9ecef',
-    ...platformShadow('0px 2px 16px rgba(0,0,0,0.10)', '#000', 0, 2, 0.1, 8, 4),
   },
-  iconContainer: {
-    width: 72,
-    height: 72,
-    borderRadius: 36,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 20,
-  },
-  roleInfo: {
+  roleButton: {
     flex: 1,
-  },
-  roleTitle: {
-    fontSize: 20,
-    fontWeight: 'bold',
-    color: '#212529',
-    marginBottom: 4,
-  },
-  roleDescription: {
-    fontSize: 14,
-    color: '#6c757d',
-    lineHeight: 20,
-  },
-  loadingOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(255, 255, 255, 0.9)',
-    justifyContent: 'center',
+    flexDirection: 'row',
     alignItems: 'center',
-    zIndex: 10,
+    justifyContent: 'center',
+    paddingVertical: 14,
+    borderRadius: 12,
+    gap: 8,
   },
-  loadingText: {
-    marginTop: 16,
-    fontSize: 16,
-    color: '#6F42C1',
+  roleButtonActive: {
+    backgroundColor: '#6F42C1',
+    ...platformShadow('0px 4px 12px rgba(111,66,193,0.25)', '#6F42C1', 0, 4, 0.25, 6, 3),
+  },
+  roleText: {
+    fontSize: 15,
     fontWeight: '600',
+    color: '#6F42C1',
+  },
+  roleTextActive: {
+    color: '#fff',
+  },
+  submitButton: {
+    backgroundColor: '#6F42C1',
+    flexDirection: 'row',
+    paddingVertical: 16,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    ...platformShadow('0px 4px 16px rgba(111,66,193,0.3)', '#6F42C1', 0, 4, 0.3, 8, 4),
+  },
+  disabledButton: {
+    backgroundColor: '#adb5bd',
+  },
+  submitButtonText: {
+    color: 'white',
+    fontSize: 18,
+    fontWeight: 'bold',
   },
 });

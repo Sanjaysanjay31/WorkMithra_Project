@@ -34,9 +34,19 @@ def create_booking(booking: schemas.BookingCreate, db: Session = Depends(databas
 
 
 @router.get("/", response_model=List[schemas.BookingResponse])
-def list_bookings(skip: int = 0, limit: int = 20, db: Session = Depends(database.get_db)):
-    """List all bookings."""
-    bookings = db.query(models.Booking).offset(skip).limit(limit).all()
+def list_bookings(
+    skip: int = 0, limit: int = 20, 
+    user_id: int = None, 
+    worker_id: int = None, 
+    db: Session = Depends(database.get_db)
+):
+    """List all bookings, optionally filtered by user_id or worker_id."""
+    query = db.query(models.Booking)
+    if user_id is not None:
+        query = query.filter(models.Booking.user_id == user_id)
+    if worker_id is not None:
+        query = query.filter(models.Booking.worker_id == worker_id)
+    bookings = query.offset(skip).limit(limit).all()
     return bookings
 
 

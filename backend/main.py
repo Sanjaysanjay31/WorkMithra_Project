@@ -212,42 +212,77 @@ def reset_password(data: schemas.PasswordReset, db: Session = Depends(get_db)):
 
 @app.post("/register", response_model=schemas.UserResponse)
 def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
-    # Verify email is in otp_store and verified (simplified for this exercise)
-    # In a real app, you'd mark the email as verified in the DB or a cache
-    
-    db_user = db.query(models.User).filter(
-        or_(models.User.email == user.email, models.User.phone == user.phone)
-    ).first()
-    if db_user:
-        raise HTTPException(status_code=400, detail="Email or Phone already registered")
+    # Add role handling
+    role = getattr(user, "role", "user")
 
-    hashed_password = pwd_context.hash(user.password)
-    new_user = models.User(
-        full_name=user.full_name,
-        phone=user.phone,
-        email=user.email,
-        hashed_password=hashed_password
-    )
-    db.add(new_user)
-    db.commit()
-    db.refresh(new_user)
-    return new_user
+    if role == "worker":
+        db_worker = db.query(models.Worker).filter(
+            or_(models.Worker.email == user.email, models.Worker.phone == user.phone)
+        ).first()
+        if db_worker:
+            raise HTTPException(status_code=400, detail="Email or Phone already registered as worker")
+        
+        hashed_password = pwd_context.hash(user.password)
+        new_worker = models.Worker(
+            full_name=user.full_name,
+            phone=user.phone,
+            email=user.email,
+            hashed_password=hashed_password
+        )
+        db.add(new_worker)
+        db.commit()
+        db.refresh(new_worker)
+        # Return a mock UserResponse since endpoint expects it, or change response model
+        # For simplicity, returning a dictionary that satisfies UserResponse loosely
+        return {
+            "id": new_worker.id,
+            "full_name": new_worker.full_name,
+            "phone": new_worker.phone,
+            "email": new_worker.email,
+            "role": "worker"
+        }
+    else:
+        db_user = db.query(models.User).filter(
+            or_(models.User.email == user.email, models.User.phone == user.phone)
+        ).first()
+        if db_user:
+            raise HTTPException(status_code=400, detail="Email or Phone already registered")
+
+        hashed_password = pwd_context.hash(user.password)
+        new_user = models.User(
+            full_name=user.full_name,
+            phone=user.phone,
+            email=user.email,
+            hashed_password=hashed_password,
+            role="user"
+        )
+        db.add(new_user)
+        db.commit()
+        db.refresh(new_user)
+        return new_user
 
 import jwt as pyjwt
 from datetime import datetime, timedelta
 
 @app.post("/login")
 def login(user: schemas.UserLogin, db: Session = Depends(get_db)):
-    db_user = db.query(models.User).filter(
-        or_(models.User.email == user.identifier, models.User.phone == user.identifier)
-    ).first()
+    role = getattr(user, "role", "user")
+
+    if role == "worker":
+        db_user = db.query(models.Worker).filter(
+            or_(models.Worker.email == user.identifier, models.Worker.phone == user.identifier)
+        ).first()
+    else:
+        db_user = db.query(models.User).filter(
+            or_(models.User.email == user.identifier, models.User.phone == user.identifier)
+        ).first()
 
     if not db_user or not pwd_context.verify(user.password, db_user.hashed_password):
         raise HTTPException(status_code=400, detail="Invalid credentials")
 
     # Generate a simple JWT token
     secret_key = os.getenv("JWT_SECRET", "supersecretkey")
-    token_data = {"sub": str(db_user.id), "exp": datetime.utcnow() + timedelta(days=7)}
+    token_data = {"sub": str(db_user.id), "role": role, "exp": datetime.utcnow() + timedelta(days=7)}
     access_token = pyjwt.encode(token_data, secret_key, algorithm="HS256")
 
     return {
@@ -257,6 +292,7 @@ def login(user: schemas.UserLogin, db: Session = Depends(get_db)):
             "id": db_user.id,
             "full_name": db_user.full_name,
             "email": db_user.email,
+            "role": role,
         }
     }
 

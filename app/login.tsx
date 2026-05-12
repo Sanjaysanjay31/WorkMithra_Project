@@ -26,6 +26,7 @@ export default function LoginScreen() {
   const router = useRouter();
   const [identifier, setIdentifier] = useState('');
   const [password, setPassword] = useState('');
+  const [role, setRole] = useState<'user' | 'worker'>('user');
   const [loading, setLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
 
@@ -56,7 +57,7 @@ export default function LoginScreen() {
       const response = await fetch(`${BASE_URL}/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ identifier, password }),
+        body: JSON.stringify({ identifier, password, role }),
       });
 
       let data: any = {};
@@ -69,10 +70,15 @@ export default function LoginScreen() {
              id: data.user?.id || '1',
              phone: identifier,
              token: data.access_token || '',
+             role: role,
           };
           await storage.set('workmithra:auth', JSON.stringify(authData));
         } catch {}
-        router.replace('/switch_role');
+        if (role === 'user') {
+          router.replace('/homePage');
+        } else {
+          router.replace('/worker_dashboard');
+        }
       } else {
         setLoading(false);
         notify('Login failed', data.detail || `Server responded with ${response.status}`);
@@ -83,7 +89,11 @@ export default function LoginScreen() {
         ? window.confirm(`Unable to reach backend at ${BASE_URL}.\n\nContinue in offline/demo mode?`)
         : false;
       if (proceed) {
-        router.replace('/switch_role');
+        if (role === 'user') {
+          router.replace('/homePage');
+        } else {
+          router.replace('/worker_dashboard');
+        }
       } else {
         notify('Connection Error', `Unable to connect to server at ${BASE_URL}. Please ensure backend is running.`);
       }
@@ -111,6 +121,23 @@ export default function LoginScreen() {
             </View>
 
             <View style={styles.form}>
+              <View style={styles.roleContainer}>
+                <TouchableOpacity 
+                  style={[styles.roleButton, role === 'user' && styles.roleButtonActive]}
+                  onPress={() => setRole('user')}
+                >
+                  <Ionicons name="person" size={18} color={role === 'user' ? '#fff' : '#6F42C1'} />
+                  <Text style={[styles.roleText, role === 'user' && styles.roleTextActive]}>User</Text>
+                </TouchableOpacity>
+                <TouchableOpacity 
+                  style={[styles.roleButton, role === 'worker' && styles.roleButtonActive]}
+                  onPress={() => setRole('worker')}
+                >
+                  <Ionicons name="briefcase" size={18} color={role === 'worker' ? '#fff' : '#6F42C1'} />
+                  <Text style={[styles.roleText, role === 'worker' && styles.roleTextActive]}>Worker</Text>
+                </TouchableOpacity>
+              </View>
+
               <View style={styles.inputGroup}>
                 <Text style={styles.label}>Email or Phone</Text>
                 <View style={styles.inputWrapper}>
@@ -221,6 +248,35 @@ const styles = StyleSheet.create({
   },
   form: {
     width: '100%',
+  },
+  roleContainer: {
+    flexDirection: 'row',
+    backgroundColor: '#f8f9fa',
+    borderRadius: 16,
+    padding: 6,
+    marginBottom: 20,
+    borderWidth: 1,
+    borderColor: '#e9ecef',
+  },
+  roleButton: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 12,
+    borderRadius: 12,
+    gap: 8,
+  },
+  roleButtonActive: {
+    backgroundColor: '#6F42C1',
+  },
+  roleText: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#6F42C1',
+  },
+  roleTextActive: {
+    color: '#fff',
   },
   inputGroup: {
     marginBottom: 20,

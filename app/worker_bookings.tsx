@@ -3,8 +3,8 @@ import { addNotification } from '@/lib/notifications';
 import { platformShadow } from '@/lib/shadow';
 import { Ionicons } from '@expo/vector-icons';
 import { Stack, useRouter } from 'expo-router';
-import React, { useState } from 'react';
-import { Image, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import React, { useState, useEffect } from 'react';
+import { Image, Platform, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
 type Tab = 'pending' | 'accepted';
 
@@ -25,22 +25,72 @@ const SAMPLE: Request[] = [
   { id: '3', client_id: '3', client: 'Anil Reddy', avatar: 'https://i.pravatar.cc/200?img=33', job: 'Bathroom drainage', date: 'Yesterday', price: 1500, status: 'accepted' },
 ];
 
+import { storage } from '@/lib/storage';
+const DEFAULT_API_URL = Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://localhost:8000';
+const BASE_URL = process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL;
+
 export default function WorkerBookings() {
   const router = useRouter();
   const [tab, setTab] = useState<Tab>('pending');
-  const [requests, setRequests] = useState<Request[]>(SAMPLE);
+  const [requests, setRequests] = useState<Request[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    (async () => {
+      let uid = '1';
+      try {
+        const authRaw = await storage.get('workmithra:auth');
+        if (authRaw) {
+          const auth = JSON.parse(authRaw);
+          if (auth.id) uid = String(auth.id);
+        }
+      } catch {}
+
+      try {
+        const res = await fetch(`${BASE_URL}/bookings?worker_id=${uid}`);
+        if (res.ok) {
+          const data = await res.json();
+          const mapped: Request[] = data.map((b: any) => ({
+            id: String(b.id),
+            client_id: String(b.user_id),
+            client: `User ${b.user_id}`, // In a real app we'd fetch the user's name or the API would return it
+            avatar: `https://i.pravatar.cc/150?u=${b.user_id}`,
+            job: b.problem_description || 'General Service',
+            date: b.booking_date ? `${b.booking_date} ${b.booking_time || ''}` : 'Unknown date',
+            price: b.estimated_price || b.final_price || 0,
+            status: b.status === 'pending' || b.status === 'upcoming' ? 'pending' : (b.status === 'accepted' || b.status === 'success' ? 'accepted' : 'pending'),
+          }));
+          setRequests(mapped.filter(r => r.status === 'pending' || r.status === 'accepted'));
+        }
+      } catch (e) {
+        console.warn('Failed to fetch requests', e);
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, []);
 
   const filtered = requests.filter((r) => r.status === tab);
 
-  function updateStatus(id: string, status: 'accepted' | 'pending') {
+  async function updateStatus(id: string, status: 'accepted' | 'pending') {
     const r = requests.find((x) => x.id === id);
     setRequests((rs) => rs.map((x) => (x.id === id ? { ...x, status } : x)));
     if (!r) return;
+    
+    // Update on backend
+    try {
+      await fetch(`${BASE_URL}/bookings/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: status === 'accepted' ? 'upcoming' : 'rejected' })
+      });
+    } catch {}
+
     // Notify the user about acceptance / decline.
     const accepted = status === 'accepted';
     addNotification({
       audience: 'user',
-      recipient_id: '1', // demo user (Sanjay)
+      recipient_id: r.client_id, 
       kind: accepted ? 'booking_accepted' : 'booking_declined',
       title: accepted ? 'Booking accepted ✓' : 'Booking declined',
       body: accepted

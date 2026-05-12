@@ -33,13 +33,27 @@ export default function HomePage() {
   const [listening, setListening] = useState(false);
   const [unread, setUnread] = useState(0);
 
+  const [userId, setUserId] = useState<string>('1');
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const authRaw = await storage.get('workmithra:auth');
+        if (authRaw) {
+          const auth = JSON.parse(authRaw);
+          if (auth.id) setUserId(String(auth.id));
+        }
+      } catch {}
+    })();
+  }, []);
+
   useEffect(() => {
     let alive = true;
-    const tick = () => unreadCount('user', '1').then((n) => { if (alive) setUnread(n); }).catch(() => {});
+    const tick = () => unreadCount('user', userId).then((n) => { if (alive) setUnread(n); }).catch(() => {});
     tick();
     const id = setInterval(tick, 4000);
     return () => { alive = false; clearInterval(id); };
-  }, []);
+  }, [userId]);
 
   // Filter state
   const [filterVisible, setFilterVisible] = useState(false);
@@ -215,7 +229,7 @@ export default function HomePage() {
           </TouchableOpacity>
           <TouchableOpacity
             style={styles.bellBtn}
-            onPress={() => router.push({ pathname: '/notifications', params: { as: 'user', id: '1' } })}
+            onPress={() => router.push({ pathname: '/notifications', params: { as: 'user', id: userId } })}
             activeOpacity={0.85}
           >
             <Ionicons name="notifications-outline" size={18} color="#fff" />

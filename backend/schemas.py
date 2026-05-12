@@ -54,11 +54,13 @@ class PasswordChange(BaseModel):
 class UserLogin(BaseModel):
     identifier: str
     password: str
+    role: str = "user"
 
 
 class WorkerBase(BaseModel):
     full_name: Optional[str] = None
     phone: Optional[str] = None
+    email: Optional[EmailStr] = None
     skill: Optional[str] = None
     experience_years: Optional[int] = None
     bio: Optional[str] = None
@@ -73,7 +75,8 @@ class WorkerBase(BaseModel):
 
 
 class WorkerCreate(WorkerBase):
-    user_id: Optional[int]
+    user_id: Optional[int] = None
+    password: str
 
 
 class WorkerResponse(WorkerBase):

@@ -67,6 +67,8 @@ class Worker(Base):
     latitude = Column(Float, nullable=True)
     longitude = Column(Float, nullable=True)
     aadhaar_verified = Column(Boolean, default=False)
+    email = Column(String(255), unique=True, index=True, nullable=True)
+    hashed_password = Column(String(255), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     user = relationship("User", back_populates="workers")

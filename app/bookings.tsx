@@ -51,14 +51,14 @@ export default function BookingsPage() {
   const [tab, setTab] = useState<Tab>('present');
   const [workers, setWorkers] = useState<Worker[]>([]);
   const [loading, setLoading] = useState(true);
-  const [currentUserId, setCurrentUserId] = useState(1);
+  const [currentUserId, setCurrentUserId] = useState(0);
 
   const [present, setPresent] = useState<Booking[]>([]);
   const [past, setPast] = useState<Booking[]>([]);
 
   useEffect(() => {
     (async () => {
-      let uid = 1;
+      let uid = 0;
       try {
         const authRaw = await storage.get('workmithra:auth');
         if (authRaw) {

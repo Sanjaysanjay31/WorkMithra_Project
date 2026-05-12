@@ -33,7 +33,7 @@ export default function NotificationsPage() {
   const router = useRouter();
   const { as, id } = useLocalSearchParams<{ as?: string; id?: string }>();
   const audience: NotifAudience = (as === 'worker' ? 'worker' : 'user');
-  const recipientId = String(id || '1');
+  const recipientId = String(id || '');
 
   const [items, setItems] = useState<Notification[]>([]);
 

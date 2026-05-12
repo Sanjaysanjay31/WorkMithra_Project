@@ -82,7 +82,14 @@ export default function WorkerProfilePage() {
       return;
     }
     setSaving(true);
-    try { await storage.set(WORKER_KEY, JSON.stringify(profile)); } catch {}
+    try {
+      await storage.set(WORKER_KEY, JSON.stringify(profile));
+      await fetch(`${BASE_URL}/workers/${currentWorkerId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(profile),
+      });
+    } catch {}
     setSaving(false);
     Alert.alert('Saved', 'Your worker profile has been saved.');
   }
@@ -265,6 +272,21 @@ export default function WorkerProfilePage() {
                   <Text style={styles.saveBtnText}>  Save Changes</Text>
                 </>
               )}
+            </TouchableOpacity>
+          </View>
+
+          {/* Switch Role */}
+          <View style={styles.section}>
+            <SectionTitle>Account Settings</SectionTitle>
+            <TouchableOpacity style={styles.pwdOption} onPress={() => { storage.delete('workmithra:auth'); router.replace('/login'); }}>
+              <View style={[styles.pwdIcon, { backgroundColor: '#e0f2fe' }]}>
+                <Ionicons name="swap-horizontal" size={18} color="#0284c7" />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.pwdTitle}>Switch Role</Text>
+                <Text style={styles.pwdSub}>Log out and switch between Worker and User</Text>
+              </View>
+              <Ionicons name="chevron-forward" size={18} color="#999" />
             </TouchableOpacity>
           </View>
 

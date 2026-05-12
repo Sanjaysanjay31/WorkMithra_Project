@@ -12,7 +12,11 @@ import {
     Text,
     TouchableOpacity,
     View,
+    Platform,
 } from 'react-native';
+
+const DEFAULT_API_URL = Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://localhost:8000';
+const BASE_URL = process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL;
 
 const WORKER_PROFILE_KEY = 'workmithra:worker_profile';
 const WORKER_PASTWORK_KEY = 'workmithra:worker_pastwork';
@@ -46,26 +50,55 @@ export default function WorkerDashboard() {
   const [pastWork, setPastWork] = useState<PastWorkItem[]>([]);
   const [unread, setUnread] = useState(0);
 
+  const [userId, setUserId] = useState<string>('1');
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const authRaw = await storage.get('workmithra:auth');
+        if (authRaw) {
+          const auth = JSON.parse(authRaw);
+          if (auth.id) setUserId(String(auth.id));
+        }
+      } catch {}
+    })();
+  }, []);
+
   useEffect(() => {
     let alive = true;
-    const tick = () => unreadCount('worker', '1').then((n) => { if (alive) setUnread(n); }).catch(() => {});
+    const tick = () => unreadCount('worker', userId).then((n) => { if (alive) setUnread(n); }).catch(() => {});
     tick();
     const id = setInterval(tick, 4000);
     return () => { alive = false; clearInterval(id); };
-  }, []);
+  }, [userId]);
 
   useEffect(() => {
     (async () => {
       const p = await storage.get(WORKER_PROFILE_KEY);
       if (p) try { setProfile(JSON.parse(p)); } catch {}
-      const pw = await storage.get(WORKER_PASTWORK_KEY);
-      if (pw) {
-        try { setPastWork(JSON.parse(pw)); } catch { setPastWork(SAMPLE_PASTWORK); }
-      } else {
-        setPastWork(SAMPLE_PASTWORK);
+      try {
+        const res = await fetch(`${BASE_URL}/bookings?worker_id=${userId}`);
+        if (res.ok) {
+          const data = await res.json();
+          const past = data.filter((b: any) => b.status === 'success' || b.status === 'completed').map((b: any) => ({
+            id: String(b.id),
+            client_name: `User ${b.user_id}`,
+            client_avatar: `https://i.pravatar.cc/150?u=${b.user_id}`,
+            place: b.customer_address || 'Local Area',
+            date: b.booking_date || 'Recent',
+            description: b.problem_description || 'Completed service',
+            payment: b.final_price || b.estimated_price || 0,
+            rating: 5, // We don't have reviews attached to bookings in this API response yet, default to 5
+            review: 'Great work!',
+            photo: 'https://placehold.co/400x200/e9ecef/a3a3a3?text=Job+Completed',
+          }));
+          setPastWork(past);
+        }
+      } catch (e) {
+        console.warn('Failed to fetch past work', e);
       }
     })();
-  }, []);
+  }, [userId]);
 
   const avgRating = pastWork.length
     ? (pastWork.reduce((s, w) => s + w.rating, 0) / pastWork.length).toFixed(1)
@@ -81,7 +114,7 @@ export default function WorkerDashboard() {
         <View style={styles.hero}>
           <TouchableOpacity
             style={styles.bellBtn}
-            onPress={() => router.push({ pathname: '/notifications', params: { as: 'worker', id: '1' } })}
+            onPress={() => router.push({ pathname: '/notifications', params: { as: 'worker', id: userId } })}
             activeOpacity={0.85}
           >
             <Ionicons name="notifications-outline" size={18} color="#fff" />

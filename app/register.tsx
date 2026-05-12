@@ -43,6 +43,7 @@ export default function RegisterScreen() {
     confirmPassword: '',
   });
 
+  const [role, setRole] = useState<'user' | 'worker'>('user');
   const [isOtpSent, setIsOtpSent] = useState(false);
   const [isOtpVerified, setIsOtpVerified] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -120,6 +121,7 @@ export default function RegisterScreen() {
         phone: formData.phone,
         email: formData.email,
         password: formData.password,
+        role: role,
       };
       console.log(`Registering via: ${BASE_URL}/register`);
       const res = await fetch(`${BASE_URL}/register`, {
@@ -153,7 +155,7 @@ export default function RegisterScreen() {
       await persistRegistration();
       setMessage({ type: 'success', text: 'Registration successful!' });
       setTimeout(() => {
-        router.replace('/switch_role');
+        router.replace('/login');
       }, 1500);
     } catch (error: any) {
       setLoading(false);
@@ -200,6 +202,23 @@ export default function RegisterScreen() {
             </View>
 
             <View style={styles.form}>
+              <View style={styles.roleContainer}>
+                <TouchableOpacity 
+                  style={[styles.roleButton, role === 'user' && styles.roleButtonActive]}
+                  onPress={() => setRole('user')}
+                >
+                  <Ionicons name="person" size={18} color={role === 'user' ? '#fff' : '#6F42C1'} />
+                  <Text style={[styles.roleText, role === 'user' && styles.roleTextActive]}>User</Text>
+                </TouchableOpacity>
+                <TouchableOpacity 
+                  style={[styles.roleButton, role === 'worker' && styles.roleButtonActive]}
+                  onPress={() => setRole('worker')}
+                >
+                  <Ionicons name="briefcase" size={18} color={role === 'worker' ? '#fff' : '#6F42C1'} />
+                  <Text style={[styles.roleText, role === 'worker' && styles.roleTextActive]}>Worker</Text>
+                </TouchableOpacity>
+              </View>
+
               {/* Feedback Message */}
               {message.text ? (
                 <View style={[
@@ -416,6 +435,35 @@ const styles = StyleSheet.create({
   },
   form: {
     width: '100%',
+  },
+  roleContainer: {
+    flexDirection: 'row',
+    backgroundColor: '#f8f9fa',
+    borderRadius: 16,
+    padding: 6,
+    marginBottom: 20,
+    borderWidth: 1,
+    borderColor: '#e9ecef',
+  },
+  roleButton: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 12,
+    borderRadius: 12,
+    gap: 8,
+  },
+  roleButtonActive: {
+    backgroundColor: '#6F42C1',
+  },
+  roleText: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#6F42C1',
+  },
+  roleTextActive: {
+    color: '#fff',
   },
   messageContainer: {
     flexDirection: 'row',

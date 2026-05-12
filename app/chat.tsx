@@ -40,15 +40,56 @@ export default function ChatScreen() {
   const [speakingId, setSpeakingId] = useState<string | null>(null);
   const listRef = useRef<FlatList<Bubble>>(null);
 
+  const [currentUserId, setCurrentUserId] = useState<string>('');
+
   useEffect(() => {
-    setMsgs([{
-      id: 'sys',
-      side: 'worker',
-      original: workerName ? `Hello, this is ${workerName}. How can I help you?` : 'Hello! How can I help you?',
-      srcLang: 'en-IN',
-      translations: {},
-    }]);
-  }, []);
+    (async () => {
+      let uid = '';
+      try {
+        const authRaw = await storage.get('workmithra:auth');
+        if (authRaw) {
+          const auth = JSON.parse(authRaw);
+          if (auth.id) uid = String(auth.id);
+          setCurrentUserId(uid);
+        }
+      } catch {}
+
+      // Initial system message
+      const sysMsg: Bubble = {
+        id: 'sys',
+        side: 'worker',
+        original: workerName ? `Hello, this is ${workerName}. How can I help you?` : 'Hello! How can I help you?',
+        srcLang: 'en-IN',
+        translations: {},
+      };
+
+      if (!uid || !workerId) {
+        setMsgs([sysMsg]);
+        return;
+      }
+
+      // Fetch history
+      try {
+        const res = await fetch(`${BASE_URL}/chat/conversation/${uid}/${workerId}`);
+        if (res.ok) {
+          const history = await res.json();
+          const loadedMsgs: Bubble[] = history.map((m: any) => ({
+            id: String(m.id),
+            side: String(m.sender_id) === uid ? 'client' : 'worker',
+            original: m.message,
+            srcLang: 'en-IN',
+            translations: {},
+          }));
+          setMsgs([sysMsg, ...loadedMsgs]);
+          setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 100);
+        } else {
+          setMsgs([sysMsg]);
+        }
+      } catch {
+        setMsgs([sysMsg]);
+      }
+    })();
+  }, [workerId, workerName]);
 
   function langForSide(s: Side): LangCode {
     return s === 'client' ? clientLang : workerLang;
@@ -82,16 +123,31 @@ export default function ChatScreen() {
       const otherLang = me === 'client' ? workerLang : clientLang;
       const id = String(Date.now());
       const b: Bubble = { id, side: me, original: value, srcLang, translations: {} };
+      
       // pre-translate to the other side's language
       try {
         const t = await aiTranslate(value, srcLang, otherLang);
         b.translations[otherLang] = t;
       } catch {}
+
       setMsgs((m) => {
         const next = [...m, b];
         setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 50);
         return next;
       });
+
+      // Send to backend
+      if (currentUserId && workerId) {
+        await fetch(`${BASE_URL}/chat`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            sender_id: Number(currentUserId),
+            receiver_id: Number(workerId),
+            message: value,
+          }),
+        });
+      }
     } finally {
       setBusy(false);
     }

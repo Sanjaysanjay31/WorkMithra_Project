@@ -25,6 +25,9 @@ def smart_match_workers(
     verified_only: Optional[bool] = False,
     availability: Optional[str] = None,
     sort_by: Optional[str] = None,
+    lat: Optional[float] = None,
+    lng: Optional[float] = None,
+    radius: Optional[float] = 10.0, # default 10km
     skip: int = 0, limit: int = 20,
     db: Session = Depends(database.get_db)
 ):
@@ -32,6 +35,20 @@ def smart_match_workers(
     
     if q:
         query = query.filter(models.Worker.skill.ilike(f"%{q}%"))
+    
+    if lat is not None and lng is not None:
+        from sqlalchemy import func
+        # Haversine formula in KM
+        # 6371 * acos(cos(radians(lat)) * cos(radians(latitude)) * cos(radians(longitude) - radians(lng)) + sin(radians(lat)) * sin(radians(latitude)))
+        haversine = func.acos(
+            func.sin(func.radians(lat)) * func.sin(func.radians(models.Worker.latitude)) +
+            func.cos(func.radians(lat)) * func.cos(func.radians(models.Worker.latitude)) *
+            func.cos(func.radians(models.Worker.longitude) - func.radians(lng))
+        ) * 6371
+        query = query.filter(haversine <= radius)
+        if sort_by == 'location':
+             query = query.order_by(asc(haversine))
+
     if min_wage is not None:
         query = query.filter(models.Worker.hourly_rate >= min_wage)
     if max_wage is not None:
@@ -72,3 +89,18 @@ def get_worker(worker_id: int, db: Session = Depends(database.get_db)):
         raise HTTPException(status_code=404, detail="Worker not found")
     return worker
 
+@router.put("/{worker_id}", response_model=schemas.WorkerResponse)
+def update_worker(worker_id: int, worker_update: schemas.WorkerResponse, db: Session = Depends(database.get_db)):
+    """Update a specific worker's profile."""
+    worker = db.query(models.Worker).filter(models.Worker.id == worker_id).first()
+    if not worker:
+        raise HTTPException(status_code=404, detail="Worker not found")
+    
+    # Update fields
+    for key, value in worker_update.dict(exclude_unset=True).items():
+        if hasattr(worker, key) and key != "id":
+            setattr(worker, key, value)
+            
+    db.commit()
+    db.refresh(worker)
+    return worker
