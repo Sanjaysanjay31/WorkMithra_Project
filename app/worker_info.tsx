@@ -21,16 +21,11 @@ import {
 const DEFAULT_API_URL = Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://localhost:8000';
 const BASE_URL = process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL;
 
+import { SAMPLE_REVIEWS } from './mock_data';
+
 type Tab = 'profile' | 'reviews' | 'chat' | 'booking' | 'map';
 
-type ReviewItem = { id: string; name: string; rating: number; date: string; text: string };
 type HistoryItem = { id: string; date: string; time: string; price: number; status: 'completed' | 'cancelled' };
-
-const SAMPLE_REVIEWS: ReviewItem[] = [
-  { id: 'r1', name: 'Ravi K.', rating: 5, date: '2026-04-22', text: 'Excellent work, on time and very polite. Will book again!' },
-  { id: 'r2', name: 'Priya S.', rating: 4.5, date: '2026-03-15', text: 'Did the job neatly. Good value for money.' },
-  { id: 'r3', name: 'Anil R.', rating: 4, date: '2026-02-10', text: 'Fixed the issue quickly. Communication could be better.' },
-];
 
 const SAMPLE_HISTORY_FACTORY = (workerId: string): HistoryItem[] => [
   { id: `${workerId}-h1`, date: '2026-04-22', time: '11:00 AM', price: 1500, status: 'completed' },
@@ -62,6 +57,28 @@ export default function WorkerInfoPage() {
 
   // Map state
   const [clientLoc, setClientLoc] = useState<{ lat: number; lng: number } | null>(null);
+
+  // Feedback state
+  const [reviews, setReviews] = useState(SAMPLE_REVIEWS);
+  const [feedbackText, setFeedbackText] = useState('');
+  const [feedbackRating, setFeedbackRating] = useState(5);
+
+  async function handleSubmitFeedback() {
+    if (!feedbackText.trim()) {
+      Alert.alert('Feedback', 'Please write something before submitting.');
+      return;
+    }
+    const newReview = {
+      id: `r-${Date.now()}`,
+      name: 'You (Demo)',
+      rating: feedbackRating,
+      date: new Date().toISOString().split('T')[0],
+      text: feedbackText,
+    };
+    setReviews([newReview, ...reviews]);
+    setFeedbackText('');
+    Alert.alert('Success', 'Thank you for your feedback!');
+  }
 
   useEffect(() => {
     fetchWorkerDetails();
@@ -226,8 +243,36 @@ export default function WorkerInfoPage() {
 
           {activeTab === 'reviews' && (
             <View style={styles.tabPane}>
-              <Text style={styles.sectionTitle}>What clients say</Text>
-              {SAMPLE_REVIEWS.map((r) => (
+              <Text style={styles.sectionTitle}>Leave Feedback</Text>
+              <View style={styles.feedbackForm}>
+                <View style={styles.starsRow}>
+                  {[1, 2, 3, 4, 5].map(star => (
+                    <TouchableOpacity key={star} onPress={() => setFeedbackRating(star)} activeOpacity={0.7}>
+                      <Ionicons 
+                        name={star <= feedbackRating ? "star" : "star-outline"} 
+                        size={26} 
+                        color="#FFB800" 
+                      />
+                    </TouchableOpacity>
+                  ))}
+                  <Text style={styles.ratingLabel}>{feedbackRating}/5</Text>
+                </View>
+                <TextInput
+                  style={styles.feedbackInput}
+                  placeholder="Share your experience with this worker..."
+                  placeholderTextColor="#999"
+                  multiline
+                  value={feedbackText}
+                  onChangeText={setFeedbackText}
+                />
+                <TouchableOpacity style={styles.submitFeedbackBtn} onPress={handleSubmitFeedback} activeOpacity={0.85}>
+                  <Ionicons name="send" size={16} color="#fff" />
+                  <Text style={styles.submitFeedbackText}>Submit Review</Text>
+                </TouchableOpacity>
+              </View>
+
+              <Text style={[styles.sectionTitle, { marginTop: 24 }]}>What clients say</Text>
+              {reviews.map((r) => (
                 <View key={r.id} style={styles.reviewCard}>
                   <View style={styles.reviewHeader}>
                     <Text style={styles.reviewName}>{r.name}</Text>
@@ -428,6 +473,13 @@ const styles = StyleSheet.create({
   reviewRating: { fontSize: 12, fontWeight: '800', color: '#FFB800' },
   reviewDate: { fontSize: 11, color: '#999', marginTop: 2 },
   reviewText: { fontSize: 12, color: '#444', lineHeight: 18, marginTop: 6, fontStyle: 'italic' },
+
+  feedbackForm: { backgroundColor: '#fcfcfc', borderRadius: 12, padding: 14, borderWidth: 1, borderColor: '#eee', marginBottom: 10 },
+  starsRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 12, gap: 4 },
+  ratingLabel: { marginLeft: 8, fontSize: 14, fontWeight: '800', color: '#6F42C1' },
+  feedbackInput: { backgroundColor: '#fff', borderRadius: 10, borderWidth: 1, borderColor: '#e0e0e0', padding: 12, fontSize: 13, minHeight: 80, textAlignVertical: 'top', color: '#333' },
+  submitFeedbackBtn: { flexDirection: 'row', backgroundColor: '#6F42C1', paddingVertical: 12, borderRadius: 10, alignItems: 'center', justifyContent: 'center', marginTop: 12, gap: 6 },
+  submitFeedbackText: { color: '#fff', fontWeight: '800', fontSize: 14 },
 
   contactInfo: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#f8f8f8', padding: 14, borderRadius: 12, marginBottom: 12 },
   phoneText: { fontSize: 14, fontWeight: '600', color: '#333', marginLeft: 10 },

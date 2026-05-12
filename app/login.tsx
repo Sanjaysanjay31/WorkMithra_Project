@@ -70,6 +70,15 @@ export default function LoginScreen() {
 
       if (response.ok) {
         setLoading(false);
+        try {
+          const authData = {
+             id: data.user?.id || '1',
+             phone: identifier,
+             password: password,
+             token: data.access_token || '',
+          };
+          await storage.set('workmithra:auth', JSON.stringify(authData));
+        } catch {}
         router.replace('/switch_role');
       } else {
         setLoading(false);

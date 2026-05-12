@@ -34,8 +34,6 @@ const EMPTY: ProfileForm = {
   full_name: '', email: '', phone: '', alternate_phone: '', location: '', pincode: '', profile_image: '',
 };
 
-const CURRENT_USER_ID = '1'; // Sanjay (demo)
-
 export default function ProfilePage() {
   const router = useRouter();
   const [profile, setProfile] = useState<ProfileForm>(EMPTY);
@@ -49,6 +47,7 @@ export default function ProfilePage() {
   const [confirmPwd, setConfirmPwd] = useState('');
   const [showPwd, setShowPwd] = useState(false);
   const [pwdLoading, setPwdLoading] = useState(false);
+  const [currentUserId, setCurrentUserId] = useState('1');
 
   useEffect(() => { load(); }, []);
 
@@ -56,6 +55,11 @@ export default function ProfilePage() {
     try {
       const raw = await storage.get(PROFILE_KEY);
       if (raw) setProfile({ ...EMPTY, ...JSON.parse(raw) });
+      const authRaw = await storage.get('workmithra:auth');
+      if (authRaw) {
+        const auth = JSON.parse(authRaw);
+        if (auth.id) setCurrentUserId(String(auth.id));
+      }
     } catch {}
   }
 
@@ -73,7 +77,7 @@ export default function ProfilePage() {
     try {
       await fetch(`${BASE_URL}/profiles/me`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json', 'X-User-Id': CURRENT_USER_ID },
+        headers: { 'Content-Type': 'application/json', 'X-User-Id': currentUserId },
         body: JSON.stringify(profile),
       });
     } catch {}
@@ -96,7 +100,7 @@ export default function ProfilePage() {
       try {
         const fd = new FormData();
         fd.append('file', file);
-        fd.append('user_id', CURRENT_USER_ID);
+        fd.append('user_id', currentUserId);
         const res = await fetch(`${BASE_URL}/upload-profile-image`, { method: 'POST', body: fd });
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || 'Upload failed');

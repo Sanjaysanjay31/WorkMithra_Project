@@ -16,8 +16,6 @@ import {
 const DEFAULT_API_URL = Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://localhost:8000';
 const BASE_URL = process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL;
 
-const CURRENT_USER_ID = 1; // Sanjay
-
 type Tab = 'present' | 'past';
 type Status = 'upcoming' | 'success' | 'rejected';
 
@@ -46,14 +44,14 @@ function statusColor(s: Status) {
 }
 
 /** Build sample bookings deterministically from the real worker list. */
-function buildBookings(workers: Worker[]): { present: Booking[]; past: Booking[] } {
+function buildBookings(workers: Worker[], currentUserId: number): { present: Booking[]; past: Booking[] } {
   if (workers.length === 0) return { present: [], past: [] };
   const pick = (i: number) => workers[i % workers.length];
 
   const present: Booking[] = [
     {
       id: 'p1',
-      user_id: CURRENT_USER_ID,
+      user_id: currentUserId,
       worker: pick(0),
       status: 'upcoming',
       amount: Math.round(Number(pick(0).hourly_rate || 500) * 1.2),
@@ -61,7 +59,7 @@ function buildBookings(workers: Worker[]): { present: Booking[]; past: Booking[]
     },
     {
       id: 'p2',
-      user_id: CURRENT_USER_ID,
+      user_id: currentUserId,
       worker: pick(1),
       status: 'upcoming',
       amount: Math.round(Number(pick(1).hourly_rate || 500) * 1.5),
@@ -72,7 +70,7 @@ function buildBookings(workers: Worker[]): { present: Booking[]; past: Booking[]
   const past: Booking[] = [
     {
       id: 'h1',
-      user_id: CURRENT_USER_ID,
+      user_id: currentUserId,
       worker: pick(2),
       status: 'success',
       amount: Math.round(Number(pick(2).hourly_rate || 500) * 2),
@@ -80,7 +78,7 @@ function buildBookings(workers: Worker[]): { present: Booking[]; past: Booking[]
     },
     {
       id: 'h2',
-      user_id: CURRENT_USER_ID,
+      user_id: currentUserId,
       worker: pick(3),
       status: 'success',
       amount: Math.round(Number(pick(3).hourly_rate || 500) * 3),
@@ -88,7 +86,7 @@ function buildBookings(workers: Worker[]): { present: Booking[]; past: Booking[]
     },
     {
       id: 'h3',
-      user_id: CURRENT_USER_ID,
+      user_id: currentUserId,
       worker: pick(4),
       status: 'rejected',
       amount: 0,
@@ -104,9 +102,17 @@ export default function BookingsPage() {
   const [tab, setTab] = useState<Tab>('present');
   const [workers, setWorkers] = useState<Worker[]>([]);
   const [loading, setLoading] = useState(true);
+  const [currentUserId, setCurrentUserId] = useState(1);
 
   useEffect(() => {
     (async () => {
+      try {
+        const authRaw = await storage.get('workmithra:auth');
+        if (authRaw) {
+          const auth = JSON.parse(authRaw);
+          if (auth.id) setCurrentUserId(Number(auth.id));
+        }
+      } catch {}
       try {
         const res = await fetch(`${BASE_URL}/workers`);
         if (res.ok) {
@@ -119,7 +125,7 @@ export default function BookingsPage() {
     })();
   }, []);
 
-  const { present, past } = useMemo(() => buildBookings(workers), [workers]);
+  const { present, past } = useMemo(() => buildBookings(workers, currentUserId), [workers, currentUserId]);
   const data = tab === 'present' ? present : past;
 
   const renderCard = (b: Booking) => {

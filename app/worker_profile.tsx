@@ -20,8 +20,6 @@ const DEFAULT_API_URL = Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'ht
 const BASE_URL = process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL;
 const WORKER_KEY = 'workmithra:worker_profile';
 
-const CURRENT_WORKER_ID = '1';
-
 type WorkerForm = {
   full_name: string;
   age: string;
@@ -58,6 +56,7 @@ export default function WorkerProfilePage() {
   const [confirmPwd, setConfirmPwd] = useState('');
   const [showPwd, setShowPwd] = useState(false);
   const [pwdLoading, setPwdLoading] = useState(false);
+  const [currentWorkerId, setCurrentWorkerId] = useState('1');
 
   useEffect(() => { load(); }, []);
 
@@ -65,6 +64,11 @@ export default function WorkerProfilePage() {
     try {
       const raw = await storage.get(WORKER_KEY);
       if (raw) setProfile({ ...EMPTY, ...JSON.parse(raw) });
+      const authRaw = await storage.get('workmithra:auth');
+      if (authRaw) {
+        const auth = JSON.parse(authRaw);
+        if (auth.id) setCurrentWorkerId(String(auth.id));
+      }
     } catch {}
   }
 
@@ -98,7 +102,7 @@ export default function WorkerProfilePage() {
       try {
         const fd = new FormData();
         fd.append('file', file);
-        fd.append('user_id', CURRENT_WORKER_ID);
+        fd.append('user_id', currentWorkerId);
         const res = await fetch(`${BASE_URL}/upload-profile-image`, { method: 'POST', body: fd });
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || 'Upload failed');
