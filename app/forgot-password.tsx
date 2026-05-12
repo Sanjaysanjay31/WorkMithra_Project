@@ -99,7 +99,7 @@ export default function ForgotPasswordScreen() {
       } catch {}
 
       notify('success', 'Password reset successful!');
-      setTimeout(() => router.replace('/switch_role'), 800);
+      setTimeout(() => router.replace('/login'), 800);
     } catch (e: any) {
       notify('error', e.message || 'Reset failed');
     } finally {

@@ -13,7 +13,7 @@ export default function WorkerBottomNav({ currentRoute }: Props) {
   const navItems = [
     { id: 'dashboard', label: 'Dashboard', icon: 'grid', route: '/worker_dashboard' },
     { id: 'requests', label: 'Requests', icon: 'mail-unread', route: '/worker_bookings' },
-    { id: 'switch_role', label: 'Switch', icon: 'repeat', route: '/switch_role' },
+    { id: 'switch_role', label: 'Switch', icon: 'repeat', route: '/login' },
     { id: 'profile', label: 'Profile', icon: 'person', route: '/worker_profile' },
   ];
 

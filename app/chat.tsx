@@ -27,7 +27,7 @@ type Bubble = {
 
 export default function ChatScreen() {
   const router = useRouter();
-  const { workerName } = useLocalSearchParams<{ workerId?: string; workerName?: string }>();
+  const { workerId, workerName } = useLocalSearchParams<{ workerId?: string; workerName?: string }>();
 
   // On this screen the logged-in user is always the client; the worker is on the other side.
   const me: Side = 'client';

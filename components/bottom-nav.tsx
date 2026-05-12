@@ -13,7 +13,7 @@ export default function BottomNav({ currentRoute }: BottomNavProps) {
   const navItems = [
     { id: 'home', label: 'Home', icon: 'home', route: '/homePage' },
     { id: 'bookings', label: 'Bookings', icon: 'calendar', route: '/bookings' },
-    { id: 'switch_role', label: 'Switch', icon: 'repeat', route: '/switch_role' },
+    { id: 'switch_role', label: 'Switch', icon: 'repeat', route: '/login' },
     { id: 'profile', label: 'Profile', icon: 'person', route: '/profile' },
   ];
 
