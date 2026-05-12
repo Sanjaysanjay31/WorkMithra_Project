@@ -55,12 +55,23 @@ export default function HomePage() {
 
   useEffect(() => {
     fetchWorkers();
-  }, []);
+  }, [searchQuery, minWage, maxWage, minExperience, minRating, minJobs, verifiedOnly, availability, sortBy]);
 
   async function fetchWorkers() {
     setLoading(true);
     try {
-      const res = await fetch(`${BASE_URL}/workers`);
+      const params = new URLSearchParams();
+      if (searchQuery.trim()) params.append('q', searchQuery);
+      if (minWage && !isNaN(Number(minWage))) params.append('min_wage', minWage);
+      if (maxWage && !isNaN(Number(maxWage))) params.append('max_wage', maxWage);
+      if (minExperience && !isNaN(Number(minExperience))) params.append('min_experience', minExperience);
+      if (minRating && !isNaN(Number(minRating))) params.append('min_rating', minRating);
+      if (minJobs && !isNaN(Number(minJobs))) params.append('min_jobs', minJobs);
+      if (verifiedOnly) params.append('verified_only', 'true');
+      if (availability) params.append('availability', availability);
+      if (sortBy) params.append('sort_by', sortBy);
+
+      const res = await fetch(`${BASE_URL}/workers/smart-match?${params.toString()}`);
       const data = await res.json();
       setWorkers(data || []);
     } catch (e) {
@@ -70,53 +81,7 @@ export default function HomePage() {
     }
   }
 
-  const filteredWorkers = useMemo(() => {
-    let list = [...workers];
-    if (searchQuery.trim()) {
-      const q = searchQuery.toLowerCase();
-      list = list.filter((w: any) => (w.skill || '').toLowerCase().includes(q));
-    }
-    const minW = parseFloat(minWage);
-    const maxW = parseFloat(maxWage);
-    if (!isNaN(minW)) list = list.filter((w: any) => Number(w.hourly_rate ?? 0) >= minW);
-    if (!isNaN(maxW)) list = list.filter((w: any) => Number(w.hourly_rate ?? 0) <= maxW);
-    const minExp = parseFloat(minExperience);
-    if (!isNaN(minExp)) list = list.filter((w: any) => Number(w.experience_years ?? 0) >= minExp);
-    const minR = parseFloat(minRating);
-    if (!isNaN(minR)) list = list.filter((w: any) => Number(w.rating ?? 0) >= minR);
-    const maxD = parseFloat(maxDistance);
-    if (!isNaN(maxD)) list = list.filter((w: any) => (w.distance_km == null) || Number(w.distance_km) <= maxD);
-    const minJ = parseInt(minJobs, 10);
-    if (!isNaN(minJ)) list = list.filter((w: any) => Number(w.completed_jobs ?? w.total_jobs ?? 0) >= minJ);
-    if (verifiedOnly) list = list.filter((w: any) => Boolean(w.aadhaar_verified));
-    if (availability === 'now') {
-      list = list.filter((w: any) => w.availability === true || (w.current_status || '').toLowerCase() === 'available');
-    } else if (availability === 'today') {
-      list = list.filter((w: any) => (w.current_status || '').toLowerCase() !== 'offline');
-    }
-
-    switch (sortBy) {
-      case 'wage_asc':
-        list.sort((a, b) => Number(a.hourly_rate ?? 0) - Number(b.hourly_rate ?? 0));
-        break;
-      case 'wage_desc':
-        list.sort((a, b) => Number(b.hourly_rate ?? 0) - Number(a.hourly_rate ?? 0));
-        break;
-      case 'experience':
-        list.sort((a, b) => Number(b.experience_years ?? 0) - Number(a.experience_years ?? 0));
-        break;
-      case 'rating':
-        list.sort((a, b) => Number(b.rating ?? 0) - Number(a.rating ?? 0));
-        break;
-      case 'location':
-        list.sort((a, b) => Number(a.distance_km ?? 9999) - Number(b.distance_km ?? 9999));
-        break;
-      case 'jobs':
-        list.sort((a, b) => Number(b.completed_jobs ?? b.total_jobs ?? 0) - Number(a.completed_jobs ?? a.total_jobs ?? 0));
-        break;
-    }
-    return list;
-  }, [workers, searchQuery, minWage, maxWage, maxDistance, minExperience, minRating, minJobs, verifiedOnly, availability, sortBy]);
+  const filteredWorkers = workers;
 
   function onPressWorker(w: any) {
     router.push({ pathname: '/worker_info', params: { id: String(w.id) } });

@@ -1,3 +1,2 @@
-import pytest
-def test_database():
+def test_dummy():
     assert True

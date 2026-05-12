@@ -1,3 +1,2 @@
-import pytest
-def test_schemas():
+def test_dummy():
     assert True

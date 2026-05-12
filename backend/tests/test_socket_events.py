@@ -1,3 +1,2 @@
-import pytest
-def test_socket_events():
+def test_dummy():
     assert True

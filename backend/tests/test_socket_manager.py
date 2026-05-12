@@ -1,3 +1,2 @@
-import pytest
-def test_socket_manager():
+def test_dummy():
     assert True

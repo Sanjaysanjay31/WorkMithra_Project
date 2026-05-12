@@ -233,6 +233,9 @@ def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
     db.refresh(new_user)
     return new_user
 
+import jwt as pyjwt
+from datetime import datetime, timedelta
+
 @app.post("/login")
 def login(user: schemas.UserLogin, db: Session = Depends(get_db)):
     db_user = db.query(models.User).filter(
@@ -242,8 +245,14 @@ def login(user: schemas.UserLogin, db: Session = Depends(get_db)):
     if not db_user or not pwd_context.verify(user.password, db_user.hashed_password):
         raise HTTPException(status_code=400, detail="Invalid credentials")
 
+    # Generate a simple JWT token
+    secret_key = os.getenv("JWT_SECRET", "supersecretkey")
+    token_data = {"sub": str(db_user.id), "exp": datetime.utcnow() + timedelta(days=7)}
+    access_token = pyjwt.encode(token_data, secret_key, algorithm="HS256")
+
     return {
         "message": "Login successful",
+        "access_token": access_token,
         "user": {
             "id": db_user.id,
             "full_name": db_user.full_name,

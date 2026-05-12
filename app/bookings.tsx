@@ -1,5 +1,6 @@
 import BottomNav from '@/components/bottom-nav';
 import { platformShadow } from '@/lib/shadow';
+import { storage } from '@/lib/storage';
 import { Stack, useRouter } from 'expo-router';
 import React, { useEffect, useMemo, useState } from 'react';
 import {
@@ -43,59 +44,7 @@ function statusColor(s: Status) {
   return { bg: '#dbeafe', fg: '#1e40af', label: '⏳ Upcoming' };
 }
 
-/** Build sample bookings deterministically from the real worker list. */
-function buildBookings(workers: Worker[], currentUserId: number): { present: Booking[]; past: Booking[] } {
-  if (workers.length === 0) return { present: [], past: [] };
-  const pick = (i: number) => workers[i % workers.length];
 
-  const present: Booking[] = [
-    {
-      id: 'p1',
-      user_id: currentUserId,
-      worker: pick(0),
-      status: 'upcoming',
-      amount: Math.round(Number(pick(0).hourly_rate || 500) * 1.2),
-      date: '2026-05-14 · 10:00 AM',
-    },
-    {
-      id: 'p2',
-      user_id: currentUserId,
-      worker: pick(1),
-      status: 'upcoming',
-      amount: Math.round(Number(pick(1).hourly_rate || 500) * 1.5),
-      date: '2026-05-16 · 3:30 PM',
-    },
-  ];
-
-  const past: Booking[] = [
-    {
-      id: 'h1',
-      user_id: currentUserId,
-      worker: pick(2),
-      status: 'success',
-      amount: Math.round(Number(pick(2).hourly_rate || 500) * 2),
-      date: '2026-04-22 · 11:00 AM',
-    },
-    {
-      id: 'h2',
-      user_id: currentUserId,
-      worker: pick(3),
-      status: 'success',
-      amount: Math.round(Number(pick(3).hourly_rate || 500) * 3),
-      date: '2026-03-15 · 9:30 AM',
-    },
-    {
-      id: 'h3',
-      user_id: currentUserId,
-      worker: pick(4),
-      status: 'rejected',
-      amount: 0,
-      date: '2026-02-28 · 4:00 PM',
-    },
-  ];
-
-  return { present, past };
-}
 
 export default function BookingsPage() {
   const router = useRouter();
@@ -104,28 +53,60 @@ export default function BookingsPage() {
   const [loading, setLoading] = useState(true);
   const [currentUserId, setCurrentUserId] = useState(1);
 
+  const [present, setPresent] = useState<Booking[]>([]);
+  const [past, setPast] = useState<Booking[]>([]);
+
   useEffect(() => {
     (async () => {
+      let uid = 1;
       try {
         const authRaw = await storage.get('workmithra:auth');
         if (authRaw) {
           const auth = JSON.parse(authRaw);
-          if (auth.id) setCurrentUserId(Number(auth.id));
+          if (auth.id) uid = Number(auth.id);
+          setCurrentUserId(uid);
         }
       } catch {}
       try {
-        const res = await fetch(`${BASE_URL}/workers`);
-        if (res.ok) {
-          const data = await res.json();
-          setWorkers(Array.isArray(data) ? data : []);
-        }
-      } catch {} finally {
+        const workersRes = await fetch(`${BASE_URL}/workers`);
+        const workersList: Worker[] = workersRes.ok ? await workersRes.json() : [];
+        setWorkers(workersList);
+
+        const bookingsRes = await fetch(`${BASE_URL}/bookings`);
+        const bookingsList = bookingsRes.ok ? await bookingsRes.json() : [];
+
+        const realPresent: Booking[] = [];
+        const realPast: Booking[] = [];
+
+        bookingsList.forEach((b: any) => {
+          if (b.user_id === uid || b.worker_id === uid) {
+             const w = workersList.find(wk => wk.id === b.worker_id) || { id: b.worker_id || 0 };
+             const bookingItem: Booking = {
+               id: String(b.id),
+               user_id: b.user_id,
+               worker: w as Worker,
+               status: b.status,
+               amount: b.estimated_price || b.final_price || 0,
+               date: b.booking_date ? `${b.booking_date} · ${b.booking_time || ''}` : 'Unknown date',
+             };
+             if (b.status === 'upcoming' || b.status === 'pending') {
+               realPresent.push(bookingItem);
+             } else {
+               realPast.push(bookingItem);
+             }
+          }
+        });
+
+        setPresent(realPresent);
+        setPast(realPast);
+      } catch (e) {
+        console.warn('Failed to fetch bookings', e);
+      } finally {
         setLoading(false);
       }
     })();
   }, []);
 
-  const { present, past } = useMemo(() => buildBookings(workers, currentUserId), [workers, currentUserId]);
   const data = tab === 'present' ? present : past;
 
   const renderCard = (b: Booking) => {

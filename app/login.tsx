@@ -44,17 +44,11 @@ export default function LoginScreen() {
     }
     setLoading(true);
 
-    // Check locally-registered credentials first (works offline)
+    // We no longer perform offline login by checking plaintext password.
     try {
       const cached = await storage.get('workmithra:auth');
       if (cached) {
-        const auth = JSON.parse(cached);
-        const idMatch = identifier === auth.phone || identifier === auth.email;
-        if (idMatch && password === auth.password) {
-          setLoading(false);
-          router.replace('/switch_role');
-          return;
-        }
+        // Just parsing to check validity, but we will always authenticate with server
       }
     } catch { }
     try {
@@ -74,7 +68,6 @@ export default function LoginScreen() {
           const authData = {
              id: data.user?.id || '1',
              phone: identifier,
-             password: password,
              token: data.access_token || '',
           };
           await storage.set('workmithra:auth', JSON.stringify(authData));
