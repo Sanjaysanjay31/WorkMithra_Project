@@ -5,11 +5,14 @@ import { Stack, useRouter } from 'expo-router';
 import React, { useEffect, useMemo, useState } from 'react';
 import {
     ActivityIndicator,
+    Alert,
     Image,
+    Modal,
     Platform,
     ScrollView,
     StyleSheet,
     Text,
+    TextInput,
     TouchableOpacity,
     View,
 } from 'react-native';
@@ -55,6 +58,29 @@ export default function BookingsPage() {
 
   const [present, setPresent] = useState<Booking[]>([]);
   const [past, setPast] = useState<Booking[]>([]);
+  const [priceFor, setPriceFor] = useState<Booking | null>(null);
+  const [priceAmount, setPriceAmount] = useState('');
+
+  async function savePrice() {
+    if (!priceFor) return;
+    const amt = Number(priceAmount);
+    if (!amt || amt <= 0) {
+      Alert.alert('Price', 'Please enter a valid amount in ₹');
+      return;
+    }
+    const b = priceFor;
+    setPresent((rs) => rs.map((x) => (x.id === b.id ? { ...x, amount: amt } : x)));
+    try {
+      await fetch(`${BASE_URL}/bookings/${b.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_id: b.user_id, estimated_price: amt })
+      });
+    } catch {}
+    setPriceFor(null);
+    setPriceAmount('');
+    Alert.alert('Saved', `Agreed price set to ₹${amt}.`);
+  }
 
   useEffect(() => {
     (async () => {
@@ -135,10 +161,18 @@ export default function BookingsPage() {
           </View>
           <View style={styles.metaRow}>
             <Text style={styles.date}>{b.date}</Text>
-            <Text style={styles.amount}>
-              {b.status === 'rejected' ? '—' : `₹${b.amount}`}
+            <Text style={[styles.amount, b.amount <= 0 && { color: '#FF9800', fontSize: 11 }]}>
+              {b.status === 'rejected' ? '—' : (b.amount > 0 ? `₹${b.amount}` : 'Quote pending')}
             </Text>
           </View>
+          {tab === 'present' && b.status !== 'rejected' && (
+            <TouchableOpacity
+              style={styles.priceBtn}
+              onPress={(e) => { (e as any).stopPropagation?.(); setPriceAmount(b.amount > 0 ? String(b.amount) : ''); setPriceFor(b); }}
+            >
+              <Text style={styles.priceBtnText}>{b.amount > 0 ? 'Update agreed price' : 'Enter agreed price'}</Text>
+            </TouchableOpacity>
+          )}
         </View>
       </TouchableOpacity>
     );
@@ -171,6 +205,37 @@ export default function BookingsPage() {
           </ScrollView>
         )}
       </View>
+      <Modal visible={!!priceFor} transparent animationType="fade" onRequestClose={() => setPriceFor(null)}>
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>Set agreed price</Text>
+            {priceFor && (
+              <Text style={styles.modalSub}>With {priceFor.worker.full_name || 'worker'} · {priceFor.date}</Text>
+            )}
+            <View style={styles.amountRow}>
+              <Text style={styles.rupee}>₹</Text>
+              <TextInput
+                style={styles.amountInput}
+                keyboardType="numeric"
+                placeholder="0"
+                placeholderTextColor="#bbb"
+                value={priceAmount}
+                onChangeText={setPriceAmount}
+                autoFocus
+              />
+            </View>
+            <View style={styles.modalActions}>
+              <TouchableOpacity style={[styles.modalBtn, styles.modalCancel]} onPress={() => setPriceFor(null)}>
+                <Text style={styles.modalCancelText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[styles.modalBtn, styles.modalSave]} onPress={savePrice}>
+                <Text style={styles.modalSaveText}>Save</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
       <BottomNav currentRoute="bookings" />
     </View>
   );
@@ -208,4 +273,21 @@ const styles = StyleSheet.create({
   statusText: { fontSize: 10, fontWeight: '800' },
   date: { fontSize: 11, color: '#888' },
   amount: { fontSize: 13, fontWeight: '800', color: '#10b981' },
+
+  priceBtn: { marginTop: 8, paddingVertical: 7, borderRadius: 8, borderWidth: 1, borderColor: '#6F42C1', backgroundColor: '#f5f0fb', alignItems: 'center' },
+  priceBtnText: { color: '#6F42C1', fontWeight: '800', fontSize: 11 },
+
+  modalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'center', alignItems: 'center', padding: 24 },
+  modalCard: { width: '100%', maxWidth: 320, backgroundColor: '#fff', borderRadius: 14, padding: 16 },
+  modalTitle: { fontSize: 16, fontWeight: '800', color: '#333', textAlign: 'center' },
+  modalSub: { fontSize: 12, color: '#666', textAlign: 'center', marginTop: 4 },
+  amountRow: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#f8f8f8', borderRadius: 10, paddingHorizontal: 12, marginTop: 14, borderWidth: 1, borderColor: '#eee' },
+  rupee: { fontSize: 22, fontWeight: '800', color: '#10b981', marginRight: 6 },
+  amountInput: { flex: 1, fontSize: 22, fontWeight: '800', color: '#333', paddingVertical: 10 },
+  modalActions: { flexDirection: 'row', gap: 8, marginTop: 14 },
+  modalBtn: { flex: 1, paddingVertical: 11, borderRadius: 10, alignItems: 'center' },
+  modalCancel: { backgroundColor: '#f0f0f0' },
+  modalCancelText: { color: '#666', fontWeight: '700', fontSize: 13 },
+  modalSave: { backgroundColor: '#6F42C1' },
+  modalSaveText: { color: '#fff', fontWeight: '800', fontSize: 13 },
 });

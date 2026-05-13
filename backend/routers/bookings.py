@@ -10,8 +10,8 @@ router = APIRouter()
 @router.post("/", response_model=schemas.BookingResponse)
 def create_booking(booking: schemas.BookingCreate, db: Session = Depends(database.get_db)):
     """Create a new booking."""
-    if not booking.user_id or not booking.worker_id or not booking.service_id:
-        raise HTTPException(status_code=400, detail="user_id, worker_id, and service_id are required")
+    if not booking.user_id or not booking.worker_id:
+        raise HTTPException(status_code=400, detail="user_id and worker_id are required")
     
     new_booking = models.Booking(
         user_id=booking.user_id,
@@ -70,6 +70,8 @@ def update_booking(booking_id: int, booking_update: schemas.BookingCreate, db: S
         booking.status = booking_update.status
     if booking_update.final_price is not None:
         booking.final_price = booking_update.final_price
+    if booking_update.estimated_price is not None:
+        booking.estimated_price = booking_update.estimated_price
     
     db.commit()
     db.refresh(booking)

@@ -7,8 +7,10 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
     ActivityIndicator,
     Alert,
+    FlatList,
     Image,
     Linking,
+    Modal,
     Platform,
     ScrollView,
     StyleSheet,
@@ -33,6 +35,48 @@ const SAMPLE_HISTORY_FACTORY = (workerId: string): HistoryItem[] => [
 ];
 
 function toRad(d: number) { return (d * Math.PI) / 180; }
+
+function pad(n: number) { return n < 10 ? `0${n}` : String(n); }
+
+function buildUpcomingDates(days = 30): { value: string; label: string }[] {
+  const out: { value: string; label: string }[] = [];
+  const today = new Date();
+  const monthNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const dayNames = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+  for (let i = 0; i < days; i++) {
+    const d = new Date(today);
+    d.setDate(today.getDate() + i);
+    const value = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    const prefix = i === 0 ? 'Today' : i === 1 ? 'Tomorrow' : dayNames[d.getDay()];
+    const label = `${prefix}, ${d.getDate()} ${monthNames[d.getMonth()]}`;
+    out.push({ value, label });
+  }
+  return out;
+}
+
+function buildTimeSlots(): { value: string; label: string }[] {
+  const out: { value: string; label: string }[] = [];
+  for (let h = 8; h <= 20; h++) {
+    for (const m of [0, 30]) {
+      const value = `${pad(h)}:${pad(m)}:00`;
+      const hr12 = ((h + 11) % 12) + 1;
+      const ampm = h < 12 ? 'AM' : 'PM';
+      const label = `${hr12}:${pad(m)} ${ampm}`;
+      out.push({ value, label });
+    }
+  }
+  return out;
+}
+
+function formatTimeLabel(value: string): string {
+  if (!value) return '';
+  const [hStr, mStr] = value.split(':');
+  const h = Number(hStr); const m = Number(mStr);
+  const hr12 = ((h + 11) % 12) + 1;
+  const ampm = h < 12 ? 'AM' : 'PM';
+  return `${hr12}:${pad(m)} ${ampm}`;
+}
+
 function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number) {
   const R = 6371;
   const dLat = toRad(lat2 - lat1);
@@ -53,6 +97,9 @@ export default function WorkerInfoPage() {
   const [bookDate, setBookDate] = useState('');
   const [bookTime, setBookTime] = useState('');
   const [bookNote, setBookNote] = useState('');
+  const [bookPrice, setBookPrice] = useState('');
+  const [showDatePicker, setShowDatePicker] = useState(false);
+  const [showTimePicker, setShowTimePicker] = useState(false);
   const [history, setHistory] = useState<HistoryItem[]>([]);
 
   // Map state
@@ -167,8 +214,6 @@ export default function WorkerInfoPage() {
       return;
     }
 
-    const estimatedPrice = Math.round(Number(worker?.hourly_rate || 500) * 2);
-    
     setLoading(true);
     try {
       // 1. Create booking in DB
@@ -178,11 +223,10 @@ export default function WorkerInfoPage() {
         body: JSON.stringify({
           user_id: currentUid,
           worker_id: Number(workerId),
-          service_id: 1, // Default service for now
           booking_date: bookDate,
-          booking_time: bookTime,
+          booking_time: bookTime.length === 5 ? `${bookTime}:00` : bookTime,
           problem_description: bookNote,
-          estimated_price: estimatedPrice,
+          estimated_price: bookPrice && !isNaN(Number(bookPrice)) ? Number(bookPrice) : null,
           customer_address: 'Home Address (Default)', // In real app, get from user profile
           status: 'pending'
         })
@@ -197,19 +241,18 @@ export default function WorkerInfoPage() {
         booking_id: bookingData.id,
         worker_id: Number(workerId),
         client_id: currentUid,
-        service_id: 1,
         booking_date: bookDate,
         booking_time: bookTime,
         problem_description: bookNote,
-        estimated_price: estimatedPrice
       });
 
       // 3. Update local history
+      const agreedPrice = bookPrice && !isNaN(Number(bookPrice)) ? Number(bookPrice) : 0;
       const newItem: HistoryItem = {
         id: String(bookingData.id),
         date: bookDate,
         time: bookTime,
-        price: estimatedPrice,
+        price: agreedPrice,
         status: 'completed', // For history tab, we show it as success/completed usually
       };
       const next = [newItem, ...history];
@@ -222,12 +265,17 @@ export default function WorkerInfoPage() {
         recipient_id: workerId,
         kind: 'booking_request',
         title: 'New booking request',
-        body: `Booking for ${bookDate} at ${bookTime} · ₹${estimatedPrice}`,
+        body: `Booking for ${bookDate} at ${bookTime} · price to be quoted`,
         data: { booking_id: bookingData.id, ...newItem, note: bookNote },
       });
 
-      Alert.alert('Booked', `Booking request sent for ${bookDate} at ${bookTime}. ₹${estimatedPrice}`);
-      setBookDate(''); setBookTime(''); setBookNote('');
+      Alert.alert(
+        'Booked',
+        agreedPrice > 0
+          ? `Request sent for ${bookDate} at ${bookTime}. Agreed price ₹${agreedPrice}.`
+          : `Request sent for ${bookDate} at ${bookTime}. You can set the agreed price later.`
+      );
+      setBookDate(''); setBookTime(''); setBookNote(''); setBookPrice('');
       setActiveTab('profile');
     } catch (e) {
       console.error('Booking failed', e);
@@ -253,7 +301,6 @@ export default function WorkerInfoPage() {
   }
 
   const repeatBooking = history.length >= 2;
-  const estimatedPrice = Math.round(Number(worker.hourly_rate || 500) * 2);
 
   return (
     <View style={styles.screen}>
@@ -395,26 +442,46 @@ export default function WorkerInfoPage() {
 
               <Text style={[styles.sectionTitle, { marginTop: 16 }]}>Book a new slot</Text>
               <View style={styles.bookForm}>
-                <View style={styles.formRow}>
-                  <Ionicons name="calendar-outline" size={18} color="#6F42C1" />
-                  <TextInput
-                    style={styles.formInput}
-                    placeholder="Date (e.g. 2026-05-20)"
-                    placeholderTextColor="#999"
-                    value={bookDate}
-                    onChangeText={setBookDate}
-                  />
-                </View>
-                <View style={styles.formRow}>
-                  <Ionicons name="time-outline" size={18} color="#6F42C1" />
-                  <TextInput
-                    style={styles.formInput}
-                    placeholder="Time (e.g. 10:30 AM)"
-                    placeholderTextColor="#999"
-                    value={bookTime}
-                    onChangeText={setBookTime}
-                  />
-                </View>
+                {Platform.OS === 'web' ? (
+                  <>
+                    <View style={styles.formRow}>
+                      <Ionicons name="calendar-outline" size={18} color="#6F42C1" />
+                      {React.createElement('input', {
+                        type: 'date',
+                        value: bookDate,
+                        min: new Date().toISOString().slice(0, 10),
+                        onChange: (e: any) => setBookDate(e.target.value),
+                        style: { flex: 1, padding: 10, fontSize: 13, border: 'none', outline: 'none', background: 'transparent', color: '#333' },
+                      })}
+                    </View>
+                    <View style={styles.formRow}>
+                      <Ionicons name="time-outline" size={18} color="#6F42C1" />
+                      {React.createElement('input', {
+                        type: 'time',
+                        value: bookTime ? bookTime.slice(0, 5) : '',
+                        onChange: (e: any) => setBookTime(e.target.value),
+                        style: { flex: 1, padding: 10, fontSize: 13, border: 'none', outline: 'none', background: 'transparent', color: '#333' },
+                      })}
+                    </View>
+                  </>
+                ) : (
+                  <>
+                    <TouchableOpacity style={styles.formRow} onPress={() => setShowDatePicker(true)} activeOpacity={0.7}>
+                      <Ionicons name="calendar-outline" size={18} color="#6F42C1" />
+                      <Text style={[styles.formInput, { paddingVertical: 12, color: bookDate ? '#333' : '#999' }]}>
+                        {bookDate || 'Select date'}
+                      </Text>
+                      <Ionicons name="chevron-down" size={16} color="#999" />
+                    </TouchableOpacity>
+                    <TouchableOpacity style={styles.formRow} onPress={() => setShowTimePicker(true)} activeOpacity={0.7}>
+                      <Ionicons name="time-outline" size={18} color="#6F42C1" />
+                      <Text style={[styles.formInput, { paddingVertical: 12, color: bookTime ? '#333' : '#999' }]}>
+                        {bookTime ? formatTimeLabel(bookTime) : 'Select time'}
+                      </Text>
+                      <Ionicons name="chevron-down" size={16} color="#999" />
+                    </TouchableOpacity>
+                  </>
+                )}
                 <View style={styles.formRow}>
                   <Ionicons name="document-text-outline" size={18} color="#6F42C1" />
                   <TextInput
@@ -425,10 +492,23 @@ export default function WorkerInfoPage() {
                     onChangeText={setBookNote}
                   />
                 </View>
+                <View style={styles.formRow}>
+                  <Ionicons name="pricetag-outline" size={18} color="#6F42C1" />
+                  <TextInput
+                    style={styles.formInput}
+                    placeholder="Agreed price ₹ (after chat with worker)"
+                    placeholderTextColor="#999"
+                    keyboardType="numeric"
+                    value={bookPrice}
+                    onChangeText={setBookPrice}
+                  />
+                </View>
 
                 <View style={styles.priceBox}>
-                  <Text style={styles.priceLabel}>Estimated price</Text>
-                  <Text style={styles.priceValue}>₹{estimatedPrice}</Text>
+                  <Text style={styles.priceLabel}>Agreed price</Text>
+                  <Text style={[styles.priceValue, !bookPrice && { color: '#FF9800', fontSize: 13 }]}>
+                    {bookPrice && !isNaN(Number(bookPrice)) ? `₹${Number(bookPrice)}` : 'Discuss with worker first'}
+                  </Text>
                 </View>
 
                 <TouchableOpacity style={styles.bookNowButton} onPress={handleBookNow}>
@@ -493,6 +573,50 @@ export default function WorkerInfoPage() {
           )}
         </ScrollView>
       </View>
+
+      <Modal visible={showDatePicker} transparent animationType="fade" onRequestClose={() => setShowDatePicker(false)}>
+        <TouchableOpacity style={styles.modalBackdrop} activeOpacity={1} onPress={() => setShowDatePicker(false)}>
+          <View style={styles.pickerCard}>
+            <Text style={styles.pickerTitle}>Pick a date</Text>
+            <FlatList
+              data={buildUpcomingDates(30)}
+              keyExtractor={(it) => it.value}
+              style={{ maxHeight: 320 }}
+              renderItem={({ item }) => (
+                <TouchableOpacity
+                  style={[styles.pickerItem, bookDate === item.value && styles.pickerItemActive]}
+                  onPress={() => { setBookDate(item.value); setShowDatePicker(false); }}
+                >
+                  <Text style={[styles.pickerItemText, bookDate === item.value && styles.pickerItemTextActive]}>{item.label}</Text>
+                  <Text style={styles.pickerItemSub}>{item.value}</Text>
+                </TouchableOpacity>
+              )}
+            />
+          </View>
+        </TouchableOpacity>
+      </Modal>
+
+      <Modal visible={showTimePicker} transparent animationType="fade" onRequestClose={() => setShowTimePicker(false)}>
+        <TouchableOpacity style={styles.modalBackdrop} activeOpacity={1} onPress={() => setShowTimePicker(false)}>
+          <View style={styles.pickerCard}>
+            <Text style={styles.pickerTitle}>Pick a time</Text>
+            <FlatList
+              data={buildTimeSlots()}
+              keyExtractor={(it) => it.value}
+              style={{ maxHeight: 320 }}
+              renderItem={({ item }) => (
+                <TouchableOpacity
+                  style={[styles.pickerItem, bookTime === item.value && styles.pickerItemActive]}
+                  onPress={() => { setBookTime(item.value); setShowTimePicker(false); }}
+                >
+                  <Text style={[styles.pickerItemText, bookTime === item.value && styles.pickerItemTextActive]}>{item.label}</Text>
+                </TouchableOpacity>
+              )}
+            />
+          </View>
+        </TouchableOpacity>
+      </Modal>
+
       <BottomNav currentRoute="home" />
     </View>
   );
@@ -578,4 +702,13 @@ const styles = StyleSheet.create({
   mapEmbedWrap: { borderRadius: 12, overflow: 'hidden', marginBottom: 12, borderWidth: 1, borderColor: '#eee' },
   openMapsBtn: { flexDirection: 'row', backgroundColor: '#6F42C1', paddingVertical: 12, borderRadius: 12, alignItems: 'center', justifyContent: 'center', gap: 8 },
   openMapsBtnText: { color: '#fff', fontWeight: '700', fontSize: 14 },
+
+  modalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'center', alignItems: 'center', padding: 24 },
+  pickerCard: { width: '100%', maxWidth: 340, backgroundColor: '#fff', borderRadius: 14, padding: 14 },
+  pickerTitle: { fontSize: 15, fontWeight: '800', color: '#333', marginBottom: 10, textAlign: 'center' },
+  pickerItem: { paddingVertical: 12, paddingHorizontal: 12, borderRadius: 10, marginBottom: 4 },
+  pickerItemActive: { backgroundColor: '#6F42C1' },
+  pickerItemText: { fontSize: 14, fontWeight: '600', color: '#333' },
+  pickerItemTextActive: { color: '#fff' },
+  pickerItemSub: { fontSize: 11, color: '#999', marginTop: 2 },
 });

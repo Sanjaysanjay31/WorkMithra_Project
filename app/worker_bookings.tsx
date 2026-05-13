@@ -4,7 +4,7 @@ import { platformShadow } from '@/lib/shadow';
 import { Ionicons } from '@expo/vector-icons';
 import { Stack, useRouter } from 'expo-router';
 import React, { useState, useEffect } from 'react';
-import { Image, Platform, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { Alert, Image, Modal, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 
 type Tab = 'pending' | 'accepted';
 
@@ -34,6 +34,8 @@ export default function WorkerBookings() {
   const [tab, setTab] = useState<Tab>('pending');
   const [requests, setRequests] = useState<Request[]>([]);
   const [loading, setLoading] = useState(true);
+  const [quoteFor, setQuoteFor] = useState<Request | null>(null);
+  const [quoteAmount, setQuoteAmount] = useState('');
 
   useEffect(() => {
     (async () => {
@@ -100,6 +102,37 @@ export default function WorkerBookings() {
     }).catch(() => {});
   }
 
+  async function submitQuote() {
+    if (!quoteFor) return;
+    const amt = Number(quoteAmount);
+    if (!amt || amt <= 0) {
+      Alert.alert('Quote', 'Please enter a valid amount in ₹');
+      return;
+    }
+    const r = quoteFor;
+    setRequests((rs) => rs.map((x) => (x.id === r.id ? { ...x, price: amt } : x)));
+    try {
+      await fetch(`${BASE_URL}/bookings/${r.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_id: Number(r.client_id), estimated_price: amt })
+      });
+    } catch {}
+
+    addNotification({
+      audience: 'user',
+      recipient_id: r.client_id,
+      kind: 'info',
+      title: 'Worker shared a price quote',
+      body: `${r.job} on ${r.date}: ₹${amt}. Open the booking to accept or discuss further.`,
+      data: { request_id: r.id, client_id: r.client_id, price: amt },
+    }).catch(() => {});
+
+    setQuoteFor(null);
+    setQuoteAmount('');
+    Alert.alert('Quote sent', `₹${amt} sent to ${r.client}.`);
+  }
+
   function openClient(r: Request) {
     router.push({ pathname: '/user_profile', params: { clientId: r.client_id, clientName: r.client } });
   }
@@ -139,26 +172,36 @@ export default function WorkerBookings() {
                       <Ionicons name="calendar-outline" size={11} color="#888" />
                       <Text style={styles.date}>{r.date}</Text>
                     </View>
-                    <Text style={styles.price}>₹{r.price}</Text>
+                    <Text style={styles.price}>{r.price > 0 ? `₹${r.price}` : 'Quote pending'}</Text>
                   </View>
 
                   {r.status === 'pending' ? (
-                    <View style={styles.actions}>
+                    <>
                       <TouchableOpacity
-                        style={[styles.actionBtn, styles.acceptBtn]}
-                        onPress={(e) => { e.stopPropagation?.(); updateStatus(r.id, 'accepted'); }}
+                        style={styles.quoteBtn}
+                        onPress={(e) => { e.stopPropagation?.(); setQuoteAmount(r.price > 0 ? String(r.price) : ''); setQuoteFor(r); }}
                       >
-                        <Ionicons name="checkmark" size={13} color="#fff" />
-                        <Text style={styles.acceptText}>Accept</Text>
+                        <Ionicons name="pricetag-outline" size={13} color="#6F42C1" />
+                        <Text style={styles.quoteBtnText}>{r.price > 0 ? 'Update Quote' : 'Send Quote'}</Text>
                       </TouchableOpacity>
-                      <TouchableOpacity
-                        style={[styles.actionBtn, styles.declineBtn]}
-                        onPress={(e) => { e.stopPropagation?.(); updateStatus(r.id, 'pending'); }}
-                      >
-                        <Ionicons name="close" size={13} color="#666" />
-                        <Text style={styles.declineText}>Decline</Text>
-                      </TouchableOpacity>
-                    </View>
+                      <View style={styles.actions}>
+                        <TouchableOpacity
+                          style={[styles.actionBtn, styles.acceptBtn, r.price <= 0 && { opacity: 0.5 }]}
+                          disabled={r.price <= 0}
+                          onPress={(e) => { e.stopPropagation?.(); updateStatus(r.id, 'accepted'); }}
+                        >
+                          <Ionicons name="checkmark" size={13} color="#fff" />
+                          <Text style={styles.acceptText}>Accept</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          style={[styles.actionBtn, styles.declineBtn]}
+                          onPress={(e) => { e.stopPropagation?.(); updateStatus(r.id, 'pending'); }}
+                        >
+                          <Ionicons name="close" size={13} color="#666" />
+                          <Text style={styles.declineText}>Decline</Text>
+                        </TouchableOpacity>
+                      </View>
+                    </>
                   ) : (
                     <View style={styles.acceptedRow}>
                       <Ionicons name="checkmark-circle" size={13} color="#10b981" />
@@ -171,6 +214,37 @@ export default function WorkerBookings() {
           )}
         </ScrollView>
       </View>
+      <Modal visible={!!quoteFor} transparent animationType="fade" onRequestClose={() => setQuoteFor(null)}>
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>Send price quote</Text>
+            {quoteFor && (
+              <Text style={styles.modalSub}>To {quoteFor.client} · {quoteFor.job}</Text>
+            )}
+            <View style={styles.amountRow}>
+              <Text style={styles.rupee}>₹</Text>
+              <TextInput
+                style={styles.amountInput}
+                keyboardType="numeric"
+                placeholder="0"
+                placeholderTextColor="#bbb"
+                value={quoteAmount}
+                onChangeText={setQuoteAmount}
+                autoFocus
+              />
+            </View>
+            <View style={styles.modalActions}>
+              <TouchableOpacity style={[styles.modalBtn, styles.modalCancel]} onPress={() => setQuoteFor(null)}>
+                <Text style={styles.modalCancelText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[styles.modalBtn, styles.modalSend]} onPress={submitQuote}>
+                <Text style={styles.modalSendText}>Send Quote</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
       <WorkerBottomNav currentRoute="requests" />
     </View>
   );
@@ -207,4 +281,21 @@ const styles = StyleSheet.create({
   acceptedRow: { flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 8 },
   acceptedTag: { color: '#10b981', fontWeight: '800', fontSize: 12 },
   empty: { fontSize: 13, color: '#999', textAlign: 'center', marginTop: 24 },
+
+  quoteBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4, paddingVertical: 7, borderRadius: 8, marginTop: 8, borderWidth: 1, borderColor: '#6F42C1', backgroundColor: '#f5f0fb' },
+  quoteBtnText: { color: '#6F42C1', fontWeight: '800', fontSize: 11 },
+
+  modalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'center', alignItems: 'center', padding: 24 },
+  modalCard: { width: '100%', maxWidth: 320, backgroundColor: '#fff', borderRadius: 14, padding: 16 },
+  modalTitle: { fontSize: 16, fontWeight: '800', color: '#333', textAlign: 'center' },
+  modalSub: { fontSize: 12, color: '#666', textAlign: 'center', marginTop: 4 },
+  amountRow: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#f8f8f8', borderRadius: 10, paddingHorizontal: 12, marginTop: 14, borderWidth: 1, borderColor: '#eee' },
+  rupee: { fontSize: 22, fontWeight: '800', color: '#10b981', marginRight: 6 },
+  amountInput: { flex: 1, fontSize: 22, fontWeight: '800', color: '#333', paddingVertical: 10 },
+  modalActions: { flexDirection: 'row', gap: 8, marginTop: 14 },
+  modalBtn: { flex: 1, paddingVertical: 11, borderRadius: 10, alignItems: 'center' },
+  modalCancel: { backgroundColor: '#f0f0f0' },
+  modalCancelText: { color: '#666', fontWeight: '700', fontSize: 13 },
+  modalSend: { backgroundColor: '#6F42C1' },
+  modalSendText: { color: '#fff', fontWeight: '800', fontSize: 13 },
 });

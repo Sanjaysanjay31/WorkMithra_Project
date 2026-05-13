@@ -65,7 +65,7 @@ export default function HomePage() {
   const [minJobs, setMinJobs] = useState('');
   const [availability, setAvailability] = useState<AvailNow>(null);
   const [verifiedOnly, setVerifiedOnly] = useState(false);
-  const [sortBy, setSortBy] = useState<SortKey | null>(null);
+  const [sortBy, setSortBy] = useState<SortKey[]>([]);
 
   useEffect(() => {
     fetchWorkers();
@@ -83,7 +83,7 @@ export default function HomePage() {
       if (minJobs && !isNaN(Number(minJobs))) params.append('min_jobs', minJobs);
       if (verifiedOnly) params.append('verified_only', 'true');
       if (availability) params.append('availability', availability);
-      if (sortBy) params.append('sort_by', sortBy);
+      if (sortBy.length > 0) params.append('sort_by', sortBy.join(','));
 
       const res = await fetch(`${BASE_URL}/workers/smart-match?${params.toString()}`);
       const data = await res.json();
@@ -163,7 +163,7 @@ export default function HomePage() {
     setMinJobs('');
     setAvailability(null);
     setVerifiedOnly(false);
-    setSortBy(null);
+    setSortBy([]);
   }
 
   const renderWorker = ({ item }: { item: any }) => (
@@ -186,14 +186,19 @@ export default function HomePage() {
     </View>
   );
 
-  const SortChip = ({ k, label }: { k: SortKey; label: string }) => (
+  const SortChip = ({ k, label }: { k: SortKey; label: string }) => {
+    const active = sortBy.includes(k);
+    return (
     <TouchableOpacity
-      style={[styles.chip, sortBy === k && styles.chipActive]}
-      onPress={() => setSortBy(sortBy === k ? null : k)}
+      style={[styles.chip, active && styles.chipActive]}
+      onPress={() => setSortBy(active ? sortBy.filter((s) => s !== k) : [...sortBy, k])}
     >
-      <Text style={[styles.chipText, sortBy === k && styles.chipTextActive]}>{label}</Text>
+      <Text style={[styles.chipText, active && styles.chipTextActive]}>
+        {active ? `${sortBy.indexOf(k) + 1}. ` : ''}{label}
+      </Text>
     </TouchableOpacity>
-  );
+    );
+  };
 
   return (
     <View style={styles.screen}>
