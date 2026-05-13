@@ -1,4 +1,5 @@
 import BottomNav from '@/components/bottom-nav';
+import Avatar from '@/components/avatar';
 import { platformShadow } from '@/lib/shadow';
 import { storage } from '@/lib/storage';
 import { Stack, useRouter } from 'expo-router';
@@ -145,10 +146,7 @@ export default function BookingsPage() {
         onPress={() => router.push({ pathname: '/worker_info', params: { id: String(b.worker.id) } })}
       >
         <View style={styles.leftCol}>
-          <Image
-            source={{ uri: b.worker.profile_image || 'https://placehold.co/70x70' }}
-            style={styles.avatar}
-          />
+          <Avatar uri={b.worker.profile_image} name={b.worker.full_name} size={70} style={styles.avatar as any} />
         </View>
         <View style={styles.rightCol}>
           <Text style={styles.name} numberOfLines={1}>{b.worker.full_name || 'Worker'}</Text>

@@ -23,6 +23,18 @@ try:
 except Exception as _e:
     print("assistant table cleanup skipped:", _e)
 
+# One-time: chat_messages.sender_id/receiver_id reference users(id) but in this
+# app a participant can be either a user OR a worker (separate tables), so the
+# FK needs to be dropped to allow both id spaces.
+try:
+    with engine.begin() as _conn:
+        from sqlalchemy import text as _sql_text
+        _conn.execute(_sql_text("ALTER TABLE chat_messages DROP CONSTRAINT IF EXISTS chat_messages_sender_id_fkey"))
+        _conn.execute(_sql_text("ALTER TABLE chat_messages DROP CONSTRAINT IF EXISTS chat_messages_receiver_id_fkey"))
+        print("chat_messages FK constraints dropped (or already absent)")
+except Exception as _e:
+    print("chat_messages FK cleanup skipped:", _e)
+
 app = FastAPI()
 
 # Add CORS Middleware
@@ -143,6 +155,7 @@ def change_password(data: schemas.PasswordChange, db: Session = Depends(get_db))
 async def upload_profile_image(
     file: UploadFile = File(...),
     user_id: str = Form("guest"),
+    role: str = Form("user"),
     db: Session = Depends(get_db),
 ):
     """Upload an avatar to Supabase Storage (bucket: all_images) and save URL on the user row."""
@@ -186,13 +199,22 @@ async def upload_profile_image(
 
     public_url = f"{SUPABASE_URL}/storage/v1/object/public/all_images/{path}"
 
-    # Best-effort: persist URL on the user row if user_id is a numeric id
+    # Best-effort: persist URL ONLY on the table the caller belongs to.
+    # users and workers are separate tables with overlapping id space, so we
+    # must use `role` to disambiguate — otherwise a user upload would also
+    # overwrite the worker row that happens to share the same numeric id.
     try:
         uid = int(user_id)
-        u = db.query(models.User).filter(models.User.id == uid).first()
-        if u:
-            u.profile_image = public_url
-            db.commit()
+        if role == 'worker':
+            w = db.query(models.Worker).filter(models.Worker.id == uid).first()
+            if w:
+                w.profile_image = public_url
+                db.commit()
+        else:
+            u = db.query(models.User).filter(models.User.id == uid).first()
+            if u:
+                u.profile_image = public_url
+                db.commit()
     except Exception:
         pass
 

@@ -60,18 +60,15 @@ def get_booking(booking_id: int, db: Session = Depends(database.get_db)):
 
 
 @router.put("/{booking_id}", response_model=schemas.BookingResponse)
-def update_booking(booking_id: int, booking_update: schemas.BookingCreate, db: Session = Depends(database.get_db)):
-    """Update a booking."""
+def update_booking(booking_id: int, booking_update: schemas.BookingUpdate, db: Session = Depends(database.get_db)):
+    """Update a booking (partial update — any subset of fields)."""
     booking = db.query(models.Booking).filter(models.Booking.id == booking_id).first()
     if not booking:
         raise HTTPException(status_code=404, detail="Booking not found")
-    
-    if booking_update.status:
-        booking.status = booking_update.status
-    if booking_update.final_price is not None:
-        booking.final_price = booking_update.final_price
-    if booking_update.estimated_price is not None:
-        booking.estimated_price = booking_update.estimated_price
+
+    data = booking_update.dict(exclude_unset=True)
+    for field, value in data.items():
+        setattr(booking, field, value)
     
     db.commit()
     db.refresh(booking)

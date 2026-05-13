@@ -3,10 +3,10 @@ import { storage } from '@/lib/storage';
 import { Ionicons } from '@expo/vector-icons';
 import { Stack, useRouter } from 'expo-router';
 import React, { useEffect, useState } from 'react';
+import Avatar from '@/components/avatar';
 import {
     ActivityIndicator,
     Alert,
-    Image,
     Platform,
     ScrollView,
     StyleSheet,
@@ -61,15 +61,56 @@ export default function WorkerProfilePage() {
   useEffect(() => { load(); }, []);
 
   async function load() {
+    let wid = '';
     try {
-      const raw = await storage.get(WORKER_KEY);
-      if (raw) setProfile({ ...EMPTY, ...JSON.parse(raw) });
       const authRaw = await storage.get('workmithra:auth');
       if (authRaw) {
         const auth = JSON.parse(authRaw);
-        if (auth.id) setCurrentWorkerId(String(auth.id));
+        if (auth.id) { wid = String(auth.id); setCurrentWorkerId(wid); }
       }
     } catch {}
+
+    // Use local cache only if it belongs to the current worker id.
+    try {
+      const raw = await storage.get(WORKER_KEY);
+      if (raw) {
+        const cached = JSON.parse(raw);
+        if (!cached.__uid || String(cached.__uid) === wid) {
+          setProfile({ ...EMPTY, ...cached });
+        } else {
+          await storage.remove(WORKER_KEY);
+          setProfile(EMPTY);
+        }
+      }
+    } catch {}
+
+    if (!wid) return;
+    try {
+      const res = await fetch(`${BASE_URL}/workers/${wid}`);
+      if (!res.ok) return;
+      const w = await res.json();
+      const fromServer: WorkerForm = {
+        full_name: w.full_name || '',
+        age: w.age != null ? String(w.age) : '',
+        email: w.email || '',
+        phone: w.phone || '',
+        alternate_phone: w.alternate_phone || w.alt_phone || '',
+        skill: w.skill || '',
+        experience_years: w.experience_years != null ? String(w.experience_years) : '',
+        hourly_rate: w.hourly_rate != null ? String(w.hourly_rate) : '',
+        bio: w.bio || '',
+        timings: w.timings || '',
+        city: w.city || '',
+        location: w.location || w.address || '',
+        pincode: w.pincode || '',
+        aadhaar_verified: !!w.aadhaar_verified,
+        profile_image: w.profile_image || '',
+      };
+      setProfile(fromServer);
+      await storage.set(WORKER_KEY, JSON.stringify(fromServer));
+    } catch (e) {
+      console.warn('Failed to load worker from backend', e);
+    }
   }
 
   function update<K extends keyof WorkerForm>(k: K, v: any) {
@@ -83,7 +124,7 @@ export default function WorkerProfilePage() {
     }
     setSaving(true);
     try {
-      await storage.set(WORKER_KEY, JSON.stringify(profile));
+      await storage.set(WORKER_KEY, JSON.stringify({ ...profile, __uid: currentWorkerId }));
       await fetch(`${BASE_URL}/workers/${currentWorkerId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -110,12 +151,13 @@ export default function WorkerProfilePage() {
         const fd = new FormData();
         fd.append('file', file);
         fd.append('user_id', currentWorkerId);
+        fd.append('role', 'worker');
         const res = await fetch(`${BASE_URL}/upload-profile-image`, { method: 'POST', body: fd });
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || 'Upload failed');
         const next = { ...profile, profile_image: data.url };
         setProfile(next);
-        await storage.set(WORKER_KEY, JSON.stringify(next));
+        await storage.set(WORKER_KEY, JSON.stringify({ ...next, __uid: currentWorkerId }));
       } catch (e: any) {
         Alert.alert('Upload failed', e?.message || 'Could not upload image');
       } finally {
@@ -157,10 +199,7 @@ export default function WorkerProfilePage() {
           {/* Hero header */}
           <View style={styles.hero}>
             <View style={styles.avatarWrap}>
-              <Image
-                source={{ uri: profile.profile_image || 'https://placehold.co/160x160/6F42C1/fff?text=Me' }}
-                style={styles.avatar}
-              />
+              <Avatar uri={profile.profile_image} name={profile.full_name} size={130} style={styles.avatar as any} />
               <TouchableOpacity style={styles.cameraBadge} onPress={pickAndUploadImage} activeOpacity={0.85}>
                 {uploading ? <ActivityIndicator color="#fff" size="small" /> : <Ionicons name="camera" size={16} color="#fff" />}
               </TouchableOpacity>
@@ -275,16 +314,55 @@ export default function WorkerProfilePage() {
             </TouchableOpacity>
           </View>
 
-          {/* Switch Role */}
+          {/* Switch Role + Logout */}
           <View style={styles.section}>
             <SectionTitle>Account Settings</SectionTitle>
-            <TouchableOpacity style={styles.pwdOption} onPress={() => { storage.delete('workmithra:auth'); router.replace('/login'); }}>
+            <TouchableOpacity
+              style={styles.pwdOption}
+              onPress={async () => {
+                await storage.remove('workmithra:auth');
+                await storage.remove('workmithra:worker_profile').catch(() => {});
+                await storage.remove('workmithra:user_profile').catch(() => {});
+                router.replace('/login');
+              }}
+            >
               <View style={[styles.pwdIcon, { backgroundColor: '#e0f2fe' }]}>
                 <Ionicons name="swap-horizontal" size={18} color="#0284c7" />
               </View>
               <View style={{ flex: 1 }}>
                 <Text style={styles.pwdTitle}>Switch Role</Text>
                 <Text style={styles.pwdSub}>Log out and switch between Worker and User</Text>
+              </View>
+              <Ionicons name="chevron-forward" size={18} color="#999" />
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.pwdOption}
+              onPress={async () => {
+                const doLogout = async () => {
+                  await storage.remove('workmithra:auth');
+                  await storage.remove('workmithra:worker_profile').catch(() => {});
+                  await storage.remove('workmithra:user_profile').catch(() => {});
+                  router.replace('/login');
+                };
+                if (Platform.OS === 'web') {
+                  if (typeof window !== 'undefined' && window.confirm('Are you sure you want to log out?')) {
+                    await doLogout();
+                  }
+                } else {
+                  Alert.alert('Logout', 'Are you sure you want to log out?', [
+                    { text: 'Cancel', style: 'cancel' },
+                    { text: 'Logout', style: 'destructive', onPress: doLogout },
+                  ]);
+                }
+              }}
+            >
+              <View style={[styles.pwdIcon, { backgroundColor: '#fee2e2' }]}>
+                <Ionicons name="log-out-outline" size={18} color="#FF6B6B" />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.pwdTitle}>Logout</Text>
+                <Text style={styles.pwdSub}>Sign out of your account</Text>
               </View>
               <Ionicons name="chevron-forward" size={18} color="#999" />
             </TouchableOpacity>

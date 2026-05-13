@@ -1,6 +1,10 @@
 import WorkerBottomNav from '@/components/worker-bottom-nav';
+import Avatar from '@/components/avatar';
 import { storage } from '@/lib/storage';
 import { platformShadow } from '@/lib/shadow';
+
+const DEFAULT_API_URL = Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://localhost:8000';
+const BASE_URL = process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL;
 import { Ionicons } from '@expo/vector-icons';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useEffect, useMemo, useState } from 'react';
@@ -55,7 +59,7 @@ function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number) {
   return 2 * R * Math.asin(Math.sqrt(a));
 }
 
-// Demo client lookup — in a real app this comes from /users/{id}
+// (Fallback only — used if backend lookup fails)
 function getSampleClient(id: string, name?: string): ClientProfile {
   const seed = id || '0';
   const variants: ClientProfile[] = [
@@ -107,9 +111,71 @@ export default function UserProfilePage() {
   const [workerLoc, setWorkerLoc] = useState<{ lat: number; lng: number } | null>(null);
 
   useEffect(() => {
-    const c = getSampleClient(String(clientId || '1'), clientName ? String(clientName) : undefined);
-    setClient(c);
-    setRequests(SAMPLE_REQUESTS(String(clientId || '1')));
+    (async () => {
+      const cid = String(clientId || '');
+      if (!cid) return;
+
+      // 1. Fetch real client profile from backend
+      try {
+        const res = await fetch(`${BASE_URL}/profiles/user/${cid}`);
+        if (res.ok) {
+          const u = await res.json();
+          setClient({
+            id: String(u.id),
+            full_name: u.full_name || (clientName ? String(clientName) : `User ${cid}`),
+            age: u.age,
+            email: u.email,
+            phone: u.phone,
+            alternate_phone: u.alternate_phone || u.alt_phone,
+            address: u.address,
+            city: u.city,
+            location: u.location || u.address,
+            pincode: u.pincode,
+            joined: u.created_at ? String(u.created_at).slice(0, 10) : undefined,
+            avatar: u.profile_image || `https://i.pravatar.cc/200?u=${cid}`,
+            latitude: u.latitude,
+            longitude: u.longitude,
+          });
+        } else {
+          setClient(getSampleClient(cid, clientName ? String(clientName) : undefined));
+        }
+      } catch (e) {
+        console.warn('Failed to fetch client profile', e);
+        setClient(getSampleClient(cid, clientName ? String(clientName) : undefined));
+      }
+
+      // 2. Fetch real requests this client made (filtered to this worker if available)
+      try {
+        let myWorkerId = '';
+        const authRaw = await storage.get('workmithra:auth');
+        if (authRaw) {
+          const auth = JSON.parse(authRaw);
+          if (auth.id) myWorkerId = String(auth.id);
+        }
+        const url = myWorkerId
+          ? `${BASE_URL}/bookings?user_id=${cid}&worker_id=${myWorkerId}`
+          : `${BASE_URL}/bookings?user_id=${cid}`;
+        const res = await fetch(url);
+        if (res.ok) {
+          const list = await res.json();
+          const mapped: RequestItem[] = list.map((b: any) => ({
+            id: String(b.id),
+            date: b.booking_date || 'Unknown',
+            time: b.booking_time || '',
+            service: b.problem_description || 'General Service',
+            note: b.problem_description,
+            price: b.final_price || b.estimated_price || 0,
+            status:
+              b.status === 'success' || b.status === 'completed' ? 'completed' :
+              b.status === 'accepted' || b.status === 'upcoming' ? 'accepted' :
+              b.status === 'rejected' || b.status === 'declined' ? 'declined' : 'pending',
+          }));
+          setRequests(mapped);
+        }
+      } catch (e) {
+        console.warn('Failed to fetch client requests', e);
+      }
+    })();
   }, [clientId, clientName]);
 
   useEffect(() => {
@@ -130,8 +196,18 @@ export default function UserProfilePage() {
     return haversineKm(workerLoc.lat, workerLoc.lng, client.latitude, client.longitude);
   }, [workerLoc, client]);
 
-  function updateRequest(id: string, status: RequestItem['status']) {
+  async function updateRequest(id: string, status: RequestItem['status']) {
     setRequests((rs) => rs.map((r) => (r.id === id ? { ...r, status } : r)));
+    const backendStatus = status === 'accepted' ? 'upcoming' : status === 'declined' ? 'rejected' : status === 'completed' ? 'success' : 'pending';
+    try {
+      await fetch(`${BASE_URL}/bookings/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_id: Number(clientId), status: backendStatus })
+      });
+    } catch (e) {
+      console.warn('Failed to update booking status', e);
+    }
   }
 
   if (!client) {
@@ -157,7 +233,7 @@ export default function UserProfilePage() {
 
         {/* Hero */}
         <View style={styles.hero}>
-          <Image source={{ uri: client.avatar }} style={styles.heroAvatar} />
+          <Avatar uri={client.avatar} name={client.full_name} size={90} style={styles.heroAvatar as any} />
           <Text style={styles.heroName}>{client.full_name}</Text>
           <Text style={styles.heroSub}>{client.city || client.location || '—'}{client.joined ? ` · joined ${client.joined}` : ''}</Text>
           <View style={styles.heroBadges}>

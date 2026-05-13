@@ -13,6 +13,10 @@ import {
 } from 'react-native';
 import { aiDetectLang, aiTranslate, LangCode, LANGS, speak as speakTTS, webSTT } from '@/lib/ai';
 import { platformShadow } from '@/lib/shadow';
+import { storage } from '@/lib/storage';
+
+const DEFAULT_API_URL = Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://localhost:8000';
+const BASE_URL = process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL;
 
 type Side = 'client' | 'worker';
 
@@ -91,6 +95,36 @@ export default function ChatScreen() {
     })();
   }, [workerId, workerName]);
 
+  // Poll for new messages every 3s (WhatsApp-style auto-refresh)
+  useEffect(() => {
+    if (!currentUserId || !workerId) return;
+    let alive = true;
+    const poll = async () => {
+      try {
+        const res = await fetch(`${BASE_URL}/chat/conversation/${currentUserId}/${workerId}`);
+        if (!res.ok || !alive) return;
+        const history = await res.json();
+        setMsgs((prev) => {
+          const existingIds = new Set(prev.map((b) => b.id));
+          const newOnes: Bubble[] = history
+            .filter((m: any) => !existingIds.has(String(m.id)))
+            .map((m: any) => ({
+              id: String(m.id),
+              side: (String(m.sender_id) === currentUserId ? 'client' : 'worker') as Side,
+              original: m.message,
+              srcLang: 'en-IN' as LangCode,
+              translations: {},
+            }));
+          if (newOnes.length === 0) return prev;
+          setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 50);
+          return [...prev, ...newOnes];
+        });
+      } catch {}
+    };
+    const id = setInterval(poll, 3000);
+    return () => { alive = false; clearInterval(id); };
+  }, [currentUserId, workerId]);
+
   function langForSide(s: Side): LangCode {
     return s === 'client' ? clientLang : workerLang;
   }
@@ -136,17 +170,26 @@ export default function ChatScreen() {
         return next;
       });
 
-      // Send to backend
+      // Persist to backend
       if (currentUserId && workerId) {
-        await fetch(`${BASE_URL}/chat`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            sender_id: Number(currentUserId),
-            receiver_id: Number(workerId),
-            message: value,
-          }),
-        });
+        try {
+          const res = await fetch(`${BASE_URL}/chat/`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              sender_id: Number(currentUserId),
+              receiver_id: Number(workerId),
+              message: value,
+            }),
+          });
+          if (res.ok) {
+            const saved = await res.json();
+            // Replace temp id with real DB id so polling doesn't duplicate
+            setMsgs((m) => m.map((x) => (x.id === id ? { ...x, id: String(saved.id) } : x)));
+          }
+        } catch (e) {
+          console.warn('Failed to save chat message', e);
+        }
       }
     } finally {
       setBusy(false);

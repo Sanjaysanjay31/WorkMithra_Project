@@ -26,7 +26,7 @@ def send_message(message: schemas.ChatMessageBase, db: Session = Depends(databas
     return {"id": new_message.id, "status": "sent"}
 
 
-@router.get("/{user_id}/messages", response_model=List[schemas.ChatMessageBase])
+@router.get("/{user_id}/messages", response_model=List[schemas.ChatMessageResponse])
 def get_user_messages(user_id: int, skip: int = 0, limit: int = 50, db: Session = Depends(database.get_db)):
     """Get messages for a user."""
     messages = db.query(models.ChatMessage).filter(
@@ -35,11 +35,11 @@ def get_user_messages(user_id: int, skip: int = 0, limit: int = 50, db: Session 
     return messages
 
 
-@router.get("/conversation/{user_id}/{other_user_id}", response_model=List[schemas.ChatMessageBase])
+@router.get("/conversation/{user_id}/{other_user_id}", response_model=List[schemas.ChatMessageResponse])
 def get_conversation(user_id: int, other_user_id: int, skip: int = 0, limit: int = 50, db: Session = Depends(database.get_db)):
     """Get conversation between two users."""
     messages = db.query(models.ChatMessage).filter(
         ((models.ChatMessage.sender_id == user_id) & (models.ChatMessage.receiver_id == other_user_id)) |
         ((models.ChatMessage.sender_id == other_user_id) & (models.ChatMessage.receiver_id == user_id))
-    ).offset(skip).limit(limit).all()
+    ).order_by(models.ChatMessage.sent_at.asc()).offset(skip).limit(limit).all()
     return messages

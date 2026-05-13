@@ -45,22 +45,18 @@ def get_user_profile(user_id: int, db: Session = Depends(database.get_db)):
 
 @router.put("/user/{user_id}", response_model=schemas.UserResponse)
 def update_user_profile(user_id: int, user_update: schemas.UserBase, db: Session = Depends(database.get_db)):
-    """Update a user profile."""
+    """Update a user profile (partial — only non-null fields are written)."""
     user = db.query(models.User).filter(models.User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    
-    if user_update.full_name:
-        user.full_name = user_update.full_name
-    if user_update.phone:
-        user.phone = user_update.phone
-    if user_update.email:
-        user.email = user_update.email
-    if user_update.address:
-        user.address = user_update.address
-    if user_update.city:
-        user.city = user_update.city
-    
+
+    data = user_update.model_dump(exclude_unset=True)
+    for field, value in data.items():
+        if value is None:
+            continue
+        if hasattr(user, field):
+            setattr(user, field, value)
+
     db.commit()
     db.refresh(user)
     return user

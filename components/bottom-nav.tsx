@@ -1,11 +1,16 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import React from 'react';
-import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { Platform, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
 interface BottomNavProps {
   currentRoute: 'home' | 'bookings' | 'switch_role' | 'profile';
 }
+
+const ACTIVE = '#fff';
+const ACTIVE_BG = '#6F42C1';
+const INACTIVE = '#e5e7eb';
+const BAR_BG = '#2a1a4a';
 
 export default function BottomNav({ currentRoute }: BottomNavProps) {
   const router = useRouter();
@@ -18,39 +23,53 @@ export default function BottomNav({ currentRoute }: BottomNavProps) {
   ];
 
   return (
-    <View style={styles.navBar}>
-      {navItems.map((item) => (
-        <TouchableOpacity
-          key={item.id}
-          style={styles.navItem}
-          onPress={() => router.push(item.route as any)}
-        >
-          <Ionicons
-            name={item.icon as any}
-            size={24}
-            color={currentRoute === item.id ? '#6F42C1' : '#ccc'}
-          />
-          <Text
-            style={[
-              styles.navLabel,
-              { color: currentRoute === item.id ? '#6F42C1' : '#ccc' },
-            ]}
-          >
-            {item.label}
-          </Text>
-        </TouchableOpacity>
-      ))}
+    <View style={styles.wrap}>
+      <View style={styles.navBar}>
+        {navItems.map((item) => {
+          const active = currentRoute === item.id;
+          return (
+            <TouchableOpacity
+              key={item.id}
+              style={styles.navItem}
+              activeOpacity={0.7}
+              onPress={() => router.push(item.route as any)}
+            >
+              <View style={[styles.iconWrap, active && styles.iconWrapActive]}>
+                <Ionicons
+                  name={(active ? item.icon : `${item.icon}-outline`) as any}
+                  size={22}
+                  color={active ? ACTIVE : INACTIVE}
+                />
+              </View>
+              <Text style={[styles.navLabel, { color: active ? ACTIVE : INACTIVE, fontWeight: active ? '800' : '600' }]}>
+                {item.label}
+              </Text>
+            </TouchableOpacity>
+          );
+        })}
+      </View>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
+  wrap: {
+    backgroundColor: BAR_BG,
+    borderTopWidth: 1,
+    borderTopColor: '#1a0f30',
+    ...Platform.select({
+      ios: { shadowColor: '#000', shadowOpacity: 0.08, shadowOffset: { width: 0, height: -2 }, shadowRadius: 8 },
+      android: { elevation: 12 },
+      web: { boxShadow: '0 -2px 10px rgba(0,0,0,0.06)' as any },
+    }),
+  },
   navBar: {
     flexDirection: 'row',
-    height: 70,
-    backgroundColor: '#fff',
-    borderTopWidth: 1,
-    borderTopColor: '#e9ecef',
+    height: 64,
+    backgroundColor: BAR_BG,
+    paddingHorizontal: 8,
+    paddingTop: 6,
+    paddingBottom: 8,
     justifyContent: 'space-around',
     alignItems: 'center',
   },
@@ -58,10 +77,20 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     flex: 1,
+    gap: 2,
+  },
+  iconWrap: {
+    width: 44,
+    height: 28,
+    borderRadius: 14,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  iconWrapActive: {
+    backgroundColor: ACTIVE_BG,
   },
   navLabel: {
-    fontSize: 10,
-    marginTop: 4,
-    fontWeight: '600',
+    fontSize: 11,
+    marginTop: 2,
   },
 });

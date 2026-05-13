@@ -1,4 +1,5 @@
 import BottomNav from '@/components/bottom-nav';
+import Avatar from '@/components/avatar';
 import { addNotification } from '@/lib/notifications';
 import { storage } from '@/lib/storage';
 import { Ionicons } from '@expo/vector-icons';
@@ -315,10 +316,7 @@ export default function WorkerInfoPage() {
         </View>
 
         <View style={styles.workerHeader}>
-          <Image
-            source={{ uri: worker.profile_image || 'https://placehold.co/100x100' }}
-            style={styles.largeAvatar}
-          />
+          <Avatar uri={worker.profile_image} name={worker.full_name} size={90} style={styles.largeAvatar as any} />
           <Text style={styles.workerNameLarge}>{worker.full_name}</Text>
           <Text style={styles.workerSkill}>{worker.skill || 'Professional'}</Text>
           <View style={styles.ratingRow}>

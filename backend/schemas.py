@@ -132,6 +132,18 @@ class BookingCreate(BookingBase):
     pass
 
 
+class BookingUpdate(BaseModel):
+    status: Optional[str] = None
+    estimated_price: Optional[float] = None
+    final_price: Optional[float] = None
+    worker_id: Optional[int] = None
+    service_id: Optional[int] = None
+    booking_date: Optional[date] = None
+    booking_time: Optional[time] = None
+    problem_description: Optional[str] = None
+    customer_address: Optional[str] = None
+
+
 class BookingResponse(BookingBase):
     id: int
     created_at: Optional[datetime]
@@ -193,6 +205,12 @@ class ChatMessageBase(BaseModel):
     booking_id: Optional[int] = None
     message: Optional[str] = None
     sent_at: Optional[datetime] = None
+
+
+class ChatMessageResponse(ChatMessageBase):
+    id: int
+    class Config:
+        from_attributes = True
 
 
 class WorkerAvailabilityBase(BaseModel):

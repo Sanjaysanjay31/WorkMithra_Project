@@ -5,6 +5,7 @@ import { platformShadow } from '@/lib/shadow';
 import { Ionicons } from '@expo/vector-icons';
 import { Stack, useRouter } from 'expo-router';
 import React, { useEffect, useState } from 'react';
+import Avatar from '@/components/avatar';
 import {
     Image,
     ScrollView,
@@ -74,8 +75,39 @@ export default function WorkerDashboard() {
 
   useEffect(() => {
     (async () => {
+      // Local cache for instant paint
       const p = await storage.get(WORKER_PROFILE_KEY);
       if (p) try { setProfile(JSON.parse(p)); } catch {}
+
+      // Live profile from backend
+      try {
+        const wRes = await fetch(`${BASE_URL}/workers/${userId}`);
+        if (wRes.ok) {
+          const w = await wRes.json();
+          const merged: WorkerProfile = {
+            full_name: w.full_name,
+            age: w.age != null ? String(w.age) : undefined,
+            skill: w.skill,
+            hourly_rate: w.hourly_rate != null ? String(w.hourly_rate) : undefined,
+            experience_years: w.experience_years != null ? String(w.experience_years) : undefined,
+            phone: w.phone,
+            alternate_phone: w.alternate_phone || w.alt_phone,
+            profile_image: w.profile_image,
+            location: w.location || w.city || w.address,
+            pincode: w.pincode,
+            email: w.email,
+            bio: w.bio,
+            aadhaar_verified: !!w.aadhaar_verified,
+            completed_jobs: w.completed_jobs ?? w.total_jobs,
+            rating: w.rating,
+          };
+          setProfile(merged);
+          storage.set(WORKER_PROFILE_KEY, JSON.stringify(merged)).catch(() => {});
+        }
+      } catch (e) {
+        console.warn('Failed to fetch worker profile', e);
+      }
+
       try {
         const res = await fetch(`${BASE_URL}/bookings?worker_id=${userId}`);
         if (res.ok) {
@@ -124,10 +156,7 @@ export default function WorkerDashboard() {
               </View>
             )}
           </TouchableOpacity>
-          <Image
-            source={{ uri: profile.profile_image || 'https://placehold.co/120x120/6F42C1/fff?text=Me' }}
-            style={styles.heroAvatar}
-          />
+          <Avatar uri={profile.profile_image} name={profile.full_name} size={88} style={styles.heroAvatar as any} />
           <Text style={styles.heroName}>{profile.full_name || 'Worker'}</Text>
           {profile.skill ? <Text style={styles.heroSkill}>{profile.skill}</Text> : null}
           <View style={styles.heroBadges}>

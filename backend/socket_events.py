@@ -38,7 +38,7 @@ async def authenticate(sid, data):
         socket_manager.add_connection(user_id, sid)
         
         # Join user's private room for direct notifications
-        sio.enter_room(sid, f"user_{user_id}")
+        await sio.enter_room(sid, f"user_{user_id}")
         
         await sio.emit('authenticated', {
             'user_id': user_id,
@@ -135,14 +135,14 @@ async def booking_status_update(sid, data):
 async def join_room(sid, data):
     room_id = data.get('room_id')
     if room_id:
-        sio.enter_room(sid, room_id)
+        await sio.enter_room(sid, room_id)
         logger.info(f"Socket {sid} joined room {room_id}")
 
 @sio.event
 async def leave_room(sid, data):
     room_id = data.get('room_id')
     if room_id:
-        sio.leave_room(sid, room_id)
+        await sio.leave_room(sid, room_id)
         logger.info(f"Socket {sid} left room {room_id}")
 
 @sio.event

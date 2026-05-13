@@ -1,4 +1,6 @@
 import BottomNav from '@/components/bottom-nav';
+import Avatar from '@/components/avatar';
+import { storage } from '@/lib/storage';
 import { aiExtract, webSTTControlled } from '@/lib/ai';
 import { unreadCount } from '@/lib/notifications';
 import { Ionicons } from '@expo/vector-icons';
@@ -168,10 +170,7 @@ export default function HomePage() {
 
   const renderWorker = ({ item }: { item: any }) => (
     <View style={styles.workerCard}>
-      <Image
-        source={{ uri: item.profile_image || 'https://placehold.co/60x60' }}
-        style={styles.workerAvatar}
-      />
+      <Avatar uri={item.profile_image} name={item.full_name} size={60} style={styles.workerAvatar as any} />
       <View style={styles.workerInfo}>
         <Text style={styles.workerName}>{item.full_name}</Text>
         <Text style={styles.workerDomain}>{item.skill || 'General Worker'}</Text>

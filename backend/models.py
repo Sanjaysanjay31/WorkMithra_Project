@@ -195,8 +195,9 @@ class ChatMessage(Base):
     __tablename__ = "chat_messages"
 
     id = Column(Integer, primary_key=True, index=True)
-    sender_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-    receiver_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    # No FK: sender/receiver can be either a user or a worker (different tables).
+    sender_id = Column(Integer, nullable=True)
+    receiver_id = Column(Integer, nullable=True)
     booking_id = Column(Integer, ForeignKey("bookings.id"), nullable=True)
     message = Column(Text, nullable=True)
     sent_at = Column(DateTime, default=datetime.utcnow)
