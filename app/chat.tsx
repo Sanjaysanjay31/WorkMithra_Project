@@ -3,6 +3,7 @@ import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useEffect, useRef, useState } from 'react';
 import {
     ActivityIndicator,
+    Alert,
     FlatList,
     Platform,
     StyleSheet,
@@ -197,20 +198,23 @@ export default function ChatScreen() {
   }
 
   async function onMic() {
-    if (Platform.OS !== 'web') return;
     try {
       setListening(true);
       const sttHint = me === 'client' ? clientLang : workerLang;
       const text = await webSTT(sttHint);
       setListening(false);
-      if (text) send(text);
-    } catch {
+      if (text && text.trim()) {
+        send(text);
+      } else {
+        Alert.alert('Voice', 'No speech detected. Speak clearly and try again.');
+      }
+    } catch (e: any) {
       setListening(false);
+      Alert.alert('Voice error', e?.message || 'Could not capture voice');
     }
   }
 
   async function onSpeak(b: Bubble) {
-    if (Platform.OS !== 'web') return;
     try {
       setSpeakingId(b.id);
       const viewerLang = langForSide(me);

@@ -1,11 +1,29 @@
 from fastapi import APIRouter, Depends, HTTPException
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from datetime import datetime
 import database, models, schemas
 
 router = APIRouter()
+
+
+def _to_dict(r: models.RatingReview, db: Session) -> Dict[str, Any]:
+    user_name = None
+    if r.user_id is not None:
+        u = db.query(models.User).filter(models.User.id == r.user_id).first()
+        if u is not None:
+            user_name = u.full_name
+    return {
+        "id": r.id,
+        "booking_id": r.booking_id,
+        "user_id": r.user_id,
+        "user_name": user_name,
+        "worker_id": r.worker_id,
+        "rating": float(r.rating) if r.rating is not None else 0.0,
+        "review_text": r.review_text,
+        "created_at": r.created_at.isoformat() if r.created_at else None,
+    }
 
 
 def _recompute_worker_rating(db: Session, worker_id: int) -> None:
@@ -21,7 +39,7 @@ def _recompute_worker_rating(db: Session, worker_id: int) -> None:
         db.commit()
 
 
-@router.post("/", response_model=schemas.RatingReviewResponse)
+@router.post("/")
 def create_review(payload: schemas.RatingReviewBase, db: Session = Depends(database.get_db)):
     """Create a new review. Updates the worker's aggregate rating."""
     if payload.worker_id is None:
@@ -41,10 +59,10 @@ def create_review(payload: schemas.RatingReviewBase, db: Session = Depends(datab
     db.commit()
     db.refresh(review)
     _recompute_worker_rating(db, payload.worker_id)
-    return review
+    return _to_dict(review, db)
 
 
-@router.get("/", response_model=List[schemas.RatingReviewResponse])
+@router.get("/")
 def list_reviews(
     worker_id: Optional[int] = None,
     user_id: Optional[int] = None,
@@ -58,15 +76,16 @@ def list_reviews(
         q = q.filter(models.RatingReview.worker_id == worker_id)
     if user_id is not None:
         q = q.filter(models.RatingReview.user_id == user_id)
-    return q.order_by(models.RatingReview.created_at.desc()).offset(skip).limit(limit).all()
+    rows = q.order_by(models.RatingReview.created_at.desc()).offset(skip).limit(limit).all()
+    return [_to_dict(r, db) for r in rows]
 
 
-@router.get("/{review_id}", response_model=schemas.RatingReviewResponse)
+@router.get("/{review_id}")
 def get_review(review_id: int, db: Session = Depends(database.get_db)):
     review = db.query(models.RatingReview).filter(models.RatingReview.id == review_id).first()
     if not review:
         raise HTTPException(status_code=404, detail="Review not found")
-    return review
+    return _to_dict(review, db)
 
 
 @router.delete("/{review_id}")

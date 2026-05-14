@@ -282,6 +282,7 @@ async function cleanupStaleRecording() {
 function nativeSTTControlled(lang: LangCode = 'en-IN'): { stop: () => void; result: Promise<string> } {
   let recording: any = null;
   let stopped = false;
+  let startedAt = 0;
   let resolveFn!: (v: string) => void;
   let rejectFn!: (e: any) => void;
   const result = new Promise<string>((res, rej) => { resolveFn = res; rejectFn = rej; });
@@ -299,6 +300,7 @@ function nativeSTTControlled(lang: LangCode = 'en-IN'): { stop: () => void; resu
       // Use HIGH_QUALITY preset (m4a / AAC). Sarvam saarika:v2 accepts m4a/mp4.
       await rec.prepareToRecordAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
       await rec.startAsync();
+      startedAt = Date.now();
       recording = rec;
       _activeRecording = rec;
     } catch (e) {
@@ -312,33 +314,49 @@ function nativeSTTControlled(lang: LangCode = 'en-IN'): { stop: () => void; resu
     stopped = true;
     try {
       if (!recording) { resolveFn(''); return; }
+      // Guard against accidental tap-tap → recording too short = silent file.
+      const elapsed = startedAt ? Date.now() - startedAt : 0;
+      if (elapsed < 600) {
+        await new Promise((r) => setTimeout(r, 600 - elapsed));
+      }
       try { await recording.stopAndUnloadAsync(); } catch {}
       if (_activeRecording === recording) _activeRecording = null;
       const uri: string | null = recording.getURI?.() ?? null;
       try {
         await Audio.setAudioModeAsync({ allowsRecordingIOS: false });
       } catch {}
-      if (!uri) { resolveFn(''); return; }
+      if (!uri) { rejectFn(new Error('Recording produced no audio file')); return; }
+      console.log('[STT] uri=', uri, 'elapsedMs=', elapsed);
+
+      // Sarvam handles m4a, but renaming to .mp4 avoids any extension-based rejection.
+      const origName = uri.split('/').pop() || 'speech.m4a';
+      const safeName = origName.endsWith('.m4a') ? origName.replace(/\.m4a$/, '.mp4') : origName;
+      const ext = (safeName.split('.').pop() || 'mp4').toLowerCase();
+      const mime = ext === 'mp4' || ext === 'm4a' ? 'audio/mp4' : ext === 'webm' ? 'audio/webm' : 'audio/wav';
 
       const form = new FormData();
-      const name = uri.split('/').pop() || 'speech.wav';
-      const ext = (name.split('.').pop() || 'wav').toLowerCase();
-      const mime = ext === 'm4a' ? 'audio/m4a' : ext === 'webm' ? 'audio/webm' : 'audio/wav';
       // @ts-ignore RN FormData file shape
-      form.append('file', { uri, name, type: mime });
+      form.append('file', { uri, name: safeName, type: mime });
       form.append('lang', lang === 'auto' ? 'unknown' : lang);
 
-      const res = await fetch(`${BASE_URL}/ai/stt`, { method: 'POST', body: form });
+      const sttUrl = `${BASE_URL}/ai/stt`;
+      console.log('[STT] POST', sttUrl, 'name=', safeName, 'mime=', mime, 'lang=', lang);
+
+      const res = await fetch(sttUrl, { method: 'POST', body: form });
       const text = await res.text();
+      console.log('[STT] response', res.status, text.slice(0, 400));
       if (!res.ok) {
-        console.warn('STT backend error', res.status, text);
         rejectFn(new Error(`STT failed (${res.status}): ${text.slice(0, 200)}`));
         return;
       }
       let data: any = {};
       try { data = JSON.parse(text); } catch { data = { transcript: text }; }
       const transcript = data.transcript || data.text || data.output || '';
-      console.log('STT result:', transcript || '(empty)', 'raw:', text.slice(0, 300));
+      console.log('[STT] transcript=', transcript || '(empty)');
+      if (!transcript || !transcript.trim()) {
+        rejectFn(new Error(`No speech detected. Backend returned: ${text.slice(0, 200) || '(empty)'}`));
+        return;
+      }
       resolveFn(transcript);
     } catch (e) {
       rejectFn(e);

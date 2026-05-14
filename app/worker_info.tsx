@@ -22,6 +22,7 @@ import {
 } from 'react-native';
 import * as Location from 'expo-location';
 import { WebView } from 'react-native-webview';
+import DateTimePicker from '@react-native-community/datetimepicker';
 
 const DEFAULT_API_URL = Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://localhost:8000';
 const BASE_URL = process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL;
@@ -118,7 +119,7 @@ export default function WorkerInfoPage() {
       setReviews(
         data.map((r) => ({
           id: r.id,
-          name: r.user_id ? `User #${r.user_id}` : 'Client',
+          name: r.user_name || (r.user_id ? `User #${r.user_id}` : 'Client'),
           rating: Number(r.rating) || 0,
           date: r.created_at ? String(r.created_at).split('T')[0] : '',
           text: r.review_text || '',
@@ -138,21 +139,30 @@ export default function WorkerInfoPage() {
       if (authRaw) { const auth = JSON.parse(authRaw); if (auth.id) uid = auth.id; }
     } catch {}
     const wid = Number(id);
+    if (!wid || Number.isNaN(wid)) {
+      Alert.alert('Submit failed', `Invalid worker id: ${id}`);
+      return;
+    }
+    const url = `${BASE_URL}/reviews/`;
+    const body = { worker_id: wid, user_id: uid || null, rating: feedbackRating, review_text: feedbackText };
+    console.log('[review] POST', url, body);
     try {
-      const res = await fetch(`${BASE_URL}/reviews/`, {
+      const res = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ worker_id: wid, user_id: uid || null, rating: feedbackRating, review_text: feedbackText }),
+        body: JSON.stringify(body),
       });
+      const text = await res.text();
+      console.log('[review] response', res.status, text.slice(0, 300));
       if (!res.ok) {
-        const t = await res.text();
-        throw new Error(t || 'Submit failed');
+        Alert.alert('Submit failed', `HTTP ${res.status}\n${text.slice(0, 200)}\n\nURL: ${url}`);
+        return;
       }
       setFeedbackText('');
       await loadReviews();
       Alert.alert('Success', 'Thank you for your feedback!');
     } catch (e: any) {
-      Alert.alert('Submit failed', e?.message || 'Could not submit review');
+      Alert.alert('Submit failed', `${e?.message || 'Network error'}\n\nURL: ${url}`);
     }
   }
 
@@ -636,48 +646,56 @@ export default function WorkerInfoPage() {
         </ScrollView>
       </View>
 
-      <Modal visible={showDatePicker} transparent animationType="fade" onRequestClose={() => setShowDatePicker(false)}>
-        <TouchableOpacity style={styles.modalBackdrop} activeOpacity={1} onPress={() => setShowDatePicker(false)}>
-          <View style={styles.pickerCard}>
-            <Text style={styles.pickerTitle}>Pick a date</Text>
-            <FlatList
-              data={buildUpcomingDates(30)}
-              keyExtractor={(it) => it.value}
-              style={{ maxHeight: 320 }}
-              renderItem={({ item }) => (
-                <TouchableOpacity
-                  style={[styles.pickerItem, bookDate === item.value && styles.pickerItemActive]}
-                  onPress={() => { setBookDate(item.value); setShowDatePicker(false); }}
-                >
-                  <Text style={[styles.pickerItemText, bookDate === item.value && styles.pickerItemTextActive]}>{item.label}</Text>
-                  <Text style={styles.pickerItemSub}>{item.value}</Text>
-                </TouchableOpacity>
-              )}
-            />
-          </View>
-        </TouchableOpacity>
-      </Modal>
+      {Platform.OS !== 'web' && showDatePicker && (
+        <DateTimePicker
+          value={(() => {
+            if (bookDate) {
+              const [y, m, d] = bookDate.split('-').map(Number);
+              return new Date(y, (m || 1) - 1, d || 1);
+            }
+            return new Date();
+          })()}
+          mode="date"
+          display={Platform.OS === 'ios' ? 'inline' : 'calendar'}
+          minimumDate={new Date()}
+          onChange={(event, selected) => {
+            setShowDatePicker(false);
+            if (event.type === 'set' && selected) {
+              const y = selected.getFullYear();
+              const m = pad(selected.getMonth() + 1);
+              const d = pad(selected.getDate());
+              setBookDate(`${y}-${m}-${d}`);
+            }
+          }}
+        />
+      )}
 
-      <Modal visible={showTimePicker} transparent animationType="fade" onRequestClose={() => setShowTimePicker(false)}>
-        <TouchableOpacity style={styles.modalBackdrop} activeOpacity={1} onPress={() => setShowTimePicker(false)}>
-          <View style={styles.pickerCard}>
-            <Text style={styles.pickerTitle}>Pick a time</Text>
-            <FlatList
-              data={buildTimeSlots()}
-              keyExtractor={(it) => it.value}
-              style={{ maxHeight: 320 }}
-              renderItem={({ item }) => (
-                <TouchableOpacity
-                  style={[styles.pickerItem, bookTime === item.value && styles.pickerItemActive]}
-                  onPress={() => { setBookTime(item.value); setShowTimePicker(false); }}
-                >
-                  <Text style={[styles.pickerItemText, bookTime === item.value && styles.pickerItemTextActive]}>{item.label}</Text>
-                </TouchableOpacity>
-              )}
-            />
-          </View>
-        </TouchableOpacity>
-      </Modal>
+      {Platform.OS !== 'web' && showTimePicker && (
+        <DateTimePicker
+          value={(() => {
+            if (bookTime) {
+              const [h, m] = bookTime.split(':').map(Number);
+              const dt = new Date();
+              dt.setHours(h || 9, m || 0, 0, 0);
+              return dt;
+            }
+            const dt = new Date();
+            dt.setHours(9, 0, 0, 0);
+            return dt;
+          })()}
+          mode="time"
+          display={Platform.OS === 'ios' ? 'spinner' : 'clock'}
+          is24Hour={false}
+          onChange={(event, selected) => {
+            setShowTimePicker(false);
+            if (event.type === 'set' && selected) {
+              const h = pad(selected.getHours());
+              const m = pad(selected.getMinutes());
+              setBookTime(`${h}:${m}:00`);
+            }
+          }}
+        />
+      )}
 
       <BottomNav currentRoute="home" />
     </View>

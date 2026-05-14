@@ -110,22 +110,53 @@ export default function WorkerDashboard() {
 
       try {
         const res = await fetch(`${BASE_URL}/bookings?worker_id=${userId}`);
-        if (res.ok) {
-          const data = await res.json();
-          const past = data.filter((b: any) => b.status === 'success' || b.status === 'completed').map((b: any) => ({
+        if (!res.ok) return;
+        const data: any[] = await res.json();
+        const completed = data.filter((b: any) => b.status === 'success' || b.status === 'completed');
+
+        // Fetch all reviews for this worker once, then index by booking_id.
+        const reviewByBooking: Record<string, any> = {};
+        try {
+          const rr = await fetch(`${BASE_URL}/reviews/?worker_id=${userId}`);
+          if (rr.ok) {
+            const reviews: any[] = await rr.json();
+            for (const r of reviews) {
+              if (r.booking_id != null) reviewByBooking[String(r.booking_id)] = r;
+            }
+          }
+        } catch {}
+
+        // Fetch each unique user's name once.
+        const uniqueUserIds = Array.from(new Set(completed.map((b) => b.user_id).filter(Boolean)));
+        const nameById: Record<string, string> = {};
+        await Promise.all(
+          uniqueUserIds.map(async (uid) => {
+            try {
+              const pr = await fetch(`${BASE_URL}/profiles/user/${uid}`);
+              if (pr.ok) {
+                const p = await pr.json();
+                if (p?.full_name) nameById[String(uid)] = p.full_name;
+              }
+            } catch {}
+          }),
+        );
+
+        const past = completed.map((b: any) => {
+          const review = reviewByBooking[String(b.id)];
+          return {
             id: String(b.id),
-            client_name: `User ${b.user_id}`,
+            client_name: nameById[String(b.user_id)] || `User ${b.user_id}`,
             client_avatar: `https://i.pravatar.cc/150?u=${b.user_id}`,
             place: b.customer_address || 'Local Area',
             date: b.booking_date || 'Recent',
             description: b.problem_description || 'Completed service',
             payment: b.final_price || b.estimated_price || 0,
-            rating: 5, // We don't have reviews attached to bookings in this API response yet, default to 5
-            review: 'Great work!',
+            rating: review ? Number(review.rating) || 0 : 0,
+            review: review ? (review.review_text || '') : '',
             photo: 'https://placehold.co/400x200/e9ecef/a3a3a3?text=Job+Completed',
-          }));
-          setPastWork(past);
-        }
+          };
+        });
+        setPastWork(past);
       } catch (e) {
         console.warn('Failed to fetch past work', e);
       }

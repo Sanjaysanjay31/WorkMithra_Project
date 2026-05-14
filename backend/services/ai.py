@@ -54,7 +54,7 @@ def sarvam_stt(audio_bytes: bytes, filename: str = "audio.wav", lang: str = "unk
     files = {"file": (filename, audio_bytes, mime)}
     # Sarvam expects language_code like "en-IN" or "unknown". Normalize "auto" → "unknown".
     lang_norm = "unknown" if (not lang or lang.lower() in ("auto", "")) else lang
-    data = {"model": "saarika:v2", "language_code": lang_norm}
+    data = {"model": "saarika:v2.5", "language_code": lang_norm}
     r = requests.post(
         f"{SARVAM_BASE}/speech-to-text",
         headers=_sarvam_headers(),

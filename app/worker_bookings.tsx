@@ -27,6 +27,7 @@ const SAMPLE: Request[] = [
 ];
 
 import { storage } from '@/lib/storage';
+import { formatBookingDateTime } from '@/lib/format';
 const DEFAULT_API_URL = Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://localhost:8000';
 const BASE_URL = process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL;
 
@@ -78,7 +79,7 @@ export default function WorkerBookings() {
               client: info.name || `User ${b.user_id}`,
               avatar: info.avatar || `https://i.pravatar.cc/150?u=${b.user_id}`,
               job: b.problem_description || 'General Service',
-              date: b.booking_date ? `${b.booking_date} ${b.booking_time || ''}` : 'Unknown date',
+              date: formatBookingDateTime(b.booking_date, b.booking_time) || 'Date not set',
               price: b.estimated_price || b.final_price || 0,
               status: b.status === 'accepted' || b.status === 'upcoming' || b.status === 'success' || b.status === 'completed' ? 'accepted' : 'pending',
             };

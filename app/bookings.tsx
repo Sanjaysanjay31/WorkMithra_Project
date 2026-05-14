@@ -2,6 +2,7 @@ import BottomNav from '@/components/bottom-nav';
 import Avatar from '@/components/avatar';
 import { platformShadow } from '@/lib/shadow';
 import { storage } from '@/lib/storage';
+import { formatBookingDateTime } from '@/lib/format';
 import { Stack, useRouter } from 'expo-router';
 import React, { useEffect, useMemo, useState } from 'react';
 import {
@@ -114,7 +115,7 @@ export default function BookingsPage() {
                worker: w as Worker,
                status: b.status,
                amount: b.estimated_price || b.final_price || 0,
-               date: b.booking_date ? `${b.booking_date} · ${b.booking_time || ''}` : 'Unknown date',
+               date: formatBookingDateTime(b.booking_date, b.booking_time) || 'Date not set',
              };
              if (b.status === 'upcoming' || b.status === 'pending') {
                realPresent.push(bookingItem);

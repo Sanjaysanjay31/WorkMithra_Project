@@ -137,13 +137,19 @@ export default function HomePage() {
       return;
     }
     try {
-      const ctrl = webSTTControlled('en-IN', { silenceMs: 4000 });
+      const ctrl = webSTTControlled('auto', { silenceMs: 4000 });
       sttRef.current = ctrl;
       setListening(true);
+      // Native: hard cap at 15s so the mic doesn't stay open forever.
+      const autoStop = Platform.OS !== 'web' ? setTimeout(() => { try { ctrl.stop(); } catch {} }, 15000) : null;
       const raw = await ctrl.result;
+      if (autoStop) clearTimeout(autoStop);
       sttRef.current = null;
       setListening(false);
-      if (!raw) return;
+      if (!raw || !raw.trim()) {
+        Alert.alert('Voice search', 'No speech detected. Speak clearly into the mic, then tap again to stop.');
+        return;
+      }
       const cleaned = cleanQuery(raw);
       setSearchQuery(cleaned);
       refineQueryWithAI(raw);
