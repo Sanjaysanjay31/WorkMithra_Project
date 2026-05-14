@@ -42,8 +42,19 @@ def sarvam_tts(text: str, target_lang: str = "en-IN", speaker: str = "anushka") 
 def sarvam_stt(audio_bytes: bytes, filename: str = "audio.wav", lang: str = "unknown") -> Dict[str, Any]:
     if not SARVAM_API_KEY:
         raise RuntimeError("SARVAM_API_KEY is not set")
-    files = {"file": (filename, audio_bytes, "audio/wav")}
-    data = {"model": "saarika:v2", "language_code": lang}
+    ext = (filename.rsplit(".", 1)[-1] or "wav").lower()
+    mime = {
+        "wav": "audio/wav",
+        "m4a": "audio/mp4",
+        "mp4": "audio/mp4",
+        "mp3": "audio/mpeg",
+        "webm": "audio/webm",
+        "flac": "audio/flac",
+    }.get(ext, "audio/wav")
+    files = {"file": (filename, audio_bytes, mime)}
+    # Sarvam expects language_code like "en-IN" or "unknown". Normalize "auto" → "unknown".
+    lang_norm = "unknown" if (not lang or lang.lower() in ("auto", "")) else lang
+    data = {"model": "saarika:v2", "language_code": lang_norm}
     r = requests.post(
         f"{SARVAM_BASE}/speech-to-text",
         headers=_sarvam_headers(),
@@ -51,7 +62,8 @@ def sarvam_stt(audio_bytes: bytes, filename: str = "audio.wav", lang: str = "unk
         data=data,
         timeout=60,
     )
-    r.raise_for_status()
+    if not r.ok:
+        raise RuntimeError(f"Sarvam {r.status_code}: {r.text[:300]}")
     return r.json()
 
 

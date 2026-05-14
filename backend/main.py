@@ -43,14 +43,7 @@ app = FastAPI()
 # credentials) or keep wildcard (without credentials). For a public API that
 # uses bearer tokens in the body / headers (not cookies), wildcard + no
 # credentials is the correct choice.
-ALLOWED_ORIGINS = [
-    "http://localhost:8081",      # Expo web dev server
-    "http://localhost:19006",     # Expo web alt port
-    "http://localhost:3000",      # any web frontend dev
-    "http://localhost:8000",
-    "http://127.0.0.1:8000"
-    # Add your production frontend URL here when deployed
-]
+ALLOWED_ORIGINS = ["*"]
 
 app.add_middleware(
     CORSMiddleware,
@@ -66,12 +59,24 @@ from routers.bookings import router as bookings_router
 from routers.profiles import router as profiles_router
 from routers.chat import router as chat_router
 from routers.ai import router as ai_router
+from routers.reviews import router as reviews_router
+from routers.notifications import router as notifications_router
+from routers.services import router as services_router
+from routers.worker_services import router as worker_services_router
+from routers.availability import router as availability_router
+from routers.job_history import router as job_history_router
 
 app.include_router(workers_router, prefix="/workers", tags=["workers"])
 app.include_router(bookings_router, prefix="/bookings", tags=["bookings"])
 app.include_router(profiles_router, prefix="/profiles", tags=["profiles"])
 app.include_router(chat_router, prefix="/chat", tags=["chat"])
 app.include_router(ai_router, prefix="/ai", tags=["ai"])
+app.include_router(reviews_router, prefix="/reviews", tags=["reviews"])
+app.include_router(notifications_router, prefix="/notifications", tags=["notifications"])
+app.include_router(services_router, prefix="/services", tags=["services"])
+app.include_router(worker_services_router, prefix="/worker-services", tags=["worker_services"])
+app.include_router(availability_router, prefix="/availability", tags=["availability"])
+app.include_router(job_history_router, prefix="/job-history", tags=["job_history"])
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 

@@ -296,7 +296,7 @@ function Detail({ icon, label, value }: { icon: any; label: string; value?: stri
 
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: '#fff' },
-  frame: { flex: 1, width: '100%', maxWidth: 360, alignSelf: 'center', backgroundColor: '#fff' },
+  frame: { flex: 1, width: '100%', backgroundColor: '#fff' },
 
   hero: { alignItems: 'center', paddingTop: 18, paddingBottom: 14, backgroundColor: '#6F42C1', borderBottomLeftRadius: 22, borderBottomRightRadius: 22 },
   bellBtn: { position: 'absolute', top: 14, right: 14, width: 36, height: 36, borderRadius: 18, backgroundColor: 'rgba(255,255,255,0.18)', justifyContent: 'center', alignItems: 'center', zIndex: 5 },

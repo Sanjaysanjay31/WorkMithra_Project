@@ -9,7 +9,12 @@
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "WorkMithra needs microphone access for voice search and AI assistant.",
+        "NSPhotoLibraryUsageDescription": "WorkMithra needs photo library access to upload your profile picture.",
+        "NSLocationWhenInUseUsageDescription": "WorkMithra uses your location to show nearby workers and distance."
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -19,7 +24,8 @@
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
       "edgeToEdgeEnabled": true,
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "permissions": ["RECORD_AUDIO", "READ_MEDIA_IMAGES", "ACCESS_FINE_LOCATION", "ACCESS_COARSE_LOCATION"]
     },
     "web": {
       "output": "static",
@@ -27,6 +33,12 @@
     },
     "plugins": [
       "expo-router",
+      [
+        "expo-av",
+        {
+          "microphonePermission": "WorkMithra needs microphone access for voice search and AI assistant."
+        }
+      ],
       [
         "expo-splash-screen",
         {
@@ -49,7 +61,7 @@
       "eas": {
         "projectId": "0bbd76ca-52d8-409f-ae0e-05bc38b227ee"
       },
-      "EXPO_PUBLIC_BASE_URL": "http://10.0.2.2:8000"
+      "EXPO_PUBLIC_API_URL": "https://workmithra.onrender.com"
     },
     "owner": "sanjaysanjay31"
   }

@@ -126,7 +126,7 @@ export default function NotificationsPage() {
 
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: '#fff' },
-  frame: { flex: 1, width: '100%', maxWidth: 360, alignSelf: 'center', backgroundColor: '#fff' },
+  frame: { flex: 1, width: '100%', backgroundColor: '#fff' },
   topBar: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', backgroundColor: '#6F42C1', paddingHorizontal: 14, paddingVertical: 12 },
   title: { fontSize: 16, fontWeight: '800', color: '#fff' },
   clearLink: { alignSelf: 'flex-end', padding: 10, paddingRight: 16 },

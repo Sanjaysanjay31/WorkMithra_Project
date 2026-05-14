@@ -540,10 +540,6 @@ export function AIAssistant() {
   }
 
   async function onMic() {
-    if (Platform.OS !== 'web') {
-      appendMsgPersist({ who: 'ai', text: 'Voice input works in the browser for now.' });
-      return;
-    }
     // Cut off whatever the assistant is saying so it can listen.
     if (greetTimerRef.current) { clearTimeout(greetTimerRef.current); greetTimerRef.current = null; }
     stopAudio();      // stop audio without flipping mute on
@@ -564,7 +560,7 @@ export function AIAssistant() {
     } catch (e: any) {
       setListening(false);
       console.error('STT error:', e);
-      appendMsgPersist({ who: 'ai', text: `🎤 Mic error: ${e?.message || e}. Allow microphone access in your browser.` });
+      appendMsgPersist({ who: 'ai', text: `🎤 Mic error: ${e?.message || e}` });
     }
   }
 
@@ -858,7 +854,7 @@ const styles = StyleSheet.create({
     ...platformShadow('0px 4px 12px rgba(111,66,193,0.35)', '#6f42c1', 0, 4, 0.35, 6, 6),
   },
   overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' },
-  sheet: { width: '100%', maxWidth: 360, alignSelf: 'center', height: '85%', backgroundColor: '#fff', borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: 12 },
+  sheet: { width: '100%', height: '85%', backgroundColor: '#fff', borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: 12 },
   header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 },
   title: { fontSize: 15, fontWeight: '800', color: '#6f42c1' },
   screenTag: { fontSize: 10, color: '#666', marginTop: 1 },

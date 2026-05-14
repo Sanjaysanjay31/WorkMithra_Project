@@ -5,6 +5,7 @@ import { aiExtract, webSTTControlled } from '@/lib/ai';
 import { unreadCount } from '@/lib/notifications';
 import { Ionicons } from '@expo/vector-icons';
 import { Stack, useRouter } from 'expo-router';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
     ActivityIndicator,
@@ -29,6 +30,7 @@ type AvailNow = 'now' | 'today' | null;
 
 export default function HomePage() {
   const router = useRouter();
+  const insets = useSafeAreaInsets();
   const [searchQuery, setSearchQuery] = useState('');
   const [workers, setWorkers] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
@@ -129,10 +131,6 @@ export default function HomePage() {
   const sttRef = useRef<{ stop: () => void; result: Promise<string> } | null>(null);
 
   async function startVoiceSearch() {
-    if (Platform.OS !== 'web') {
-      Alert.alert('Voice search', 'Voice input works in the web browser. Native voice support coming soon.');
-      return;
-    }
     // Toggle: if already listening, stop and process.
     if (sttRef.current) {
       sttRef.current.stop();
@@ -267,7 +265,7 @@ export default function HomePage() {
 
       <Modal visible={filterVisible} animationType="slide" transparent onRequestClose={() => setFilterVisible(false)}>
         <View style={styles.modalOverlay}>
-          <View style={styles.modalCard}>
+          <View style={[styles.modalCard, { paddingBottom: 16 + insets.bottom, height: '85%' }]}>
             <View style={styles.modalHeader}>
               <Text style={styles.modalTitle}>Filters</Text>
               <TouchableOpacity onPress={() => setFilterVisible(false)}>
@@ -389,7 +387,7 @@ export default function HomePage() {
 
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: '#fff' },
-  frame: { flex: 1, width: '100%', maxWidth: 360, alignSelf: 'center', backgroundColor: '#fff', paddingHorizontal: 16, paddingTop: 12 },
+  frame: { flex: 1, width: '100%', alignSelf: 'stretch', backgroundColor: '#fff', paddingHorizontal: 16, paddingTop: 12 },
   topBar: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 16 },
   searchBox: { flex: 1, flexDirection: 'row', alignItems: 'center', backgroundColor: '#f0f0f0', paddingHorizontal: 12, borderRadius: 12, height: 42 },
   searchIcon: { marginRight: 8 },
@@ -415,7 +413,7 @@ const styles = StyleSheet.create({
   moreBtn: { backgroundColor: '#6F42C1', paddingHorizontal: 11, paddingVertical: 5, borderRadius: 7 },
   moreBtnText: { color: '#fff', fontSize: 11, fontWeight: '700' },
   modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end', alignItems: 'center' },
-  modalCard: { width: '100%', maxWidth: 360, maxHeight: '85%', alignSelf: 'center', backgroundColor: '#fff', borderTopLeftRadius: 20, borderTopRightRadius: 20, paddingHorizontal: 16, paddingTop: 14, paddingBottom: 16 },
+  modalCard: { width: '100%', alignSelf: 'stretch', backgroundColor: '#fff', borderTopLeftRadius: 20, borderTopRightRadius: 20, paddingHorizontal: 16, paddingTop: 14 },
   modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 },
   modalTitle: { fontSize: 18, fontWeight: '800', color: '#333' },
   fieldLabel: { fontSize: 12, fontWeight: '700', color: '#333', marginTop: 12, marginBottom: 6 },

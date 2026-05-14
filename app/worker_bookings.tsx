@@ -273,7 +273,7 @@ export default function WorkerBookings() {
 
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: '#fff' },
-  frame: { flex: 1, width: '100%', maxWidth: 360, alignSelf: 'center', backgroundColor: '#fff', paddingHorizontal: 14, paddingTop: 14 },
+  frame: { flex: 1, width: '100%', backgroundColor: '#fff', paddingHorizontal: 14, paddingTop: 14 },
   title: { fontSize: 19, fontWeight: '800', color: '#333', marginBottom: 12, textAlign: 'center' },
   tabRow: { flexDirection: 'row', backgroundColor: '#f0f0f0', borderRadius: 10, padding: 4, marginBottom: 14 },
   tabBtn: { flex: 1, paddingVertical: 9, borderRadius: 8, alignItems: 'center' },

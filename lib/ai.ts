@@ -1,4 +1,5 @@
 import { Platform } from 'react-native';
+import { Audio } from 'expo-av';
 
 const DEFAULT_API_URL = Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://localhost:8000';
 export const BASE_URL = process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL;
@@ -107,10 +108,10 @@ export async function aiTTS(text: string, targetLang: LangCode = 'en-IN'): Promi
   });
 }
 
-// Tracks the currently playing audio so we can stop it, plus a mute flag
-// that suppresses pending playbacks (e.g. when the assistant modal was closed
-// while a TTS fetch was still in flight).
+// Cross-platform audio playback. On web we use the HTML5 Audio element; on
+// native we use expo-av's Audio.Sound. `_currentAudio` is whichever is active.
 let _currentAudio: any = null;
+let _currentIsNative = false;
 let _muted = false;
 let _paused = false;
 let _pauseResolvers: Array<() => void> = [];
@@ -123,12 +124,16 @@ export function setMuted(v: boolean) {
 export function stopAudio() {
   try {
     if (_currentAudio) {
-      _currentAudio.pause();
-      _currentAudio.currentTime = 0;
+      if (_currentIsNative) {
+        _currentAudio.stopAsync?.().catch(() => {});
+        _currentAudio.unloadAsync?.().catch(() => {});
+      } else {
+        _currentAudio.pause();
+        _currentAudio.currentTime = 0;
+      }
       _currentAudio = null;
     }
   } catch {}
-  // unblock any waiters so speakLong loop can exit
   _paused = false;
   const r = _pauseResolvers; _pauseResolvers = [];
   r.forEach((fn) => fn());
@@ -136,12 +141,18 @@ export function stopAudio() {
 
 export function pauseAudio() {
   _paused = true;
-  try { _currentAudio?.pause(); } catch {}
+  try {
+    if (_currentIsNative) _currentAudio?.pauseAsync?.().catch(() => {});
+    else _currentAudio?.pause();
+  } catch {}
 }
 
 export function resumeAudio() {
   _paused = false;
-  try { _currentAudio?.play()?.catch?.(() => {}); } catch {}
+  try {
+    if (_currentIsNative) _currentAudio?.playAsync?.().catch(() => {});
+    else _currentAudio?.play()?.catch?.(() => {});
+  } catch {}
   const r = _pauseResolvers; _pauseResolvers = [];
   r.forEach((fn) => fn());
 }
@@ -155,20 +166,46 @@ function waitWhileNotPaused(): Promise<void> {
   return new Promise((res) => _pauseResolvers.push(res));
 }
 
-/** Plays a TTS audio URL (web only). Respects mute flag and stops any previous audio. */
-export function playAudio(url: string): Promise<void> {
-  if (Platform.OS !== 'web') return Promise.resolve();
-  if (_muted) return Promise.resolve();
-  const Ctor: any = (globalThis as any).Audio;
-  if (!Ctor) return Promise.resolve();
+/** Plays a TTS audio URL. Works on web (HTML5 Audio) and native (expo-av). */
+export async function playAudio(url: string): Promise<void> {
+  if (_muted) return;
   stopAudio();
-  return new Promise((resolve, reject) => {
-    if (_muted) return resolve();
-    const a = new Ctor(url);
-    _currentAudio = a;
-    a.onended = () => { if (_currentAudio === a) _currentAudio = null; resolve(); };
-    a.onerror = (e: any) => { if (_currentAudio === a) _currentAudio = null; reject(e); };
-    a.play().then(() => {}).catch((e: any) => { if (_currentAudio === a) _currentAudio = null; reject(e); });
+
+  if (Platform.OS === 'web') {
+    const Ctor: any = (globalThis as any).Audio;
+    if (!Ctor) return;
+    return new Promise((resolve, reject) => {
+      if (_muted) return resolve();
+      const a = new Ctor(url);
+      _currentAudio = a;
+      _currentIsNative = false;
+      a.onended = () => { if (_currentAudio === a) _currentAudio = null; resolve(); };
+      a.onerror = (e: any) => { if (_currentAudio === a) _currentAudio = null; reject(e); };
+      a.play().then(() => {}).catch((e: any) => { if (_currentAudio === a) _currentAudio = null; reject(e); });
+    });
+  }
+
+  // Native: expo-av
+  try {
+    await Audio.setAudioModeAsync({
+      playsInSilentModeIOS: true,
+      staysActiveInBackground: false,
+      shouldDuckAndroid: true,
+    });
+  } catch {}
+  const { sound } = await Audio.Sound.createAsync({ uri: url }, { shouldPlay: true });
+  if (_muted) { try { await sound.unloadAsync(); } catch {} return; }
+  _currentAudio = sound;
+  _currentIsNative = true;
+  return new Promise((resolve) => {
+    sound.setOnPlaybackStatusUpdate((status: any) => {
+      if (!status?.isLoaded) return;
+      if (status.didJustFinish) {
+        try { sound.unloadAsync(); } catch {}
+        if (_currentAudio === sound) _currentAudio = null;
+        resolve();
+      }
+    });
   });
 }
 
@@ -231,6 +268,87 @@ function splitForTTS(text: string, maxLen: number): string[] {
 }
 
 /**
+ * Native STT: record mic audio via expo-av, then upload to /ai/stt when stopped.
+ * Returns a controller with the same shape as webSTTControlled.
+ */
+// Module-level guard: expo-av allows only ONE Recording instance globally.
+let _activeRecording: any = null;
+async function cleanupStaleRecording() {
+  if (!_activeRecording) return;
+  try { await _activeRecording.stopAndUnloadAsync(); } catch {}
+  _activeRecording = null;
+}
+
+function nativeSTTControlled(lang: LangCode = 'en-IN'): { stop: () => void; result: Promise<string> } {
+  let recording: any = null;
+  let stopped = false;
+  let resolveFn!: (v: string) => void;
+  let rejectFn!: (e: any) => void;
+  const result = new Promise<string>((res, rej) => { resolveFn = res; rejectFn = rej; });
+
+  (async () => {
+    try {
+      await cleanupStaleRecording();
+      const perm = await Audio.requestPermissionsAsync();
+      if (!perm.granted) throw new Error('Microphone permission denied');
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: true,
+        playsInSilentModeIOS: true,
+      });
+      const rec = new Audio.Recording();
+      // Use HIGH_QUALITY preset (m4a / AAC). Sarvam saarika:v2 accepts m4a/mp4.
+      await rec.prepareToRecordAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
+      await rec.startAsync();
+      recording = rec;
+      _activeRecording = rec;
+    } catch (e) {
+      _activeRecording = null;
+      if (!stopped) { stopped = true; rejectFn(e); }
+    }
+  })();
+
+  const doStop = async () => {
+    if (stopped) return;
+    stopped = true;
+    try {
+      if (!recording) { resolveFn(''); return; }
+      try { await recording.stopAndUnloadAsync(); } catch {}
+      if (_activeRecording === recording) _activeRecording = null;
+      const uri: string | null = recording.getURI?.() ?? null;
+      try {
+        await Audio.setAudioModeAsync({ allowsRecordingIOS: false });
+      } catch {}
+      if (!uri) { resolveFn(''); return; }
+
+      const form = new FormData();
+      const name = uri.split('/').pop() || 'speech.wav';
+      const ext = (name.split('.').pop() || 'wav').toLowerCase();
+      const mime = ext === 'm4a' ? 'audio/m4a' : ext === 'webm' ? 'audio/webm' : 'audio/wav';
+      // @ts-ignore RN FormData file shape
+      form.append('file', { uri, name, type: mime });
+      form.append('lang', lang === 'auto' ? 'unknown' : lang);
+
+      const res = await fetch(`${BASE_URL}/ai/stt`, { method: 'POST', body: form });
+      const text = await res.text();
+      if (!res.ok) {
+        console.warn('STT backend error', res.status, text);
+        rejectFn(new Error(`STT failed (${res.status}): ${text.slice(0, 200)}`));
+        return;
+      }
+      let data: any = {};
+      try { data = JSON.parse(text); } catch { data = { transcript: text }; }
+      const transcript = data.transcript || data.text || data.output || '';
+      console.log('STT result:', transcript || '(empty)', 'raw:', text.slice(0, 300));
+      resolveFn(transcript);
+    } catch (e) {
+      rejectFn(e);
+    }
+  };
+
+  return { stop: () => { doStop(); }, result };
+}
+
+/**
  * Caller-controlled STT: starts the mic and returns a controller. The caller
  * decides when to stop (e.g. when the user taps the mic again). Continuous
  * mode so pauses don't end it. Captures the running transcript until stop().
@@ -249,8 +367,10 @@ export function webSTTControlled(
   const result = new Promise<string>((res, rej) => { resolveFn = res; rejectFn = rej; });
 
   if (Platform.OS !== 'web') {
-    rejectFn(new Error('web only'));
-    return { stop: () => {}, result };
+    // Native: record audio then upload to backend /ai/stt on stop.
+    const ctrl = nativeSTTControlled(lang);
+    ctrl.result.then(resolveFn).catch(rejectFn);
+    return { stop: ctrl.stop, result };
   }
   const SR: any = (globalThis as any).SpeechRecognition || (globalThis as any).webkitSpeechRecognition;
   if (!SR) {
@@ -313,7 +433,14 @@ export function webSTTControlled(
  */
 export function webSTT(lang: LangCode = 'en-IN', maxMs: number = 4000): Promise<string> {
   return new Promise((resolve, reject) => {
-    if (Platform.OS !== 'web') return reject(new Error('web only'));
+    if (Platform.OS !== 'web') {
+      const ctrl = nativeSTTControlled(lang);
+      const timer = setTimeout(() => ctrl.stop(), maxMs);
+      ctrl.result
+        .then((t) => { clearTimeout(timer); resolve(t); })
+        .catch((e) => { clearTimeout(timer); reject(e); });
+      return;
+    }
     const SR: any = (globalThis as any).SpeechRecognition || (globalThis as any).webkitSpeechRecognition;
     if (!SR) return reject(new Error('Speech recognition not supported in this browser'));
     const recog = new SR();

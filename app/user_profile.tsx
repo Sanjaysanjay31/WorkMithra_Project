@@ -20,6 +20,8 @@ import {
     TouchableOpacity,
     View,
 } from 'react-native';
+import * as Location from 'expo-location';
+import { WebView } from 'react-native-webview';
 
 type Tab = 'profile' | 'chat' | 'map' | 'requests';
 
@@ -182,13 +184,27 @@ export default function UserProfilePage() {
     if (tab === 'map') tryGetLocation();
   }, [tab]);
 
-  function tryGetLocation() {
-    if (Platform.OS !== 'web' || typeof navigator === 'undefined' || !navigator.geolocation) return;
-    navigator.geolocation.getCurrentPosition(
-      (pos) => setWorkerLoc({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
-      () => setWorkerLoc({ lat: 17.385, lng: 78.4867 }),
-      { enableHighAccuracy: false, timeout: 5000 },
-    );
+  async function tryGetLocation() {
+    if (Platform.OS === 'web') {
+      if (typeof navigator === 'undefined' || !navigator.geolocation) {
+        setWorkerLoc({ lat: 17.385, lng: 78.4867 });
+        return;
+      }
+      navigator.geolocation.getCurrentPosition(
+        (pos) => setWorkerLoc({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
+        () => setWorkerLoc({ lat: 17.385, lng: 78.4867 }),
+        { enableHighAccuracy: false, timeout: 5000 },
+      );
+      return;
+    }
+    try {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') { setWorkerLoc({ lat: 17.385, lng: 78.4867 }); return; }
+      const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+      setWorkerLoc({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+    } catch {
+      setWorkerLoc({ lat: 17.385, lng: 78.4867 });
+    }
   }
 
   const distanceKm = useMemo(() => {
@@ -329,14 +345,19 @@ export default function UserProfilePage() {
                 </View>
               </View>
 
-              {Platform.OS === 'web' && workerLoc && client.latitude && client.longitude && (
-                <View style={styles.mapEmbedWrap}>
-                  <iframe
-                    style={{ width: '100%', height: 240, border: 0, borderRadius: 12 } as any}
-                    src={`https://www.openstreetmap.org/export/embed.html?bbox=${Math.min(workerLoc.lng, client.longitude) - 0.02},${Math.min(workerLoc.lat, client.latitude) - 0.02},${Math.max(workerLoc.lng, client.longitude) + 0.02},${Math.max(workerLoc.lat, client.latitude) + 0.02}&layer=mapnik&marker=${client.latitude},${client.longitude}`}
-                  />
-                </View>
-              )}
+              {workerLoc && client.latitude && client.longitude && (() => {
+                const bbox = `${Math.min(workerLoc.lng, client.longitude) - 0.02},${Math.min(workerLoc.lat, client.latitude) - 0.02},${Math.max(workerLoc.lng, client.longitude) + 0.02},${Math.max(workerLoc.lat, client.latitude) + 0.02}`;
+                const src = `https://www.openstreetmap.org/export/embed.html?bbox=${bbox}&layer=mapnik&marker=${client.latitude},${client.longitude}`;
+                return (
+                  <View style={styles.mapEmbedWrap}>
+                    {Platform.OS === 'web' ? (
+                      <iframe style={{ width: '100%', height: 240, border: 0, borderRadius: 12 } as any} src={src} />
+                    ) : (
+                      <WebView source={{ uri: src }} style={{ width: '100%', height: 240, borderRadius: 12 }} />
+                    )}
+                  </View>
+                );
+              })()}
 
               <TouchableOpacity
                 style={styles.openMapsBtn}
@@ -422,7 +443,7 @@ function Detail({ icon, label, value }: { icon: any; label: string; value?: stri
 
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: '#fff' },
-  frame: { flex: 1, width: '100%', maxWidth: 360, alignSelf: 'center', backgroundColor: '#fff' },
+  frame: { flex: 1, width: '100%', backgroundColor: '#fff' },
   center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
 
   headerRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', backgroundColor: '#6F42C1', paddingHorizontal: 14, paddingVertical: 10 },

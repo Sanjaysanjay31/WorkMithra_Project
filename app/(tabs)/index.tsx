@@ -72,8 +72,6 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: 'white',
     width: '100%',
-    maxWidth: 360,
-    alignSelf: 'center',
   },
   imageContainer: {
     flex: 4,

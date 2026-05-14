@@ -3,6 +3,7 @@ import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { Platform, StyleSheet, View } from 'react-native';
+import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import 'react-native-reanimated';
 
 if (Platform.OS === 'web' && typeof document !== 'undefined') {
@@ -25,7 +26,7 @@ export const unstable_settings = {
   anchor: '(tabs)',
 };
 
-const FRAME_WIDTH = 360;
+const FRAME_WIDTH = 390;
 const FRAME_HEIGHT = 803;
 
 export default function RootLayout() {
@@ -49,22 +50,24 @@ export default function RootLayout() {
   );
 
   return (
-    <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
-      {Platform.OS === 'web' ? (
-        <View style={styles.webBackdrop}>
-          <View style={styles.webFrame}>
+    <SafeAreaProvider>
+      <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
+        {Platform.OS === 'web' ? (
+          <View style={styles.webBackdrop}>
+            <View style={styles.webFrame}>
+              {stack}
+              <AIAssistant />
+            </View>
+          </View>
+        ) : (
+          <SafeAreaView style={styles.nativeFrame} edges={['top', 'bottom']}>
             {stack}
             <AIAssistant />
-          </View>
-        </View>
-      ) : (
-        <View style={styles.nativeFrame}>
-          {stack}
-          <AIAssistant />
-        </View>
-      )}
-      <StatusBar style="auto" />
-    </ThemeProvider>
+          </SafeAreaView>
+        )}
+        <StatusBar style="auto" />
+      </ThemeProvider>
+    </SafeAreaProvider>
   );
 }
 

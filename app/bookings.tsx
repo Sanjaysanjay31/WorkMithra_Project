@@ -241,7 +241,7 @@ export default function BookingsPage() {
 
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: '#fff' },
-  frame: { flex: 1, width: '100%', maxWidth: 360, alignSelf: 'center', backgroundColor: '#fff', paddingHorizontal: 16, paddingTop: 16 },
+  frame: { flex: 1, width: '100%', backgroundColor: '#fff', paddingHorizontal: 16, paddingTop: 16 },
   title: { fontSize: 20, fontWeight: '800', color: '#333', marginBottom: 16, textAlign: 'center' },
   tabRow: { flexDirection: 'row', backgroundColor: '#f0f0f0', borderRadius: 10, padding: 4, marginBottom: 16 },
   tabBtn: { flex: 1, paddingVertical: 10, borderRadius: 8, alignItems: 'center' },

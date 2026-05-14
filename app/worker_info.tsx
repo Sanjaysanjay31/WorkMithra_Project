@@ -20,20 +20,16 @@ import {
     TouchableOpacity,
     View,
 } from 'react-native';
+import * as Location from 'expo-location';
+import { WebView } from 'react-native-webview';
 
 const DEFAULT_API_URL = Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://localhost:8000';
 const BASE_URL = process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL;
 
-import { SAMPLE_REVIEWS } from './mock_data';
 
 type Tab = 'profile' | 'reviews' | 'chat' | 'booking' | 'map';
 
 type HistoryItem = { id: string; date: string; time: string; price: number; status: 'completed' | 'cancelled' };
-
-const SAMPLE_HISTORY_FACTORY = (workerId: string): HistoryItem[] => [
-  { id: `${workerId}-h1`, date: '2026-04-22', time: '11:00 AM', price: 1500, status: 'completed' },
-  { id: `${workerId}-h2`, date: '2026-03-15', time: '9:30 AM', price: 2200, status: 'completed' },
-];
 
 function toRad(d: number) { return (d * Math.PI) / 180; }
 
@@ -106,31 +102,64 @@ export default function WorkerInfoPage() {
   // Map state
   const [clientLoc, setClientLoc] = useState<{ lat: number; lng: number } | null>(null);
 
-  // Feedback state
-  const [reviews, setReviews] = useState(SAMPLE_REVIEWS);
+  // Feedback state — reviews loaded from backend
+  type ReviewItem = { id: string | number; name: string; rating: number; date: string; text: string };
+  const [reviews, setReviews] = useState<ReviewItem[]>([]);
   const [feedbackText, setFeedbackText] = useState('');
   const [feedbackRating, setFeedbackRating] = useState(5);
+
+  async function loadReviews() {
+    const wid = Number(id);
+    if (!wid) return;
+    try {
+      const res = await fetch(`${BASE_URL}/reviews/?worker_id=${wid}`);
+      if (!res.ok) return;
+      const data: any[] = await res.json();
+      setReviews(
+        data.map((r) => ({
+          id: r.id,
+          name: r.user_id ? `User #${r.user_id}` : 'Client',
+          rating: Number(r.rating) || 0,
+          date: r.created_at ? String(r.created_at).split('T')[0] : '',
+          text: r.review_text || '',
+        })),
+      );
+    } catch {}
+  }
 
   async function handleSubmitFeedback() {
     if (!feedbackText.trim()) {
       Alert.alert('Feedback', 'Please write something before submitting.');
       return;
     }
-    const newReview = {
-      id: `r-${Date.now()}`,
-      name: 'You (Demo)',
-      rating: feedbackRating,
-      date: new Date().toISOString().split('T')[0],
-      text: feedbackText,
-    };
-    setReviews([newReview, ...reviews]);
-    setFeedbackText('');
-    Alert.alert('Success', 'Thank you for your feedback!');
+    let uid = 0;
+    try {
+      const authRaw = await storage.get('workmithra:auth');
+      if (authRaw) { const auth = JSON.parse(authRaw); if (auth.id) uid = auth.id; }
+    } catch {}
+    const wid = Number(id);
+    try {
+      const res = await fetch(`${BASE_URL}/reviews/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ worker_id: wid, user_id: uid || null, rating: feedbackRating, review_text: feedbackText }),
+      });
+      if (!res.ok) {
+        const t = await res.text();
+        throw new Error(t || 'Submit failed');
+      }
+      setFeedbackText('');
+      await loadReviews();
+      Alert.alert('Success', 'Thank you for your feedback!');
+    } catch (e: any) {
+      Alert.alert('Submit failed', e?.message || 'Could not submit review');
+    }
   }
 
   useEffect(() => {
     fetchWorkerDetails();
     loadHistory();
+    loadReviews();
   }, [id]);
 
   useEffect(() => {
@@ -152,25 +181,56 @@ export default function WorkerInfoPage() {
   }
 
   async function loadHistory() {
+    const wid = Number(id);
+    if (wid) {
+      try {
+        const res = await fetch(`${BASE_URL}/job-history/?worker_id=${wid}`);
+        if (res.ok) {
+          const rows: any[] = await res.json();
+          if (Array.isArray(rows) && rows.length) {
+            setHistory(
+              rows.map((r) => ({
+                id: String(r.id),
+                date: r.completed_at ? String(r.completed_at).split('T')[0] : '',
+                time: r.completed_at ? String(r.completed_at).split('T')[1]?.slice(0, 5) || '' : '',
+                price: 0,
+                status: 'completed' as const,
+              })),
+            );
+            return;
+          }
+        }
+      } catch {}
+    }
+    // Fall back to locally cached history if backend has nothing yet.
     try {
       const raw = await storage.get(`workmithra:history:${workerId}`);
-      if (raw) {
-        setHistory(JSON.parse(raw));
-      } else {
-        setHistory(SAMPLE_HISTORY_FACTORY(workerId));
-      }
-    } catch {
-      setHistory(SAMPLE_HISTORY_FACTORY(workerId));
-    }
+      if (raw) { setHistory(JSON.parse(raw)); return; }
+    } catch {}
+    setHistory([]);
   }
 
   async function tryGetLocation() {
-    if (Platform.OS !== 'web' || typeof navigator === 'undefined' || !navigator.geolocation) return;
-    navigator.geolocation.getCurrentPosition(
-      (pos) => setClientLoc({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
-      () => setClientLoc({ lat: 17.385, lng: 78.4867 }), // fallback to Hyderabad
-      { enableHighAccuracy: false, timeout: 5000 },
-    );
+    if (Platform.OS === 'web') {
+      if (typeof navigator === 'undefined' || !navigator.geolocation) {
+        setClientLoc({ lat: 17.385, lng: 78.4867 });
+        return;
+      }
+      navigator.geolocation.getCurrentPosition(
+        (pos) => setClientLoc({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
+        () => setClientLoc({ lat: 17.385, lng: 78.4867 }),
+        { enableHighAccuracy: false, timeout: 5000 },
+      );
+      return;
+    }
+    try {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') { setClientLoc({ lat: 17.385, lng: 78.4867 }); return; }
+      const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+      setClientLoc({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+    } catch {
+      setClientLoc({ lat: 17.385, lng: 78.4867 });
+    }
   }
 
   const distanceKm = useMemo(() => {
@@ -542,15 +602,19 @@ export default function WorkerInfoPage() {
                 </View>
               </View>
 
-              {Platform.OS === 'web' && clientLoc && worker.latitude && worker.longitude && (
-                <View style={styles.mapEmbedWrap}>
-                  {/* OpenStreetMap embed with both pins */}
-                  <iframe
-                    style={{ width: '100%', height: 260, border: 0, borderRadius: 12 } as any}
-                    src={`https://www.openstreetmap.org/export/embed.html?bbox=${Math.min(clientLoc.lng, worker.longitude) - 0.02},${Math.min(clientLoc.lat, worker.latitude) - 0.02},${Math.max(clientLoc.lng, worker.longitude) + 0.02},${Math.max(clientLoc.lat, worker.latitude) + 0.02}&layer=mapnik&marker=${worker.latitude},${worker.longitude}`}
-                  />
-                </View>
-              )}
+              {clientLoc && worker.latitude && worker.longitude && (() => {
+                const bbox = `${Math.min(clientLoc.lng, worker.longitude) - 0.02},${Math.min(clientLoc.lat, worker.latitude) - 0.02},${Math.max(clientLoc.lng, worker.longitude) + 0.02},${Math.max(clientLoc.lat, worker.latitude) + 0.02}`;
+                const src = `https://www.openstreetmap.org/export/embed.html?bbox=${bbox}&layer=mapnik&marker=${worker.latitude},${worker.longitude}`;
+                return (
+                  <View style={styles.mapEmbedWrap}>
+                    {Platform.OS === 'web' ? (
+                      <iframe style={{ width: '100%', height: 260, border: 0, borderRadius: 12 } as any} src={src} />
+                    ) : (
+                      <WebView source={{ uri: src }} style={{ width: '100%', height: 260, borderRadius: 12 }} />
+                    )}
+                  </View>
+                );
+              })()}
 
               <TouchableOpacity
                 style={styles.openMapsBtn}
@@ -632,7 +696,7 @@ function Detail({ label, value }: { label: string; value?: string }) {
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: '#fff' },
   container: { flex: 1, backgroundColor: '#fff', justifyContent: 'center', alignItems: 'center' },
-  designFrame: { flex: 1, width: '100%', maxWidth: 360, alignSelf: 'center', backgroundColor: '#fff' },
+  designFrame: { flex: 1, width: '100%', backgroundColor: '#fff' },
   errorText: { fontSize: 16, color: '#999' },
   headerRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingTop: 16, paddingBottom: 12 },
   headerTitle: { fontSize: 18, fontWeight: '800', color: '#333' },

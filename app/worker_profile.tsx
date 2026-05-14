@@ -1,5 +1,6 @@
 import WorkerBottomNav from '@/components/worker-bottom-nav';
 import { storage } from '@/lib/storage';
+import { pickImageNative, pickImageWeb } from '@/lib/image-picker';
 import { Ionicons } from '@expo/vector-icons';
 import { Stack, useRouter } from 'expo-router';
 import React, { useEffect, useState } from 'react';
@@ -136,35 +137,35 @@ export default function WorkerProfilePage() {
   }
 
   async function pickAndUploadImage() {
-    if (Platform.OS !== 'web') {
-      Alert.alert('Upload', 'Image upload works in the browser. Add expo-image-picker for native.');
-      return;
-    }
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.accept = 'image/*';
-    input.onchange = async () => {
-      const file = input.files?.[0];
-      if (!file) return;
-      setUploading(true);
-      try {
-        const fd = new FormData();
+    setUploading(true);
+    try {
+      const fd = new FormData();
+      if (Platform.OS === 'web') {
+        const file = await pickImageWeb();
+        if (!file) { setUploading(false); return; }
         fd.append('file', file);
-        fd.append('user_id', currentWorkerId);
-        fd.append('role', 'worker');
-        const res = await fetch(`${BASE_URL}/upload-profile-image`, { method: 'POST', body: fd });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.detail || 'Upload failed');
-        const next = { ...profile, profile_image: data.url };
-        setProfile(next);
-        await storage.set(WORKER_KEY, JSON.stringify({ ...next, __uid: currentWorkerId }));
-      } catch (e: any) {
-        Alert.alert('Upload failed', e?.message || 'Could not upload image');
-      } finally {
-        setUploading(false);
+      } else {
+        const asset = await pickImageNative();
+        if (!asset) { setUploading(false); return; }
+        const name = asset.fileName || asset.uri.split('/').pop() || 'photo.jpg';
+        const ext = (name.split('.').pop() || 'jpg').toLowerCase();
+        const mime = asset.mimeType || (ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg');
+        // @ts-ignore RN FormData file shape
+        fd.append('file', { uri: asset.uri, name, type: mime });
       }
-    };
-    input.click();
+      fd.append('user_id', currentWorkerId);
+      fd.append('role', 'worker');
+      const res = await fetch(`${BASE_URL}/upload-profile-image`, { method: 'POST', body: fd });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || 'Upload failed');
+      const next = { ...profile, profile_image: data.url };
+      setProfile(next);
+      await storage.set(WORKER_KEY, JSON.stringify({ ...next, __uid: currentWorkerId }));
+    } catch (e: any) {
+      Alert.alert('Upload failed', e?.message || 'Could not upload image');
+    } finally {
+      setUploading(false);
+    }
   }
 
   async function changePasswordWithCurrent() {
@@ -463,7 +464,7 @@ function Field({
 
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: '#f8f5ff' },
-  frame: { flex: 1, width: '100%', maxWidth: 360, alignSelf: 'center', backgroundColor: '#f8f5ff' },
+  frame: { flex: 1, width: '100%', backgroundColor: '#f8f5ff' },
 
   hero: { alignItems: 'center', paddingTop: 22, paddingBottom: 18, backgroundColor: '#6F42C1', borderBottomLeftRadius: 26, borderBottomRightRadius: 26 },
   avatarWrap: { width: 130, height: 130, marginBottom: 10 },
