@@ -31,7 +31,8 @@
         "READ_MEDIA_IMAGES",
         "ACCESS_FINE_LOCATION",
         "ACCESS_COARSE_LOCATION"
-      ]
+      ],
+      "package": "com.sanjaysanjay31.workmithra"
     },
     "web": {
       "output": "static",

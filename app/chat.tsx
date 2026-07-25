@@ -365,13 +365,14 @@ export default function ChatScreen() {
   );
 
   const myLang = me === 'client' ? clientLang : workerLang;
+  const composerBottomOffset = keyboardVisible && Platform.OS === 'android' ? Math.max(keyboardHeight - 24, 0) : 0;
 
   return (
     <SafeAreaView style={styles.safeArea}>
       <KeyboardAvoidingView
         style={styles.keyboardView}
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 24}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'position'}
+        keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 0}
         enabled
       >
         <View style={styles.screen}>
@@ -409,7 +410,7 @@ export default function ChatScreen() {
               keyExtractor={(bubble) => bubble.id}
               renderItem={renderBubble}
               style={styles.list}
-              contentContainerStyle={{ paddingHorizontal: 8, paddingTop: 8, paddingBottom: keyboardVisible ? keyboardHeight + 110 : 110 }}
+              contentContainerStyle={{ paddingHorizontal: 8, paddingTop: 8, paddingBottom: keyboardVisible ? keyboardHeight + 140 : 120 }}
               keyboardShouldPersistTaps="handled"
               keyboardDismissMode="interactive"
               onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: true })}
@@ -418,7 +419,14 @@ export default function ChatScreen() {
             {busy && <ActivityIndicator color="#6F42C1" style={{ marginVertical: 4 }} />}
 
             {/* Keep the composer above the keyboard on both platforms. */}
-            <View style={[styles.inputRow, Platform.OS === 'android' && keyboardVisible ? { paddingBottom: 12 } : null]}>
+            <View
+              style={[
+                styles.inputRow,
+                Platform.OS === 'android' && keyboardVisible
+                  ? { position: 'absolute', left: 0, right: 0, bottom: composerBottomOffset, zIndex: 20, borderTopWidth: 1, borderTopColor: '#ece5dd' }
+                  : null,
+              ]}
+            >
               <TouchableOpacity
                 testID="mic-button"
                 style={[styles.micBtn, listening && { backgroundColor: '#FF6B6B' }]}
@@ -454,7 +462,7 @@ const styles = StyleSheet.create({
   safeArea: { flex: 1, backgroundColor: '#ece5dd' },
   keyboardView: { flex: 1 },
   screen: { flex: 1, backgroundColor: '#ece5dd' },
-  frame: { flex: 1, width: '100%', backgroundColor: '#ece5dd' },
+  frame: { flex: 1, width: '100%', backgroundColor: '#ece5dd', position: 'relative' },
   topBar: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 12, paddingVertical: 10, backgroundColor: '#6F42C1' },
   headerCenter: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 8, marginLeft: 8 },
   headerAvatar: { width: 32, height: 32, borderRadius: 16, backgroundColor: 'rgba(255,255,255,0.25)', justifyContent: 'center', alignItems: 'center' },
