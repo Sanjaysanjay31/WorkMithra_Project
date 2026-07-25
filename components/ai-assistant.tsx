@@ -1,3 +1,7 @@
+import { aiChat, aiExtract, aiTranslate, ALL_LANGS, cleanTextForSpeech, LangCode, LANGS, pauseAudio, resumeAudio, setMuted, speakLong, stopAudio, webSTT } from '@/lib/ai';
+import { assistantBus } from '@/lib/assistant-bus';
+import { platformShadow } from '@/lib/shadow';
+import { storage } from '@/lib/storage';
 import { Ionicons } from '@expo/vector-icons';
 import { usePathname } from 'expo-router';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
@@ -15,10 +19,6 @@ import {
     TouchableOpacity,
     View,
 } from 'react-native';
-import { aiChat, aiDetectLang, aiExtract, aiTranslate, ALL_LANGS, LANGS, LangCode, pauseAudio, resumeAudio, setMuted, speakLong, stopAudio, webSTT } from '@/lib/ai';
-import { assistantBus } from '@/lib/assistant-bus';
-import { platformShadow } from '@/lib/shadow';
-import { storage } from '@/lib/storage';
 
 type Msg = { who: 'ai' | 'me'; text: string };
 
@@ -72,90 +72,47 @@ const WORKER_STEPS: Step[] = [
 ];
 
 function getScreenContext(pathname: string): ScreenContext {
-  const p = (pathname || '').toLowerCase();
-  if (p.includes('login')) {
-    return {
+  const p = (pathname || '').replace(/\/+/g, '/').replace(/\/$/, '').toLowerCase();
+  const segments = p.split('/').filter(Boolean);
+  const current = segments[segments.length - 1] || 'home';
+  const screenLabel = current
+    .split('_')
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ') || 'WorkMithra';
+
+  const routeHints: Record<string, Partial<ScreenContext>> = {
+    login: {
       name: 'Login',
-      purpose: 'The user is on the Login screen. They need to enter their registered phone number or email and password to sign in. There is a forgot-password link and a Register link if they are new.',
+      purpose: 'The user is on the login screen and may need help signing in or recovering access.',
       suggestions: ['How do I login?', 'I forgot my password', 'I am new — register me'],
-    };
-  }
-  if (p.includes('register')) {
-    return {
+    },
+    register: {
       name: 'Register',
-      purpose: 'The user is on the Register screen. Required: full name, phone, email (with OTP verification), password and confirm password. They must click Get OTP, then Verify OTP, before Create Account is enabled.',
+      purpose: 'The user is on the registration screen and may need help completing the form.',
       suggestions: ['Help me fill the form', 'I did not get the OTP', 'What does Verify OTP mean?'],
       onboardSteps: REGISTRATION_STEPS,
-    };
-  }
-  if (p.includes('switch_role')) {
-    return {
-      name: 'Choose Role',
-      purpose: 'The user must pick how they want to use WorkMithra: as a User who hires workers, or as a Worker who offers services. They can switch later anytime.',
-      suggestions: ['What is the difference?', 'I want to hire someone', 'I want to find work'],
-    };
-  }
-  if (p.includes('homepage')) {
-    return {
-      name: 'Home (Find Workers)',
-      purpose: 'The user is on the home page where they can search for workers by domain (e.g. plumber, electrician). They can use voice search via the mic icon, apply filters (wage range, distance, experience, rating) via the filter button, and tap More on any worker card to see details.',
-      suggestions: ['Find plumber near me', 'How to filter by price?', 'Show top rated workers', 'How do I book?'],
-    };
-  }
-  if (p.includes('worker_info')) {
-    return {
-      name: 'Worker Details',
-      purpose: 'The user is viewing a specific worker. Tabs: Profile (name, age, domain, wage, experience, phone), Reviews, Chat (opens the AI translation chat to talk to the worker in any language), Booking (book the worker now).',
-      suggestions: ['How do I book this worker?', 'How does AI chat work?', 'Show reviews'],
-    };
-  }
-  if (p.includes('chat')) {
-    return {
-      name: 'AI Translation Chat',
-      purpose: 'A live chat between the client and the worker. The user types or speaks in any language; the AI auto-detects the language and translates to the other person. Each message has a speaker icon to listen to it.',
-      suggestions: ['How do I send voice?', 'Change my language', 'Read this message aloud'],
-    };
-  }
-  if (p.includes('bookings')) {
-    return {
-      name: 'My Bookings',
-      purpose: 'The user can see Present and Completed bookings here.',
-      suggestions: ['Where is my booking?', 'How to cancel?', 'Show completed work'],
-    };
-  }
-  if (p.includes('profile')) {
-    return {
-      name: 'My Profile',
-      purpose: 'The user can view and edit their profile: name, phone, alternative phone, location, pincode. Click Edit to change, Save Changes to save.',
-      suggestions: ['Help me fill profile', 'How do I save changes?'],
-    };
-  }
-  if (p.includes('worker_dashboard')) {
-    return {
-      name: 'Worker Dashboard',
-      purpose: 'A worker sees their own image and two tabs: Details (their own info) and Past Work (places, ratings, reviews of past jobs).',
-      suggestions: ['How do I add past work?', 'Edit my details'],
-    };
-  }
-  if (p.includes('worker_bookings')) {
-    return {
-      name: 'Booking Requests',
-      purpose: 'Workers see incoming booking requests: Pending vs Accepted. They can Accept or Decline pending ones.',
-      suggestions: ['How do I accept?', 'Should I accept this?'],
-    };
-  }
-  if (p.includes('worker_profile')) {
-    return {
-      name: 'Worker Profile (My Info)',
-      purpose: 'Workers can create or edit their full profile: name, age, domain/skill, wage per hour, experience years, phone, alt phone, location, pincode.',
+    },
+    worker_profile: {
+      name: 'Worker Profile',
+      purpose: 'The user is editing worker profile details and may need help filling them in.',
       suggestions: ['Help me create profile', 'What domain should I pick?'],
       onboardSteps: WORKER_STEPS,
-    };
-  }
+    },
+    chat: {
+      name: 'AI Translation Chat',
+      purpose: 'The user is in live chat and may need help using voice or translation features.',
+      suggestions: ['How do I send voice?', 'Change my language', 'Read this message aloud'],
+    },
+  };
+
+  const hint = routeHints[current] || {};
+
   return {
-    name: 'WorkMithra',
-    purpose: 'A hyperlocal service marketplace connecting users with workers (plumbers, electricians, painters, etc.). Multilingual, voice-first, designed for everyone including illiterate users.',
-    suggestions: ['How do I register?', 'How do I find a worker?', 'How does voice chat work?'],
+    name: hint.name || screenLabel,
+    purpose: hint.purpose || `The user is currently on the ${screenLabel} screen in the WorkMithra app. Help them clearly and briefly based on what they need right now.`,
+    suggestions: hint.suggestions || ['What can I do here?', 'Help me with this page', 'How does this work?'],
+    onboardSteps: hint.onboardSteps,
   };
 }
 
@@ -412,16 +369,20 @@ export function AIAssistant() {
 
   async function greet() {
     setOnboardActive(false);
-    const greetEn = `You are on the ${ctx.name} screen. ${ctx.purpose} How can I help you here?`;
-    const text = lang === 'en-IN' ? greetEn : await safeTranslate(greetEn, 'en-IN', lang);
+    let text = `Hello! I am your WorkMithra assistant on ${ctx.name}. How can I help you?`;
+    if (lang === 'te-IN') {
+      text = `నమస్కారం! వర్క్‌మిత్రా సహాయకుడిని. నేను మీకు ఎలా సహాయపడగలను?`;
+    } else if (lang !== 'en-IN') {
+      text = await safeTranslate(text, 'en-IN', lang);
+    }
+    text = cleanTextForSpeech(text);
     appendMsgPersist({ who: 'ai', text });
-    // Speak the greeting after a 3-second pause so the user has time to read.
     if (greetTimerRef.current) { clearTimeout(greetTimerRef.current); greetTimerRef.current = null; }
     if (Platform.OS === 'web') {
       greetTimerRef.current = setTimeout(() => {
         greetTimerRef.current = null;
         startSpeaking(text);
-      }, 3000);
+      }, 1500);
     }
   }
 
@@ -474,35 +435,32 @@ export function AIAssistant() {
     try {
       const targetLangName = LANG_NAME[lang] || 'English';
 
-      // 1. Get the user's question into English for the LLM (most reliable).
-      let userEn = value;
-      try {
-        const inputLang = await aiDetectLang(value);
-        if (inputLang !== 'en-IN') userEn = await safeTranslate(value, inputLang, 'en-IN');
-      } catch {}
-
-      // 2. Ask the LLM in English (clearer reasoning), get a concise English answer.
       const system =
-        `You are WorkMithra's helpful assistant. Answer the user's question concisely in 2-4 short, simple sentences. ` +
-        `Screen context (use only if relevant): "${ctx.name}" — ${ctx.purpose}. ` +
-        `Reply in plain English. Do not add any preface or notes. Just the answer.`;
-      const replyEn = await aiChat(userEn, system);
+        `You are WorkMithra's friendly voice assistant. Answer the user's question directly in 1 short, simple sentence (maximum 20 words). ` +
+        `Screen context: "${ctx.name}". ` +
+        `CRITICAL RULES FOR VOICE: ` +
+        `1. DO NOT use any markdown (NO asterisks **, NO bold, NO italics, NO bullet points, NO numbered lists). ` +
+        `2. DO NOT include meta prefixes like 'Sentence 1:', 'Note:', or 'Answer:'. ` +
+        `3. DO NOT repeat the user's question or restate their words. Give the answer directly. ` +
+        `4. Speak directly and naturally in ${targetLangName} only.`;
 
-      // 3. Translate the answer to the SELECTED language. ALWAYS. No detection skip.
-      let replyLocal = replyEn;
+      let reply = await aiChat(value, system);
+
+      // If a non-English language was selected and LLM returned English, translate once.
       if (lang !== 'en-IN') {
-        try {
-          replyLocal = await aiTranslate(replyEn, 'en-IN', lang);
-        } catch {
-          replyLocal = replyEn;  // last resort
+        const re = SCRIPT_RE[lang];
+        if (re && !re.test(reply)) {
+          try {
+            reply = await safeTranslate(reply, 'en-IN', lang);
+          } catch {}
         }
+        reply = sanitizeForLang(reply, lang);
       }
 
-      // 4. Strip any leftover ASCII English clutter (common when models leak prefixes like "Answer:")
-      replyLocal = sanitizeForLang(replyLocal, lang);
+      reply = cleanTextForSpeech(reply);
 
-      appendMsgPersist({ who: 'ai', text: replyLocal });
-      if (Platform.OS === 'web') startSpeaking(replyLocal);
+      appendMsgPersist({ who: 'ai', text: reply });
+      if (Platform.OS === 'web') startSpeaking(reply);
     } catch (e: any) {
       const errMsg = e?.message || String(e) || 'unknown error';
       appendMsgPersist({ who: 'ai', text: `⚠️ AI error: ${errMsg}` });
@@ -588,7 +546,7 @@ export function AIAssistant() {
   async function askOnboardStep(step: Step) {
     const text = lang === 'en-IN' ? step.q : await safeTranslate(step.q, 'en-IN', lang);
     appendMsgPersist({ who: 'ai', text });
-    if (Platform.OS === 'web') speakTTS(text, lang).catch(() => {});
+    if (Platform.OS === 'web') speakLong(cleanTextForSpeech(text), lang).catch(() => {});
   }
 
   async function submitOnboard(text: string) {
@@ -645,7 +603,7 @@ export function AIAssistant() {
     }
     if (step.id === 'location') return { location: text };
     if (step.id === 'timings') return { timings: text };
-    return { [step.key]: text };
+    return { [(step as any).key || 'val']: text };
   }
 
   async function finishOnboard(data: Record<string, any>) {

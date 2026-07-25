@@ -5,15 +5,24 @@ import base64
 import requests
 from typing import Optional, Dict, Any
 
+from dotenv import load_dotenv
+from pathlib import Path
+
+backend_env = Path(__file__).resolve().parents[1] / ".env"
+load_dotenv(backend_env)
+load_dotenv()
+
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY", "")
 HF_TOKEN = os.getenv("HF_TOKEN", "")
 HF_MODEL = os.getenv("MODEL_NAME", "meta-llama/Llama-3.1-8B-Instruct")
+SARVAM_CHAT_MODEL = os.getenv("SARVAM_CHAT_MODEL", "sarvam-105b")
 
 SARVAM_BASE = "https://api.sarvam.ai"
 
 
 def _sarvam_headers():
-    return {"api-subscription-key": SARVAM_API_KEY}
+    key = os.getenv("SARVAM_API_KEY", SARVAM_API_KEY)
+    return {"api-subscription-key": key}
 
 
 def sarvam_tts(text: str, target_lang: str = "en-IN", speaker: str = "anushka") -> bytes:
@@ -71,8 +80,6 @@ def sarvam_translate(text: str, source_lang: str, target_lang: str) -> Dict[str,
     if not SARVAM_API_KEY:
         raise RuntimeError("SARVAM_API_KEY is not set")
 
-    # Normalize: Sarvam expects values like "en-IN", "te-IN", or "auto" for source.
-    # If source is empty / unknown, fall back to "auto" so Sarvam can detect.
     src = (source_lang or "").strip() or "auto"
     if src in ("unknown", ""):
         src = "auto"
@@ -84,8 +91,6 @@ def sarvam_translate(text: str, source_lang: str, target_lang: str) -> Dict[str,
         "input": text,
         "source_language_code": src,
         "target_language_code": tgt,
-        # Keep the body minimal — optional fields like speaker_gender / mode /
-        # enable_preprocessing were causing 4xx with current Sarvam API.
     }
     r = requests.post(
         f"{SARVAM_BASE}/translate",
@@ -94,43 +99,115 @@ def sarvam_translate(text: str, source_lang: str, target_lang: str) -> Dict[str,
         timeout=30,
     )
     if r.status_code >= 400:
-        # Log so we can see what's wrong server-side, then raise with detail.
         print(f"[Sarvam translate] {r.status_code} body={body} resp={r.text[:300]}")
         raise RuntimeError(f"Sarvam translate {r.status_code}: {r.text[:200]}")
     return r.json()
 
 
+def _fallback_lang_detection() -> Dict[str, Any]:
+    return {"language_code": "en-IN", "confidence": 0.3, "fallback": True}
+
+
 def sarvam_detect_lang(text: str) -> Dict[str, Any]:
     if not SARVAM_API_KEY:
-        raise RuntimeError("SARVAM_API_KEY is not set")
-    r = requests.post(
-        f"{SARVAM_BASE}/text-lang-detection",
-        headers={**_sarvam_headers(), "Content-Type": "application/json"},
-        json={"input": text},
-        timeout=20,
-    )
-    r.raise_for_status()
-    return r.json()
+        return _fallback_lang_detection()
+    try:
+        r = requests.post(
+            f"{SARVAM_BASE}/text-lang-detection",
+            headers={**_sarvam_headers(), "Content-Type": "application/json"},
+            json={"input": text},
+            timeout=20,
+        )
+        if not r.ok:
+            raise RuntimeError(f"Sarvam detect-lang {r.status_code}: {r.text[:300]}")
+        return r.json()
+    except Exception:
+        return _fallback_lang_detection()
 
 
-def _sarvam_chat(messages: list, max_tokens: int = 512) -> str:
+def _clean_reasoning_fallback(reasoning: str) -> str:
+    if not reasoning:
+        return ""
+    for marker in ["Draft the Response", "Final Response", "Response:", "సమాధానం:"]:
+        if marker in reasoning:
+            parts = reasoning.split(marker)
+            return parts[-1].strip().strip(":").strip("*").strip('"').strip("'")
+    lines = reasoning.split("\n")
+    clean_lines = [
+        l for l in lines
+        if not any(k in l for k in ["Analyze", "Deconstruct", "Identify", "Brainstorm", "Scenario", "Draft", "Core Task", "Telugu query"])
+    ]
+    return "\n".join(clean_lines).strip()
+
+
+def _trim_assistant_reply(text: str) -> str:
+    if not text:
+        return ""
+    cleaned = text.strip()
+    cleaned = cleaned.replace("**", "").replace("```", "")
+    cleaned = cleaned.replace("\n\n", "\n")
+    lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
+    if not lines:
+        return ""
+
+    first_line = lines[0]
+    if first_line.lower().startswith(("answer:", "response:", "final response:")):
+        first_line = first_line.split(":", 1)[1].strip()
+
+    # Keep only the first sentence if the answer is verbose.
+    punctuation_positions = [first_line.find(ch) for ch in [".", "!", "?"]]
+    valid_positions = [pos for pos in punctuation_positions if pos != -1]
+    if valid_positions:
+        first_line = first_line[:min(valid_positions)].strip()
+
+    if len(first_line) > 80:
+        first_line = first_line[:77].rstrip() + "..."
+    return first_line.strip()
+
+
+def _assistant_short_reply(user_text: str) -> Optional[str]:
+    text = (user_text or "").strip()
+    if not text:
+        return "నమస్కారం! నేను మీకు సహాయం చేయగలను."
+
+    normalized = text.lower()
+    otp_keywords = ["otp", "one time password", "verification code", "verify otp"]
+    missing_keywords = ["not get", "didn't get", "did not get", "not received", "not arrive", "not came", "not come", "రాలేదు", "రాలేద", "రాదు"]
+    if any(k in normalized for k in otp_keywords) and any(k in normalized for k in missing_keywords):
+        return "Please check your inbox and spam folder, confirm the email is correct, and tap resend OTP. If it still does not arrive, wait a minute and try again."
+
+    return None
+
+
+def _sarvam_chat(messages: list, max_tokens: int = 2048) -> str:
     if not SARVAM_API_KEY:
         raise RuntimeError("SARVAM_API_KEY not set")
     r = requests.post(
         f"{SARVAM_BASE}/v1/chat/completions",
         headers={**_sarvam_headers(), "Content-Type": "application/json"},
         json={
-            "model": "sarvam-m",
+            "model": SARVAM_CHAT_MODEL,
             "messages": messages,
             "max_tokens": max_tokens,
             "temperature": 0.3,
         },
-        timeout=60,
+        timeout=30,
     )
     if r.status_code >= 400:
         raise RuntimeError(f"Sarvam chat {r.status_code}: {r.text[:300]}")
     data = r.json()
-    return data["choices"][0]["message"]["content"]
+    choices = data.get("choices") or []
+    if not choices:
+        raise RuntimeError("Sarvam chat returned no choices")
+    msg = choices[0].get("message") or {}
+    content = (msg.get("content") or "").strip()
+    if content:
+        return _trim_assistant_reply(content)
+    reasoning = (msg.get("reasoning_content") or "").strip()
+    clean_reasoning = _clean_reasoning_fallback(reasoning)
+    if clean_reasoning:
+        return _trim_assistant_reply(clean_reasoning)
+    raise RuntimeError("Sarvam chat returned empty content")
 
 
 def _hf_chat(messages: list, max_tokens: int = 512) -> str:
@@ -173,6 +250,10 @@ def _hf_chat(messages: list, max_tokens: int = 512) -> str:
 
 def llama_chat(prompt: str, system: Optional[str] = None, max_tokens: int = 512) -> str:
     """Chat with the user. Primary: Sarvam chat (sarvam-m, multilingual). Fallback: HF router."""
+    quick_reply = _assistant_short_reply(prompt)
+    if quick_reply is not None:
+        return quick_reply
+
     messages = []
     if system:
         messages.append({"role": "system", "content": system})
@@ -180,12 +261,18 @@ def llama_chat(prompt: str, system: Optional[str] = None, max_tokens: int = 512)
 
     # Try Sarvam first (you already have a working key, multilingual native)
     try:
-        return _sarvam_chat(messages, max_tokens=max_tokens)
+        return _trim_assistant_reply(_sarvam_chat(messages, max_tokens=max_tokens))
     except Exception as e_sarvam:
+        print(f"[llama_chat] Sarvam failed: {e_sarvam}")
         try:
-            return _hf_chat(messages, max_tokens=max_tokens)
+            return _trim_assistant_reply(_hf_chat(messages, max_tokens=max_tokens))
         except Exception as e_hf:
-            raise RuntimeError(f"Both Sarvam and HF chat failed. Sarvam: {e_sarvam} | HF: {e_hf}")
+            print(f"[llama_chat] HF failed: {e_hf}")
+            fallback_msg = (
+                "I’m sorry, I’m having trouble reaching my AI service right now. "
+                "Please try again in a moment or ask a simpler question."
+            )
+            return fallback_msg
 
 
 def llama_extract_json(user_text: str, schema_hint: str) -> Dict[str, Any]:

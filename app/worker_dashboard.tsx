@@ -1,28 +1,28 @@
+import Avatar from '@/components/avatar';
 import WorkerBottomNav from '@/components/worker-bottom-nav';
 import { unreadCount } from '@/lib/notifications';
-import { storage } from '@/lib/storage';
 import { platformShadow } from '@/lib/shadow';
+import { storage } from '@/lib/storage';
 import { Ionicons } from '@expo/vector-icons';
 import { Stack, useRouter } from 'expo-router';
 import React, { useEffect, useState } from 'react';
-import Avatar from '@/components/avatar';
 import {
     Image,
+    Platform,
     ScrollView,
     StyleSheet,
     Text,
     TouchableOpacity,
     View,
-    Platform,
 } from 'react-native';
 
-const DEFAULT_API_URL = Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://localhost:8000';
+const DEFAULT_API_URL = Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://127.0.0.1:8000';
 const BASE_URL = process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL;
 
 const WORKER_PROFILE_KEY = 'workmithra:worker_profile';
 const WORKER_PASTWORK_KEY = 'workmithra:worker_pastwork';
 
-import { SAMPLE_PASTWORK, PastWorkItem } from './mock_data';
+import { PastWorkItem } from './mock_data';
 
 type Tab = 'details' | 'past';
 

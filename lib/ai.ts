@@ -1,7 +1,7 @@
-import { Platform } from 'react-native';
 import { Audio } from 'expo-av';
+import { Platform } from 'react-native';
 
-const DEFAULT_API_URL = Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://localhost:8000';
+const DEFAULT_API_URL = Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://127.0.0.1:8000';
 export const BASE_URL = process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL;
 
 export type LangCode =
@@ -30,6 +30,19 @@ export const LANGS = ALL_LANGS.slice(0, 6);
 
 export async function aiDetectLang(text: string): Promise<LangCode> {
   if (!text.trim()) return 'en-IN';
+  // Fast local script checks (0ms latency, saves network call)
+  if (/[ఀ-౿]/.test(text)) return 'te-IN';
+  if (/[ऀ-ॿ]/.test(text)) return 'hi-IN';
+  if (/[஀-௿]/.test(text)) return 'ta-IN';
+  if (/[ಀ-೿]/.test(text)) return 'kn-IN';
+  if (/[ഀ-ൿ]/.test(text)) return 'ml-IN';
+  if (/[઀-૿]/.test(text)) return 'gu-IN';
+  if (/[ঀ-৿]/.test(text)) return 'bn-IN';
+  if (/[਀-੿]/.test(text)) return 'pa-IN';
+  if (/[଀-୿]/.test(text)) return 'or-IN';
+  if (/[؀-ۿ]/.test(text)) return 'ur-IN';
+  if (/^[a-zA-Z0-9\s.,!?'"()-]+$/.test(text.trim())) return 'en-IN';
+
   try {
     const res = await fetch(`${BASE_URL}/ai/detect-lang`, {
       method: 'POST',
@@ -41,12 +54,6 @@ export async function aiDetectLang(text: string): Promise<LangCode> {
     const code = (data.language_code || data.languageCode || '').toString();
     if (code) return code as LangCode;
   } catch {}
-  // fallback: heuristic by Unicode block
-  if (/[ఀ-౿]/.test(text)) return 'te-IN';
-  if (/[ऀ-ॿ]/.test(text)) return 'hi-IN';
-  if (/[஀-௿]/.test(text)) return 'ta-IN';
-  if (/[ಀ-೿]/.test(text)) return 'kn-IN';
-  if (/[ഀ-ൿ]/.test(text)) return 'ml-IN';
   return 'en-IN';
 }
 
@@ -87,12 +94,29 @@ export async function aiChat(prompt: string, system?: string): Promise<string> {
   return data.reply || '';
 }
 
+export function cleanTextForSpeech(text: string): string {
+  if (!text) return '';
+  return text
+    .replace(/\*\*(.*?)\*\*/g, '$1')       // **bold** -> bold
+    .replace(/\*(.*?)\*/g, '$1')           // *italic* -> italic
+    .replace(/__(.*?)__/g, '$1')           // __bold__ -> bold
+    .replace(/_(.*?)_/g, '$1')             // _italic_ -> italic
+    .replace(/`{1,3}(.*?)`{1,3}/g, '$1')    // `code` -> code
+    .replace(/^[*\-#]\s+/gm, '')           // leading bullets
+    .replace(/Sentence \d+:\s*/gi, '')     // "Sentence 1: " prefix
+    .replace(/[*_#~`\\/|]/g, ' ')          // remove remaining markdown symbols
+    .replace(/\s+/g, ' ')                  // collapse multi spaces
+    .trim();
+}
+
 /** Returns a playable audio URL (web: object URL; native: data URI). */
 export async function aiTTS(text: string, targetLang: LangCode = 'en-IN'): Promise<string> {
+  const cleanText = cleanTextForSpeech(text);
+  if (!cleanText) throw new Error('No text for TTS');
   const res = await fetch(`${BASE_URL}/ai/tts`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text, target_lang: targetLang }),
+    body: JSON.stringify({ text: cleanText, target_lang: targetLang }),
   });
   if (!res.ok) throw new Error('tts failed');
   const blob = await res.blob();

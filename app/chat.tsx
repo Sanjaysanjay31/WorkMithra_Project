@@ -11,15 +11,15 @@ import {
   Keyboard,
   KeyboardAvoidingView,
   Platform,
+  SafeAreaView,
   StyleSheet,
   Text,
   TextInput,
   TouchableOpacity,
-  TouchableWithoutFeedback,
   View,
 } from 'react-native';
 
-const DEFAULT_API_URL = Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://localhost:8000';
+const DEFAULT_API_URL = Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://127.0.0.1:8000';
 const BASE_URL = process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL;
 
 type Side = 'client' | 'worker';
@@ -67,12 +67,28 @@ export default function ChatScreen() {
   const [listening, setListening] = useState<boolean>(false);
   const [speakingId, setSpeakingId] = useState<string | null>(null);
   const [currentUserId, setCurrentUserId] = useState<string>('');
+  const [keyboardVisible, setKeyboardVisible] = useState(false);
 
   const listRef = useRef<FlatList<Bubble> | null>(null);
 
   const scrollToBottom = useCallback(() => {
     setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 50);
   }, []);
+
+  useEffect(() => {
+    const keyboardShow = Keyboard.addListener(Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow', () => {
+      setKeyboardVisible(true);
+      scrollToBottom();
+    });
+    const keyboardHide = Keyboard.addListener(Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide', () => {
+      setKeyboardVisible(false);
+    });
+
+    return () => {
+      keyboardShow.remove();
+      keyboardHide.remove();
+    };
+  }, [scrollToBottom]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -348,8 +364,12 @@ export default function ChatScreen() {
   const myLang = me === 'client' ? clientLang : workerLang;
 
   return (
-    <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
-      <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
+    <SafeAreaView style={styles.safeArea}>
+      <KeyboardAvoidingView
+        style={styles.keyboardView}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        keyboardVerticalOffset={Platform.OS === 'android' ? 0 : 0}
+      >
         <View style={styles.screen}>
           <Stack.Screen options={{ headerShown: false }} />
 
@@ -385,7 +405,7 @@ export default function ChatScreen() {
               keyExtractor={(bubble) => bubble.id}
               renderItem={renderBubble}
               style={styles.list}
-              contentContainerStyle={{ padding: 8, paddingBottom: 100 }}
+              contentContainerStyle={{ padding: 8, paddingBottom: keyboardVisible ? 140 : 100 }}
               keyboardShouldPersistTaps="handled"
               keyboardDismissMode="interactive"
               onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: true })}
@@ -393,6 +413,7 @@ export default function ChatScreen() {
 
             {busy && <ActivityIndicator color="#6F42C1" style={{ marginVertical: 4 }} />}
 
+            {/* Keep the composer above the keyboard on both platforms. */}
             <View style={styles.inputRow}>
               <TouchableOpacity
                 testID="mic-button"
@@ -420,12 +441,14 @@ export default function ChatScreen() {
             </View>
           </View>
         </View>
-      </TouchableWithoutFeedback>
-    </KeyboardAvoidingView>
+      </KeyboardAvoidingView>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
+  safeArea: { flex: 1, backgroundColor: '#ece5dd' },
+  keyboardView: { flex: 1 },
   screen: { flex: 1, backgroundColor: '#ece5dd' },
   frame: { flex: 1, width: '100%', backgroundColor: '#ece5dd' },
   topBar: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 12, paddingVertical: 10, backgroundColor: '#6F42C1' },

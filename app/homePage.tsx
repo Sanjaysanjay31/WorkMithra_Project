@@ -1,17 +1,15 @@
-import BottomNav from '@/components/bottom-nav';
 import Avatar from '@/components/avatar';
-import { storage } from '@/lib/storage';
+import BottomNav from '@/components/bottom-nav';
 import { aiExtract, webSTTControlled } from '@/lib/ai';
 import { unreadCount } from '@/lib/notifications';
+import { storage } from '@/lib/storage';
 import { Ionicons } from '@expo/vector-icons';
 import { Stack, useRouter } from 'expo-router';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
     ActivityIndicator,
     Alert,
     FlatList,
-    Image,
     Modal,
     Platform,
     ScrollView,
@@ -19,10 +17,11 @@ import {
     Text,
     TextInput,
     TouchableOpacity,
-    View,
+    View
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-const DEFAULT_API_URL = Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://localhost:8000';
+const DEFAULT_API_URL = Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://127.0.0.1:8000';
 const BASE_URL = process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL;
 
 type SortKey = 'wage_asc' | 'wage_desc' | 'experience' | 'rating' | 'location' | 'jobs';

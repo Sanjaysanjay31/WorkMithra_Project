@@ -36,8 +36,9 @@ def detect_lang(payload: Dict[str, Any] = Body(...)):
         raise HTTPException(status_code=400, detail="text is required")
     try:
         return ai_svc.sarvam_detect_lang(text)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Detect failed: {e}")
+    except Exception:
+        # Fallback to a conservative language guess so the UI remains usable.
+        return {"language_code": "en-IN", "confidence": 0.3, "fallback": True}
 
 
 @router.post("/translate")
@@ -82,5 +83,7 @@ def chat(payload: Dict[str, Any] = Body(...)):
         raise HTTPException(status_code=400, detail="prompt is required")
     try:
         return {"reply": ai_svc.llama_chat(prompt, system=system)}
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Chat failed: {e}")
+    except Exception:
+        return {
+            "reply": "I’m sorry, I’m having trouble reaching my AI service right now. Please try again in a moment."
+        }

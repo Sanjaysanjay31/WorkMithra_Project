@@ -1,30 +1,27 @@
-import BottomNav from '@/components/bottom-nav';
 import Avatar from '@/components/avatar';
+import BottomNav from '@/components/bottom-nav';
 import { addNotification } from '@/lib/notifications';
 import { storage } from '@/lib/storage';
 import { Ionicons } from '@expo/vector-icons';
+import DateTimePicker from '@react-native-community/datetimepicker';
+import * as Location from 'expo-location';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useEffect, useMemo, useState } from 'react';
 import {
     ActivityIndicator,
     Alert,
-    FlatList,
-    Image,
     Linking,
-    Modal,
     Platform,
     ScrollView,
     StyleSheet,
     Text,
     TextInput,
     TouchableOpacity,
-    View,
+    View
 } from 'react-native';
-import * as Location from 'expo-location';
 import { WebView } from 'react-native-webview';
-import DateTimePicker from '@react-native-community/datetimepicker';
 
-const DEFAULT_API_URL = Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://localhost:8000';
+const DEFAULT_API_URL = Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://127.0.0.1:8000';
 const BASE_URL = process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL;
 
 

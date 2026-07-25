@@ -1,11 +1,11 @@
-import WorkerBottomNav from '@/components/worker-bottom-nav';
 import Avatar from '@/components/avatar';
+import WorkerBottomNav from '@/components/worker-bottom-nav';
 import { addNotification } from '@/lib/notifications';
 import { platformShadow } from '@/lib/shadow';
 import { Ionicons } from '@expo/vector-icons';
 import { Stack, useRouter } from 'expo-router';
-import React, { useState, useEffect } from 'react';
-import { Alert, Image, Modal, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import React, { useEffect, useState } from 'react';
+import { Alert, Modal, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 
 type Tab = 'pending' | 'accepted';
 
@@ -26,9 +26,9 @@ const SAMPLE: Request[] = [
   { id: '3', client_id: '3', client: 'Anil Reddy', avatar: 'https://i.pravatar.cc/200?img=33', job: 'Bathroom drainage', date: 'Yesterday', price: 1500, status: 'accepted' },
 ];
 
-import { storage } from '@/lib/storage';
 import { formatBookingDateTime } from '@/lib/format';
-const DEFAULT_API_URL = Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://localhost:8000';
+import { storage } from '@/lib/storage';
+const DEFAULT_API_URL = Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://127.0.0.1:8000';
 const BASE_URL = process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL;
 
 export default function WorkerBookings() {

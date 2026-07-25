@@ -67,7 +67,7 @@
       "eas": {
         "projectId": "0bbd76ca-52d8-409f-ae0e-05bc38b227ee"
       },
-      "EXPO_PUBLIC_API_URL": "https://workmithra.onrender.com"
+      "EXPO_PUBLIC_API_URL": "http://127.0.0.1:8000"
     },
     "owner": "sanjaysanjay31"
   }

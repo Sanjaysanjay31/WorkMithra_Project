@@ -1,7 +1,7 @@
-import BottomNav from '@/components/bottom-nav';
 import Avatar from '@/components/avatar';
-import { storage } from '@/lib/storage';
+import BottomNav from '@/components/bottom-nav';
 import { pickImageNative, pickImageWeb } from '@/lib/image-picker';
+import { storage } from '@/lib/storage';
 import { Ionicons } from '@expo/vector-icons';
 import { Stack, useRouter } from 'expo-router';
 import React, { useEffect, useState } from 'react';
@@ -17,7 +17,7 @@ import {
     View,
 } from 'react-native';
 
-const DEFAULT_API_URL = Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://localhost:8000';
+const DEFAULT_API_URL = Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://127.0.0.1:8000';
 const BASE_URL = process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL;
 const PROFILE_KEY = 'workmithra:profile';
 

@@ -1,14 +1,13 @@
-import BottomNav from '@/components/bottom-nav';
 import Avatar from '@/components/avatar';
+import BottomNav from '@/components/bottom-nav';
+import { formatBookingDateTime } from '@/lib/format';
 import { platformShadow } from '@/lib/shadow';
 import { storage } from '@/lib/storage';
-import { formatBookingDateTime } from '@/lib/format';
 import { Stack, useRouter } from 'expo-router';
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
     ActivityIndicator,
     Alert,
-    Image,
     Modal,
     Platform,
     ScrollView,
@@ -16,10 +15,10 @@ import {
     Text,
     TextInput,
     TouchableOpacity,
-    View,
+    View
 } from 'react-native';
 
-const DEFAULT_API_URL = Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://localhost:8000';
+const DEFAULT_API_URL = Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://127.0.0.1:8000';
 const BASE_URL = process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL;
 
 type Tab = 'present' | 'past';
