@@ -68,6 +68,7 @@ export default function ChatScreen() {
   const [speakingId, setSpeakingId] = useState<string | null>(null);
   const [currentUserId, setCurrentUserId] = useState<string>('');
   const [keyboardVisible, setKeyboardVisible] = useState(false);
+  const [keyboardHeight, setKeyboardHeight] = useState(0);
 
   const listRef = useRef<FlatList<Bubble> | null>(null);
 
@@ -76,12 +77,14 @@ export default function ChatScreen() {
   }, []);
 
   useEffect(() => {
-    const keyboardShow = Keyboard.addListener(Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow', () => {
+    const keyboardShow = Keyboard.addListener(Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow', (event) => {
       setKeyboardVisible(true);
+      setKeyboardHeight(event.endCoordinates?.height || 0);
       scrollToBottom();
     });
     const keyboardHide = Keyboard.addListener(Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide', () => {
       setKeyboardVisible(false);
+      setKeyboardHeight(0);
     });
 
     return () => {
@@ -368,7 +371,8 @@ export default function ChatScreen() {
       <KeyboardAvoidingView
         style={styles.keyboardView}
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        keyboardVerticalOffset={Platform.OS === 'android' ? 0 : 0}
+        keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 24}
+        enabled
       >
         <View style={styles.screen}>
           <Stack.Screen options={{ headerShown: false }} />
@@ -405,7 +409,7 @@ export default function ChatScreen() {
               keyExtractor={(bubble) => bubble.id}
               renderItem={renderBubble}
               style={styles.list}
-              contentContainerStyle={{ padding: 8, paddingBottom: keyboardVisible ? 140 : 100 }}
+              contentContainerStyle={{ paddingHorizontal: 8, paddingTop: 8, paddingBottom: keyboardVisible ? keyboardHeight + 110 : 110 }}
               keyboardShouldPersistTaps="handled"
               keyboardDismissMode="interactive"
               onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: true })}
@@ -414,7 +418,7 @@ export default function ChatScreen() {
             {busy && <ActivityIndicator color="#6F42C1" style={{ marginVertical: 4 }} />}
 
             {/* Keep the composer above the keyboard on both platforms. */}
-            <View style={styles.inputRow}>
+            <View style={[styles.inputRow, Platform.OS === 'android' && keyboardVisible ? { paddingBottom: 12 } : null]}>
               <TouchableOpacity
                 testID="mic-button"
                 style={[styles.micBtn, listening && { backgroundColor: '#FF6B6B' }]}
