@@ -1,325 +1,427 @@
-import { Ionicons } from '@expo/vector-icons';
-import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
-import React, { useEffect, useRef, useState } from 'react';
-import {
-    ActivityIndicator,
-    Alert,
-    FlatList,
-    Platform,
-    StyleSheet,
-    Text,
-    TextInput,
-    TouchableOpacity,
-    View,
-} from 'react-native';
 import { aiDetectLang, aiTranslate, LangCode, LANGS, speak as speakTTS, webSTT } from '@/lib/ai';
 import { platformShadow } from '@/lib/shadow';
 import { storage } from '@/lib/storage';
+import { Ionicons } from '@expo/vector-icons';
+import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  ActivityIndicator,
+  Alert,
+  FlatList,
+  Keyboard,
+  KeyboardAvoidingView,
+  Platform,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  TouchableWithoutFeedback,
+  View,
+} from 'react-native';
 
 const DEFAULT_API_URL = Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://localhost:8000';
 const BASE_URL = process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL;
 
 type Side = 'client' | 'worker';
 
-type Bubble = {
+interface Bubble {
   id: string;
-  side: Side;          // who sent it
-  original: string;    // text in sender's detected language
+  side: Side;
+  original: string;
   srcLang: LangCode;
-  // translated payloads keyed by target lang
   translations: Partial<Record<LangCode, string>>;
-};
+}
+
+interface ServerChatMessage {
+  id: string | number;
+  sender_id: string | number;
+  message: string;
+}
+
+const createSystemBubble = (workerName?: string): Bubble => ({
+  id: 'sys',
+  side: 'worker',
+  original: workerName ? `Hello, this is ${workerName}. How can I help you?` : 'Hello! How can I help you?',
+  srcLang: 'en-IN',
+  translations: {},
+});
+
+const mapServerMessageToBubble = (message: ServerChatMessage, currentUserId: string): Bubble => ({
+  id: String(message.id),
+  side: String(message.sender_id) === currentUserId ? 'client' : 'worker',
+  original: message.message ?? '',
+  srcLang: 'en-IN',
+  translations: {},
+});
 
 export default function ChatScreen() {
   const router = useRouter();
   const { workerId, workerName } = useLocalSearchParams<{ workerId?: string; workerName?: string }>();
 
-  // On this screen the logged-in user is always the client; the worker is on the other side.
   const me: Side = 'client';
   const [clientLang, setClientLang] = useState<LangCode>('en-IN');
   const [workerLang, setWorkerLang] = useState<LangCode>('te-IN');
-  const [input, setInput] = useState('');
+  const [input, setInput] = useState<string>('');
   const [msgs, setMsgs] = useState<Bubble[]>([]);
-  const [busy, setBusy] = useState(false);
-  const [listening, setListening] = useState(false);
+  const [busy, setBusy] = useState<boolean>(false);
+  const [listening, setListening] = useState<boolean>(false);
   const [speakingId, setSpeakingId] = useState<string | null>(null);
-  const listRef = useRef<FlatList<Bubble>>(null);
-
   const [currentUserId, setCurrentUserId] = useState<string>('');
 
+  const listRef = useRef<FlatList<Bubble> | null>(null);
+
+  const scrollToBottom = useCallback(() => {
+    setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 50);
+  }, []);
+
   useEffect(() => {
-    (async () => {
+    const controller = new AbortController();
+
+    async function loadConversation() {
       let uid = '';
       try {
         const authRaw = await storage.get('workmithra:auth');
         if (authRaw) {
           const auth = JSON.parse(authRaw);
-          if (auth.id) uid = String(auth.id);
-          setCurrentUserId(uid);
+          if (auth?.id) uid = String(auth.id);
         }
-      } catch {}
+      } catch (error) {
+        console.warn('Failed to parse auth data', error);
+      }
 
-      // Initial system message
-      const sysMsg: Bubble = {
-        id: 'sys',
-        side: 'worker',
-        original: workerName ? `Hello, this is ${workerName}. How can I help you?` : 'Hello! How can I help you?',
-        srcLang: 'en-IN',
-        translations: {},
-      };
+      setCurrentUserId(uid);
+      const sysMsg = createSystemBubble(workerName);
 
       if (!uid || !workerId) {
         setMsgs([sysMsg]);
         return;
       }
 
-      // Fetch history
       try {
-        const res = await fetch(`${BASE_URL}/chat/conversation/${uid}/${workerId}`);
-        if (res.ok) {
-          const history = await res.json();
-          const loadedMsgs: Bubble[] = history.map((m: any) => ({
-            id: String(m.id),
-            side: String(m.sender_id) === uid ? 'client' : 'worker',
-            original: m.message,
-            srcLang: 'en-IN',
-            translations: {},
-          }));
-          setMsgs([sysMsg, ...loadedMsgs]);
-          setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 100);
-        } else {
+        const response = await fetch(`${BASE_URL}/chat/conversation/${uid}/${workerId}`, {
+          signal: controller.signal,
+        });
+
+        if (!response.ok) {
           setMsgs([sysMsg]);
+          return;
         }
-      } catch {
+
+        const history = await response.json();
+        if (!Array.isArray(history)) {
+          setMsgs([sysMsg]);
+          return;
+        }
+
+        const loadedMsgs = history.map((message: ServerChatMessage) => mapServerMessageToBubble(message, uid));
+        setMsgs([sysMsg, ...loadedMsgs]);
+        scrollToBottom();
+      } catch (error: any) {
+        if (controller.signal.aborted) return;
+        console.warn('Failed to load chat history', error);
         setMsgs([sysMsg]);
       }
-    })();
-  }, [workerId, workerName]);
+    }
 
-  // Poll for new messages every 3s (WhatsApp-style auto-refresh)
+    void loadConversation();
+    return () => controller.abort();
+  }, [workerId, workerName, scrollToBottom]);
+
   useEffect(() => {
     if (!currentUserId || !workerId) return;
-    let alive = true;
-    const poll = async () => {
+    const controller = new AbortController();
+
+    async function pollConversation() {
       try {
-        const res = await fetch(`${BASE_URL}/chat/conversation/${currentUserId}/${workerId}`);
-        if (!res.ok || !alive) return;
-        const history = await res.json();
-        setMsgs((prev) => {
-          const existingIds = new Set(prev.map((b) => b.id));
-          const newOnes: Bubble[] = history
-            .filter((m: any) => !existingIds.has(String(m.id)))
-            .map((m: any) => ({
-              id: String(m.id),
-              side: (String(m.sender_id) === currentUserId ? 'client' : 'worker') as Side,
-              original: m.message,
-              srcLang: 'en-IN' as LangCode,
-              translations: {},
-            }));
-          if (newOnes.length === 0) return prev;
-          setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 50);
-          return [...prev, ...newOnes];
+        const response = await fetch(`${BASE_URL}/chat/conversation/${currentUserId}/${workerId}`, {
+          signal: controller.signal,
         });
-      } catch {}
+
+        if (!response.ok) return;
+
+        const history = await response.json();
+        if (!Array.isArray(history)) return;
+
+        setMsgs((prev) => {
+          const existingIds = new Set(prev.map((bubble) => bubble.id));
+          const newMessages = history
+            .filter((message: ServerChatMessage) => !existingIds.has(String(message.id)))
+            .map((message: ServerChatMessage) => mapServerMessageToBubble(message, currentUserId));
+
+          if (newMessages.length === 0) return prev;
+          scrollToBottom();
+          return [...prev, ...newMessages];
+        });
+      } catch (error: any) {
+        if (controller.signal.aborted) return;
+        console.warn('Chat polling failed', error);
+      }
+    }
+
+    const intervalId = setInterval(pollConversation, 3000);
+    return () => {
+      controller.abort();
+      clearInterval(intervalId);
     };
-    const id = setInterval(poll, 3000);
-    return () => { alive = false; clearInterval(id); };
-  }, [currentUserId, workerId]);
+  }, [currentUserId, workerId, scrollToBottom]);
 
-  function langForSide(s: Side): LangCode {
-    return s === 'client' ? clientLang : workerLang;
-  }
+  const langForSide = useCallback((side: Side): LangCode => (side === 'client' ? clientLang : workerLang), [clientLang, workerLang]);
 
-  /** Returns the text to display for `viewer` reading bubble `b`. */
-  function viewText(b: Bubble, viewer: Side): { text: string; lang: LangCode } {
-    const viewerLang = langForSide(viewer);
-    if (b.srcLang === viewerLang) return { text: b.original, lang: b.srcLang };
-    const t = b.translations[viewerLang];
-    if (t) return { text: t, lang: viewerLang };
-    return { text: b.original, lang: b.srcLang };
-  }
+  const viewText = useCallback(
+    (bubble: Bubble, viewer: Side): { text: string; lang: LangCode } => {
+      const viewerLang = langForSide(viewer);
+      if (bubble.srcLang === viewerLang) return { text: bubble.original, lang: bubble.srcLang };
+      const translated = bubble.translations[viewerLang];
+      return { text: translated ?? bubble.original, lang: translated ? viewerLang : bubble.srcLang };
+    },
+    [langForSide],
+  );
 
-  async function ensureTranslation(b: Bubble, target: LangCode): Promise<string> {
-    if (b.srcLang === target) return b.original;
-    if (b.translations[target]) return b.translations[target]!;
-    const t = await aiTranslate(b.original, b.srcLang, target);
-    b.translations[target] = t;
-    setMsgs((m) => m.map((x) => (x.id === b.id ? { ...x, translations: { ...x.translations, [target]: t } } : x)));
-    return t;
-  }
+  const ensureTranslation = useCallback(
+    async (bubble: Bubble, target: LangCode): Promise<string> => {
+      if (bubble.srcLang === target) return bubble.original;
+      const cached = bubble.translations[target];
+      if (cached) return cached;
 
-  async function send(text: string) {
-    const value = text.trim();
-    if (!value) return;
-    setInput('');
-    setBusy(true);
-    try {
-      const srcLang = await aiDetectLang(value);
-      const otherLang = me === 'client' ? workerLang : clientLang;
-      const id = String(Date.now());
-      const b: Bubble = { id, side: me, original: value, srcLang, translations: {} };
-      
-      // pre-translate to the other side's language
+      const translation = await aiTranslate(bubble.original, bubble.srcLang, target);
+      setMsgs((prev) =>
+        prev.map((item) =>
+          item.id === bubble.id
+            ? { ...item, translations: { ...item.translations, [target]: translation } }
+            : item,
+        ),
+      );
+      return translation;
+    },
+    [],
+  );
+
+  const send = useCallback(
+    async (text: string) => {
+      const trimmed = text.trim();
+      if (!trimmed) return;
+
+      setInput('');
+      setBusy(true);
+
+      const targetLang = me === 'client' ? workerLang : clientLang;
+      let srcLang: LangCode = 'en-IN';
+
       try {
-        const t = await aiTranslate(value, srcLang, otherLang);
-        b.translations[otherLang] = t;
-      } catch {}
+        srcLang = await aiDetectLang(trimmed);
+      } catch (error) {
+        console.warn('Language detection failed', error);
+      }
 
-      setMsgs((m) => {
-        const next = [...m, b];
-        setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 50);
+      const tempId = String(Date.now());
+      const bubble: Bubble = { id: tempId, side: me, original: trimmed, srcLang, translations: {} };
+
+      if (srcLang !== targetLang) {
+        try {
+          bubble.translations[targetLang] = await aiTranslate(trimmed, srcLang, targetLang);
+        } catch (error) {
+          console.warn('Translation failed', error);
+        }
+      }
+
+      setMsgs((prev) => {
+        const next = [...prev, bubble];
+        scrollToBottom();
         return next;
       });
 
-      // Persist to backend
       if (currentUserId && workerId) {
         try {
-          const res = await fetch(`${BASE_URL}/chat/`, {
+          const response = await fetch(`${BASE_URL}/chat/`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              sender_id: Number(currentUserId),
-              receiver_id: Number(workerId),
-              message: value,
-            }),
+            body: JSON.stringify({ sender_id: Number(currentUserId), receiver_id: Number(workerId), message: trimmed }),
           });
-          if (res.ok) {
-            const saved = await res.json();
-            // Replace temp id with real DB id so polling doesn't duplicate
-            setMsgs((m) => m.map((x) => (x.id === id ? { ...x, id: String(saved.id) } : x)));
+
+          if (response.ok) {
+            const saved = await response.json();
+            if (saved?.id) {
+              setMsgs((prev) => prev.map((item) => (item.id === tempId ? { ...item, id: String(saved.id) } : item)));
+            }
+          } else {
+            console.warn('Failed to save chat message', response.status);
           }
-        } catch (e) {
-          console.warn('Failed to save chat message', e);
+        } catch (error) {
+          console.warn('Failed to save chat message', error);
         }
       }
-    } finally {
-      setBusy(false);
-    }
-  }
 
-  async function onMic() {
+      setBusy(false);
+    },
+    [clientLang, currentUserId, workerId, scrollToBottom, workerLang],
+  );
+
+  const onMic = useCallback(async (): Promise<void> => {
+    setListening(true);
     try {
-      setListening(true);
-      const sttHint = me === 'client' ? clientLang : workerLang;
-      const text = await webSTT(sttHint);
-      setListening(false);
+      const sttLang = me === 'client' ? clientLang : workerLang;
+      const text = await webSTT(sttLang);
       if (text && text.trim()) {
-        send(text);
+        await send(text);
       } else {
         Alert.alert('Voice', 'No speech detected. Speak clearly and try again.');
       }
-    } catch (e: any) {
-      setListening(false);
-      Alert.alert('Voice error', e?.message || 'Could not capture voice');
-    }
-  }
-
-  async function onSpeak(b: Bubble) {
-    try {
-      setSpeakingId(b.id);
-      const viewerLang = langForSide(me);
-      const text = await ensureTranslation(b, viewerLang);
-      await speakTTS(text, viewerLang);
-    } catch (e) {
-      console.warn('TTS failed', e);
+    } catch (error: any) {
+      Alert.alert('Voice error', error?.message || 'Could not capture voice');
     } finally {
-      setSpeakingId(null);
+      setListening(false);
     }
-  }
+  }, [clientLang, send, workerLang]);
 
-  const renderBubble = ({ item }: { item: Bubble }) => {
-    const mine = item.side === me;
-    const v = viewText(item, me);
-    const showSubtitle = v.text !== item.original;
-    return (
-      <View style={[styles.row, mine ? styles.rowR : styles.rowL]}>
-        {!mine && <View style={styles.avatar}><Ionicons name="person" size={14} color="#fff" /></View>}
-        <View style={[styles.bubble, mine ? styles.bMine : styles.bThem]}>
-          <Text style={[styles.original, mine ? styles.textMine : styles.textThem]}>{v.text}</Text>
-          {showSubtitle && (
-            <Text style={[styles.subtitle, mine ? styles.subMine : styles.subThem]} numberOfLines={2}>
-              ({item.srcLang.split('-')[0].toUpperCase()}) {item.original}
-            </Text>
+  const onSpeak = useCallback(
+    async (bubble: Bubble): Promise<void> => {
+      if (speakingId) return;
+      setSpeakingId(bubble.id);
+      try {
+        const viewerLang = langForSide(me);
+        const text = await ensureTranslation(bubble, viewerLang);
+        await speakTTS(text, viewerLang);
+      } catch (error) {
+        console.warn('TTS failed', error);
+      } finally {
+        setSpeakingId(null);
+      }
+    },
+    [ensureTranslation, speakingId],
+  );
+
+  const renderBubble = useCallback(
+    ({ item }: { item: Bubble }) => {
+      const mine = item.side === me;
+      const view = viewText(item, me);
+      const showSubtitle = view.text !== item.original;
+
+      return (
+        <View style={[styles.row, mine ? styles.rowR : styles.rowL]}>
+          {!mine && (
+            <View style={styles.avatar}>
+              <Ionicons name="person" size={14} color="#fff" />
+            </View>
           )}
-          <TouchableOpacity onPress={() => onSpeak(item)} style={styles.speakBtn} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-            {speakingId === item.id ? (
-              <ActivityIndicator size="small" color={mine ? '#075e54' : '#6F42C1'} />
-            ) : (
-              <Ionicons name="volume-high" size={16} color={mine ? '#075e54' : '#6F42C1'} />
+          <View style={[styles.bubble, mine ? styles.bMine : styles.bThem]}>
+            <Text style={[styles.original, mine ? styles.textMine : styles.textThem]}>{view.text}</Text>
+            {showSubtitle && (
+              <Text style={[styles.subtitle, mine ? styles.subMine : styles.subThem]} numberOfLines={2}>
+                ({item.srcLang.split('-')[0].toUpperCase()}) {item.original}
+              </Text>
             )}
-          </TouchableOpacity>
+            <TouchableOpacity
+              testID={`speak-${item.id}`}
+              onPress={() => onSpeak(item)}
+              style={styles.speakBtn}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            >
+              {speakingId === item.id ? (
+                <ActivityIndicator size="small" color={mine ? '#075e54' : '#6F42C1'} />
+              ) : (
+                <Ionicons name="volume-high" size={16} color={mine ? '#075e54' : '#6F42C1'} />
+              )}
+            </TouchableOpacity>
+          </View>
+        </View>
+      );
+    },
+    [onSpeak, speakingId, viewText, me],
+  );
+
+  const LangPicker = useCallback(
+    ({ value, onChange, label }: { value: LangCode; onChange: (lang: LangCode) => void; label: string }) => (
+      <View style={styles.langBox}>
+        <Text style={styles.langLabel}>{label}</Text>
+        <View style={styles.langRow}>
+          {LANGS.map((l) => (
+            <TouchableOpacity key={l.code} style={[styles.langChip, value === l.code && styles.langChipActive]} onPress={() => onChange(l.code)}>
+              <Text style={[styles.langText, value === l.code && styles.langTextActive]}>{l.label}</Text>
+            </TouchableOpacity>
+          ))}
         </View>
       </View>
-    );
-  };
-
-  const LangPicker = ({ value, onChange, label }: { value: LangCode; onChange: (l: LangCode) => void; label: string }) => (
-    <View style={styles.langBox}>
-      <Text style={styles.langLabel}>{label}</Text>
-      <View style={styles.langRow}>
-        {LANGS.map((l) => (
-          <TouchableOpacity key={l.code} style={[styles.langChip, value === l.code && styles.langChipActive]} onPress={() => onChange(l.code)}>
-            <Text style={[styles.langText, value === l.code && styles.langTextActive]}>{l.label}</Text>
-          </TouchableOpacity>
-        ))}
-      </View>
-    </View>
+    ),
+    [],
   );
 
   const myLang = me === 'client' ? clientLang : workerLang;
 
   return (
-    <View style={styles.screen}>
-      <Stack.Screen options={{ headerShown: false }} />
-      <View style={styles.frame}>
-        <View style={styles.topBar}>
-          <TouchableOpacity onPress={() => router.back()}>
-            <Ionicons name="arrow-back" size={22} color="#fff" />
-          </TouchableOpacity>
-          <View style={styles.headerCenter}>
-            <View style={styles.headerAvatar}><Ionicons name="person" size={16} color="#fff" /></View>
-            <View>
-              <Text style={styles.headerTitle}>{workerName || 'Chat'}</Text>
-              <Text style={styles.headerSubtitle}>online · auto-translate</Text>
+    <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+      <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
+        <View style={styles.screen}>
+          <Stack.Screen options={{ headerShown: false }} />
+
+          <View style={styles.frame}>
+            <View style={styles.topBar}>
+              <TouchableOpacity onPress={() => router.back()}>
+                <Ionicons name="arrow-back" size={22} color="#fff" />
+              </TouchableOpacity>
+
+              <View style={styles.headerCenter}>
+                <View style={styles.headerAvatar}>
+                  <Ionicons name="person" size={16} color="#fff" />
+                </View>
+
+                <View>
+                  <Text style={styles.headerTitle}>{workerName || 'Chat'}</Text>
+                  <Text style={styles.headerSubtitle}>online · auto-translate</Text>
+                </View>
+              </View>
+
+              <View style={{ width: 22 }} />
+            </View>
+
+            <View style={styles.langSection}>
+              <LangPicker label="You speak" value={clientLang} onChange={setClientLang} />
+              <LangPicker label={`${workerName || 'Worker'} speaks`} value={workerLang} onChange={setWorkerLang} />
+            </View>
+
+            <FlatList
+              testID="chat-list"
+              ref={listRef}
+              data={msgs}
+              keyExtractor={(bubble) => bubble.id}
+              renderItem={renderBubble}
+              style={styles.list}
+              contentContainerStyle={{ padding: 8, paddingBottom: 100 }}
+              keyboardShouldPersistTaps="handled"
+              keyboardDismissMode="interactive"
+              onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: true })}
+            />
+
+            {busy && <ActivityIndicator color="#6F42C1" style={{ marginVertical: 4 }} />}
+
+            <View style={styles.inputRow}>
+              <TouchableOpacity
+                testID="mic-button"
+                style={[styles.micBtn, listening && { backgroundColor: '#FF6B6B' }]}
+                onPress={onMic}
+              >
+                <Ionicons name={listening ? 'mic' : 'mic-outline'} size={18} color="#fff" />
+              </TouchableOpacity>
+
+              <TextInput
+                testID="message-input"
+                style={styles.input}
+                value={input}
+                onChangeText={setInput}
+                placeholder={`Type in ${myLang.split('-')[0].toUpperCase()} or any language...`}
+                placeholderTextColor="#999"
+                returnKeyType="send"
+                blurOnSubmit={false}
+                onSubmitEditing={() => send(input)}
+              />
+
+              <TouchableOpacity testID="send-button" style={styles.sendBtn} onPress={() => send(input)}>
+                <Ionicons name="send" size={16} color="#fff" />
+              </TouchableOpacity>
             </View>
           </View>
-          <View style={{ width: 22 }} />
         </View>
-
-        <View style={styles.langSection}>
-          <LangPicker label="You speak" value={clientLang} onChange={setClientLang} />
-          <LangPicker label={`${workerName || 'Worker'} speaks`} value={workerLang} onChange={setWorkerLang} />
-        </View>
-
-        <FlatList
-          ref={listRef}
-          data={msgs}
-          keyExtractor={(b) => b.id}
-          style={styles.list}
-          contentContainerStyle={{ padding: 8 }}
-          renderItem={renderBubble}
-        />
-
-        {busy && <ActivityIndicator color="#6F42C1" style={{ marginVertical: 4 }} />}
-
-        <View style={styles.inputRow}>
-          <TouchableOpacity style={[styles.micBtn, listening && { backgroundColor: '#FF6B6B' }]} onPress={onMic}>
-            <Ionicons name={listening ? 'mic' : 'mic-outline'} size={18} color="#fff" />
-          </TouchableOpacity>
-          <TextInput
-            style={styles.input}
-            placeholder={`Type in ${myLang.split('-')[0].toUpperCase()} or any language...`}
-            placeholderTextColor="#999"
-            value={input}
-            onChangeText={setInput}
-            onSubmitEditing={() => send(input)}
-          />
-          <TouchableOpacity style={styles.sendBtn} onPress={() => send(input)}>
-            <Ionicons name="send" size={16} color="#fff" />
-          </TouchableOpacity>
-        </View>
-      </View>
-    </View>
+      </TouchableWithoutFeedback>
+    </KeyboardAvoidingView>
   );
 }
 
@@ -345,9 +447,7 @@ const styles = StyleSheet.create({
   rowL: { justifyContent: 'flex-start' },
   avatar: { width: 24, height: 24, borderRadius: 12, backgroundColor: '#6F42C1', justifyContent: 'center', alignItems: 'center', marginRight: 6 },
   bubble: { maxWidth: '78%', borderRadius: 14, paddingHorizontal: 12, paddingVertical: 8, paddingRight: 30, position: 'relative', ...platformShadow('0px 1px 3px rgba(0,0,0,0.08)', '#000', 0, 1, 0.08, 1.5, 1) },
-  // Sender (me): WhatsApp-green
   bMine: { backgroundColor: '#dcf8c6', borderBottomRightRadius: 2 },
-  // Receiver (worker): soft lavender to contrast with the sender's green
   bThem: { backgroundColor: '#ede7f6', borderBottomLeftRadius: 2 },
   original: { fontSize: 13, lineHeight: 18 },
   textMine: { color: '#0b3d1a' },
