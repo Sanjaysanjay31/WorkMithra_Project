@@ -42,4 +42,8 @@ app-example
 /ios
 /android
 
+# Backend API keys
 backend/.env
+
+# Frontend API keys
+.env
