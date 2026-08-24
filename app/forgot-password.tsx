@@ -1,3 +1,4 @@
+import { resetPassword, sendOtp, verifyOtp } from '@/lib/auth-api';
 import { storage } from '@/lib/storage';
 import { Ionicons } from '@expo/vector-icons';
 import { Stack, useRouter } from 'expo-router';
@@ -14,9 +15,6 @@ import {
     View,
 } from 'react-native';
 
-const DEFAULT_API_URL = Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://127.0.0.1:8000';
-const BASE_URL = process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL;
-
 type Step = 'email' | 'otp' | 'password';
 
 export default function ForgotPasswordScreen() {
@@ -24,6 +22,7 @@ export default function ForgotPasswordScreen() {
   const [step, setStep] = useState<Step>('email');
   const [email, setEmail] = useState('');
   const [otp, setOtp] = useState('');
+  const [resetToken, setResetToken] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -37,13 +36,7 @@ export default function ForgotPasswordScreen() {
     setLoading(true);
     setMessage(null);
     try {
-      const res = await fetch(`${BASE_URL}/send-otp`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.detail || 'Failed to send OTP');
+      await sendOtp(email);
       notify('success', 'OTP sent to your email');
       setStep('otp');
     } catch (e: any) {
@@ -58,13 +51,9 @@ export default function ForgotPasswordScreen() {
     setLoading(true);
     setMessage(null);
     try {
-      const res = await fetch(`${BASE_URL}/verify-otp`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, otp }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.detail || 'Invalid OTP');
+      const data = await verifyOtp(email, otp);
+      if (!data.reset_token) throw new Error('Verification succeeded but no reset token was returned. Please try again.');
+      setResetToken(data.reset_token);
       notify('success', 'OTP verified');
       setStep('password');
     } catch (e: any) {
@@ -76,26 +65,25 @@ export default function ForgotPasswordScreen() {
 
   async function handleResetPassword() {
     if (!password || !confirmPassword) return notify('error', 'Enter both fields');
-    if (password.length < 6) return notify('error', 'Password must be at least 6 characters');
+    if (password.length < 8) return notify('error', 'Password must be at least 8 characters');
     if (password !== confirmPassword) return notify('error', 'Passwords do not match');
     setLoading(true);
     setMessage(null);
     try {
-      const res = await fetch(`${BASE_URL}/reset-password`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.detail || 'Reset failed');
+      await resetPassword(email, password, resetToken);
 
-      // Update locally cached auth so offline login still works
+      // The new password is only stored server-side. If a session for this
+      // email exists locally, drop any stale cached password from it — never
+      // write the new plaintext password to storage.
       try {
         const raw = await storage.get('workmithra:auth');
-        const auth = raw ? JSON.parse(raw) : {};
-        auth.email = email;
-        auth.password = password;
-        await storage.set('workmithra:auth', JSON.stringify(auth));
+        if (raw) {
+          const auth = JSON.parse(raw);
+          if (auth && typeof auth === 'object' && 'password' in auth) {
+            delete auth.password;
+            await storage.set('workmithra:auth', JSON.stringify(auth));
+          }
+        }
       } catch {}
 
       notify('success', 'Password reset successful!');
@@ -117,7 +105,7 @@ export default function ForgotPasswordScreen() {
           </TouchableOpacity>
 
           <Text style={styles.title}>Forgot Password?</Text>
-          <Text style={styles.subtitle}>We'll send a one-time code to your registered email.</Text>
+          <Text style={styles.subtitle}>We&apos;ll send a one-time code to your registered email.</Text>
 
           {message && (
             <View style={[styles.banner, message.type === 'error' ? styles.bannerError : styles.bannerSuccess]}>

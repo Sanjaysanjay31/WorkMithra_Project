@@ -1,7 +1,9 @@
 import Avatar from '@/components/avatar';
-import WorkerBottomNav from '@/components/worker-bottom-nav';
+import BottomNav from '@/components/bottom-nav';
+import { authFetch } from '@/lib/api';
+import { normalizeBookingStatus } from '@/lib/booking-status';
 import { platformShadow } from '@/lib/shadow';
-import { storage } from '@/lib/storage';
+import { BookingResponse, UserProfileResponse } from '@/lib/types';
 import { Ionicons } from '@expo/vector-icons';
 import * as Location from 'expo-location';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
@@ -18,9 +20,6 @@ import {
     View
 } from 'react-native';
 import { WebView } from 'react-native-webview';
-
-const DEFAULT_API_URL = Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://127.0.0.1:8000';
-const BASE_URL = process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL;
 
 type Tab = 'profile' | 'chat' | 'map' | 'requests';
 
@@ -60,41 +59,14 @@ function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number) {
   return 2 * R * Math.asin(Math.sqrt(a));
 }
 
-// (Fallback only — used if backend lookup fails)
-function getSampleClient(id: string, name?: string): ClientProfile {
-  const seed = id || '0';
-  const variants: ClientProfile[] = [
-    {
-      id: '1', full_name: name || 'Ravi Kumar', age: 34, email: 'ravi.kumar@gmail.com',
-      phone: '+91 98765 43210', alternate_phone: '+91 98765 43200',
-      address: 'H.No. 8-3-228, Banjara Hills, Road No.12', city: 'Hyderabad',
-      location: 'Banjara Hills', pincode: '500034', joined: '2025-12-04',
-      avatar: 'https://i.pravatar.cc/200?img=12', latitude: 17.4156, longitude: 78.4347,
-    },
-    {
-      id: '2', full_name: name || 'Priya Sharma', age: 29, email: 'priya.sharma@outlook.com',
-      phone: '+91 98311 22336', alternate_phone: '—',
-      address: 'Plot 24, Hi-Tech Layout, Gachibowli', city: 'Hyderabad',
-      location: 'Gachibowli', pincode: '500032', joined: '2026-01-18',
-      avatar: 'https://i.pravatar.cc/200?img=47', latitude: 17.4401, longitude: 78.3489,
-    },
-    {
-      id: '3', full_name: name || 'Anil Reddy', age: 41, email: 'anil.reddy@yahoo.com',
-      phone: '+91 90100 24578',
-      address: '5-7-44, Madhapur Main Road', city: 'Hyderabad',
-      location: 'Madhapur', pincode: '500081', joined: '2025-09-22',
-      avatar: 'https://i.pravatar.cc/200?img=33', latitude: 17.4483, longitude: 78.3915,
-    },
-  ];
-  const i = (parseInt(seed, 10) || 0) % variants.length;
-  return variants[i];
+// (Fallback only — used if backend lookup fails. Shows just the known name;
+// never fabricate contact details for a real client.)
+function getFallbackClient(id: string, name?: string): ClientProfile {
+  return {
+    id: id || '0',
+    full_name: name || `User ${id}`,
+  };
 }
-
-const SAMPLE_REQUESTS = (clientId: string): RequestItem[] => [
-  { id: `${clientId}-r1`, date: '2026-05-14', time: '10:00 AM', service: 'Pipe leak repair', note: 'Main bathroom — leak under sink', price: 600, status: 'pending' },
-  { id: `${clientId}-r2`, date: '2026-04-22', time: '11:00 AM', service: 'Bathroom plumbing', price: 1500, status: 'completed' },
-  { id: `${clientId}-r3`, date: '2026-03-08', time: '5:30 PM', service: 'Tap replacement', price: 400, status: 'completed' },
-];
 
 function statusColor(s: RequestItem['status']) {
   if (s === 'completed') return { bg: '#dcfce7', fg: '#166534', label: '✓ Completed' };
@@ -118,59 +90,56 @@ export default function UserProfilePage() {
 
       // 1. Fetch real client profile from backend
       try {
-        const res = await fetch(`${BASE_URL}/profiles/user/${cid}`);
+        const res = await authFetch(`/profiles/user/${cid}`);
         if (res.ok) {
-          const u = await res.json();
+          const u: UserProfileResponse = await res.json();
           setClient({
             id: String(u.id),
             full_name: u.full_name || (clientName ? String(clientName) : `User ${cid}`),
-            age: u.age,
-            email: u.email,
-            phone: u.phone,
-            alternate_phone: u.alternate_phone || u.alt_phone,
-            address: u.address,
-            city: u.city,
-            location: u.location || u.address,
-            pincode: u.pincode,
+            age: u.age ?? undefined,
+            email: u.email ?? undefined,
+            phone: u.phone ?? undefined,
+            alternate_phone: u.alternate_phone ?? undefined,
+            address: u.address ?? undefined,
+            city: u.city ?? undefined,
+            location: u.location || u.address || undefined,
+            pincode: u.pincode ?? undefined,
             joined: u.created_at ? String(u.created_at).slice(0, 10) : undefined,
-            avatar: u.profile_image || `https://i.pravatar.cc/200?u=${cid}`,
-            latitude: u.latitude,
-            longitude: u.longitude,
+            avatar: u.profile_image || undefined,
+            latitude: u.latitude ?? undefined,
+            longitude: u.longitude ?? undefined,
           });
         } else {
-          setClient(getSampleClient(cid, clientName ? String(clientName) : undefined));
+          setClient(getFallbackClient(cid, clientName ? String(clientName) : undefined));
         }
       } catch (e) {
         console.warn('Failed to fetch client profile', e);
-        setClient(getSampleClient(cid, clientName ? String(clientName) : undefined));
+        setClient(getFallbackClient(cid, clientName ? String(clientName) : undefined));
       }
 
-      // 2. Fetch real requests this client made (filtered to this worker if available)
+      // 2. Fetch real requests this client made. The worker's token scopes the
+      // list to their own bookings; we then narrow to this client locally.
       try {
-        let myWorkerId = '';
-        const authRaw = await storage.get('workmithra:auth');
-        if (authRaw) {
-          const auth = JSON.parse(authRaw);
-          if (auth.id) myWorkerId = String(auth.id);
-        }
-        const url = myWorkerId
-          ? `${BASE_URL}/bookings?user_id=${cid}&worker_id=${myWorkerId}`
-          : `${BASE_URL}/bookings?user_id=${cid}`;
-        const res = await fetch(url);
+        const res = await authFetch('/bookings');
         if (res.ok) {
-          const list = await res.json();
-          const mapped: RequestItem[] = list.map((b: any) => ({
-            id: String(b.id),
-            date: b.booking_date || 'Unknown',
-            time: b.booking_time || '',
-            service: b.problem_description || 'General Service',
-            note: b.problem_description,
-            price: b.final_price || b.estimated_price || 0,
-            status:
-              b.status === 'success' || b.status === 'completed' ? 'completed' :
-              b.status === 'accepted' || b.status === 'upcoming' ? 'accepted' :
-              b.status === 'rejected' || b.status === 'declined' ? 'declined' : 'pending',
-          }));
+          const list: BookingResponse[] = await res.json();
+          const mapped: RequestItem[] = list
+            .filter((b) => String(b.user_id) === cid)
+            .map((b) => {
+              const s = normalizeBookingStatus(b.status);
+              return {
+                id: String(b.id),
+                date: b.booking_date || 'Unknown',
+                time: b.booking_time || '',
+                service: b.problem_description || 'General Service',
+                note: b.problem_description || undefined,
+                price: b.final_price || b.estimated_price || 0,
+                status:
+                  s === 'completed' ? 'completed' :
+                  s === 'upcoming' ? 'accepted' :
+                  s === 'rejected' ? 'declined' : 'pending',
+              };
+            });
           setRequests(mapped);
         }
       } catch (e) {
@@ -213,12 +182,12 @@ export default function UserProfilePage() {
 
   async function updateRequest(id: string, status: RequestItem['status']) {
     setRequests((rs) => rs.map((r) => (r.id === id ? { ...r, status } : r)));
-    const backendStatus = status === 'accepted' ? 'upcoming' : status === 'declined' ? 'rejected' : status === 'completed' ? 'success' : 'pending';
+    // Map the UI label to the canonical backend status enum.
+    const backendStatus = status === 'accepted' ? 'upcoming' : status === 'declined' ? 'rejected' : status;
     try {
-      await fetch(`${BASE_URL}/bookings/${id}`, {
+      await authFetch(`/bookings/${id}`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ user_id: Number(clientId), status: backendStatus })
+        json: { status: backendStatus },
       });
     } catch (e) {
       console.warn('Failed to update booking status', e);
@@ -248,7 +217,7 @@ export default function UserProfilePage() {
 
         {/* Hero */}
         <View style={styles.hero}>
-          <Avatar uri={client.avatar} name={client.full_name} size={90} style={styles.heroAvatar as any} />
+          <Avatar uri={client.avatar} name={client.full_name} size={90} style={styles.heroAvatar} />
           <Text style={styles.heroName}>{client.full_name}</Text>
           <Text style={styles.heroSub}>{client.city || client.location || '—'}{client.joined ? ` · joined ${client.joined}` : ''}</Text>
           <View style={styles.heroBadges}>
@@ -416,7 +385,7 @@ export default function UserProfilePage() {
           )}
         </ScrollView>
       </View>
-      <WorkerBottomNav currentRoute="requests" />
+      <BottomNav currentRoute="requests" role="worker" />
     </View>
   );
 }

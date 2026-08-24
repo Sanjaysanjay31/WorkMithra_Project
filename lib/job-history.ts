@@ -1,7 +1,4 @@
-import { Platform } from 'react-native';
-
-const DEFAULT_API_URL = Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://127.0.0.1:8000';
-const BASE_URL = process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL;
+import { authFetch } from '@/lib/api';
 
 export type JobHistoryEntry = {
   id: number;
@@ -18,7 +15,7 @@ export async function listJobHistory(filters: { worker_id?: number; user_id?: nu
   if (filters.user_id != null) params.set('user_id', String(filters.user_id));
   if (filters.booking_id != null) params.set('booking_id', String(filters.booking_id));
   try {
-    const res = await fetch(`${BASE_URL}/job-history/?${params.toString()}`);
+    const res = await authFetch(`/job-history/?${params.toString()}`);
     if (!res.ok) return [];
     return await res.json();
   } catch {
@@ -33,15 +30,14 @@ export async function recordJobCompletion(payload: {
   completion_notes?: string;
 }): Promise<JobHistoryEntry | null> {
   try {
-    const res = await fetch(`${BASE_URL}/job-history/`, {
+    const res = await authFetch('/job-history/', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+      json: {
         booking_id: payload.booking_id ?? null,
         worker_id: payload.worker_id,
         user_id: payload.user_id ?? null,
         completion_notes: payload.completion_notes ?? null,
-      }),
+      },
     });
     if (!res.ok) return null;
     return await res.json();

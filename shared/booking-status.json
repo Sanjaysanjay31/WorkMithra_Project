@@ -1,0 +1,11 @@
+{
+  "statuses": ["pending", "upcoming", "completed", "rejected"],
+  "legacy_map": {
+    "accepted": "upcoming",
+    "in_progress": "upcoming",
+    "success": "completed",
+    "declined": "rejected",
+    "cancelled": "rejected"
+  },
+  "active": ["pending", "upcoming"]
+}

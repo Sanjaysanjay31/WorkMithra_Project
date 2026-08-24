@@ -1,17 +1,54 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from sqlalchemy.orm import Session
 from sqlalchemy import or_, desc, asc
 import database, models, schemas
+from auth import get_current_user
 
 router = APIRouter()
 
 
+def _is_own_worker(worker_id: int, current: Dict[str, Any]) -> bool:
+    return current.get("role") == "worker" and str(worker_id) == str(current.get("sub"))
+
+
+def _worker_view(worker: models.Worker, include_email: bool) -> Dict[str, Any]:
+    """Serialize a worker. Email is only included for the worker themself —
+    the directory is for hiring, not for harvesting contact details."""
+    return {
+        "id": worker.id,
+        "full_name": worker.full_name,
+        "phone": worker.phone,
+        "email": worker.email if include_email else None,
+        "skill": worker.skill,
+        "experience_years": worker.experience_years,
+        "bio": worker.bio,
+        "hourly_rate": float(worker.hourly_rate) if worker.hourly_rate is not None else None,
+        "availability": worker.availability,
+        "current_status": worker.current_status,
+        "profile_image": worker.profile_image,
+        "city": worker.city,
+        "location": worker.location,
+        "latitude": worker.latitude,
+        "longitude": worker.longitude,
+        "rating": worker.rating,
+        "total_jobs": worker.total_jobs,
+        "completed_jobs": worker.completed_jobs,
+        "aadhaar_verified": worker.aadhaar_verified,
+        "created_at": worker.created_at,
+    }
+
+
 @router.get("", response_model=List[schemas.WorkerResponse])
-def list_workers(skip: int = 0, limit: int = 20, db: Session = Depends(database.get_db)):
-    """Return a paginated list of workers."""
+def list_workers(
+    skip: int = Query(0, ge=0),
+    limit: int = Query(20, ge=1, le=100),
+    db: Session = Depends(database.get_db),
+    current: Dict[str, Any] = Depends(get_current_user),
+):
+    """Return a paginated list of workers (authenticated users only)."""
     workers = db.query(models.Worker).offset(skip).limit(limit).all()
-    return workers
+    return [_worker_view(w, include_email=False) for w in workers]
 
 
 @router.get("/smart-match", response_model=List[schemas.WorkerResponse])
@@ -28,8 +65,10 @@ def smart_match_workers(
     lat: Optional[float] = None,
     lng: Optional[float] = None,
     radius: Optional[float] = 10.0, # default 10km
-    skip: int = 0, limit: int = 20,
-    db: Session = Depends(database.get_db)
+    skip: int = Query(0, ge=0),
+    limit: int = Query(20, ge=1, le=100),
+    db: Session = Depends(database.get_db),
+    current: Dict[str, Any] = Depends(get_current_user),
 ):
     query = db.query(models.Worker)
     
@@ -77,30 +116,45 @@ def smart_match_workers(
         query = query.order_by(desc(models.Worker.rating))
     elif sort_by == 'jobs':
         query = query.order_by(desc(models.Worker.completed_jobs))
-    
-    return query.offset(skip).limit(limit).all()
+
+    return [_worker_view(w, include_email=False) for w in query.offset(skip).limit(limit).all()]
 
 
 @router.get("/{worker_id}", response_model=schemas.WorkerResponse)
-def get_worker(worker_id: int, db: Session = Depends(database.get_db)):
-    """Get a specific worker by ID."""
+def get_worker(
+    worker_id: int,
+    db: Session = Depends(database.get_db),
+    current: Dict[str, Any] = Depends(get_current_user),
+):
+    """Get a specific worker by ID (authenticated). Email is only included
+    when the worker fetches their own profile."""
     worker = db.query(models.Worker).filter(models.Worker.id == worker_id).first()
     if not worker:
         raise HTTPException(status_code=404, detail="Worker not found")
-    return worker
+    return _worker_view(worker, include_email=_is_own_worker(worker_id, current))
 
 @router.put("/{worker_id}", response_model=schemas.WorkerResponse)
-def update_worker(worker_id: int, worker_update: schemas.WorkerResponse, db: Session = Depends(database.get_db)):
-    """Update a specific worker's profile."""
+def update_worker(
+    worker_id: int,
+    worker_update: schemas.WorkerUpdate,
+    db: Session = Depends(database.get_db),
+    current: Dict[str, Any] = Depends(get_current_user),
+):
+    """Update a worker's profile. Only the worker themselves may do this, and
+    only editable fields are accepted (rating/counters are server-managed)."""
+    if current.get("role") != "worker" or str(worker_id) != str(current.get("sub")):
+        raise HTTPException(status_code=403, detail="You can only update your own worker profile")
+
     worker = db.query(models.Worker).filter(models.Worker.id == worker_id).first()
     if not worker:
         raise HTTPException(status_code=404, detail="Worker not found")
-    
-    # Update fields
-    for key, value in worker_update.dict(exclude_unset=True).items():
-        if hasattr(worker, key) and key != "id":
+
+    for key, value in worker_update.model_dump(exclude_unset=True).items():
+        if value is None:
+            continue
+        if hasattr(worker, key):
             setattr(worker, key, value)
-            
+
     db.commit()
     db.refresh(worker)
     return worker

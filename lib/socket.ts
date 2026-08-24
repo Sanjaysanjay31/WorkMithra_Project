@@ -3,14 +3,30 @@
  * Manages real-time communication with the backend
  */
 
-import { Platform } from 'react-native';
 import { io, Socket } from 'socket.io-client';
+import { BASE_URL, getAuth, getToken } from '@/lib/api';
 
-// API configuration
-const DEFAULT_API_URL = Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://127.0.0.1:8000';
-const API_URL = process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL;
+// Socket.IO connects to the same backend as the REST API.
+const API_URL = BASE_URL;
 
 let socket: Socket | null = null;
+
+/**
+ * Connect + authenticate the socket for the currently logged-in user, if any.
+ * Safe to call repeatedly (e.g. on app mount): it no-ops when logged out or
+ * when a socket already exists.
+ */
+export async function ensureSocket(): Promise<Socket | null> {
+  if (socket) return socket;
+  try {
+    const auth = await getAuth();
+    if (!auth?.id) return null;
+    return initializeSocket(Number(auth.id));
+  } catch (e) {
+    console.warn('ensureSocket failed:', e);
+    return null;
+  }
+}
 
 /**
  * Initialize and connect to Socket.IO server
@@ -19,7 +35,6 @@ let socket: Socket | null = null;
  */
 export function initializeSocket(userId: number): Socket {
   if (socket && socket.connected) {
-    console.log('Socket already connected');
     return socket;
   }
 
@@ -35,17 +50,13 @@ export function initializeSocket(userId: number): Socket {
     });
 
     // Handle connection
-    socket.on('connect', () => {
-      console.log('Socket connected:', socket?.id);
-      // Authenticate after connection
+    socket.on('connect', async () => {
+      // Authenticate after connection — the backend verifies the JWT and
+      // rejects the socket if the token doesn't match the claimed user id.
       if (userId) {
-        socket?.emit('authenticate', { user_id: userId });
+        const token = await getToken();
+        socket?.emit('authenticate', { user_id: userId, token });
       }
-    });
-
-    // Handle authentication response
-    socket.on('authenticated', (data) => {
-      console.log('Socket authenticated:', data);
     });
 
     // Handle authentication errors
@@ -56,11 +67,6 @@ export function initializeSocket(userId: number): Socket {
     // Handle connection errors
     socket.on('connect_error', (error) => {
       console.error('Socket connection error:', error);
-    });
-
-    // Handle disconnection
-    socket.on('disconnect', (reason) => {
-      console.log('Socket disconnected:', reason);
     });
 
     // Handle general errors
@@ -89,7 +95,6 @@ export function disconnectSocket(): void {
   if (socket) {
     socket.disconnect();
     socket = null;
-    console.log('Socket disconnected');
   }
 }
 
@@ -136,26 +141,10 @@ export function leaveRoom(roomId: string): void {
 // ============================================
 // CHAT FUNCTIONS
 // ============================================
-
-/**
- * Send a chat message
- */
-export function sendMessage(
-  receiverId: number,
-  message: string,
-  bookingId?: number
-): void {
-  if (!socket) {
-    console.error('Socket not initialized');
-    return;
-  }
-
-  socket.emit('send_message', {
-    receiver_id: receiverId,
-    message: message,
-    booking_id: bookingId || null,
-  });
-}
+//
+// NOTE: Chat messages are written via POST /chat/ (authFetch), which persists
+// them and emits 'receive_message' to both participants server-side. The
+// socket is the receive channel only — there is no client-side send.
 
 /**
  * Listen for incoming messages
@@ -220,27 +209,11 @@ export function onTypingIndicator(
 // ============================================
 // BOOKING FUNCTIONS
 // ============================================
-
-/**
- * Send a booking request
- */
-export function sendBookingRequest(bookingData: {
-  booking_id: number;
-  worker_id: number;
-  client_id: number;
-  service_id: number;
-  booking_date: string;
-  booking_time: string;
-  problem_description: string;
-  estimated_price: number;
-}): void {
-  if (!socket) {
-    console.error('Socket not initialized');
-    return;
-  }
-
-  socket.emit('booking_request', bookingData);
-}
+//
+// NOTE: Bookings are created via POST /bookings/ and updated via PUT
+// /bookings/{id} (authFetch). The backend persists the change and emits
+// 'new_booking_request' / 'booking_status_changed' server-side. The socket
+// is the receive channel only.
 
 /**
  * Listen for booking requests (workers)
@@ -269,26 +242,6 @@ export function onBookingRequest(
   return () => {
     socket?.off('new_booking_request', callback);
   };
-}
-
-/**
- * Update booking status
- */
-export function updateBookingStatus(
-  bookingId: number,
-  status: 'accepted' | 'rejected' | 'in_progress' | 'completed' | 'cancelled',
-  message?: string
-): void {
-  if (!socket) {
-    console.error('Socket not initialized');
-    return;
-  }
-
-  socket.emit('booking_status_update', {
-    booking_id: bookingId,
-    status: status,
-    message: message || '',
-  });
 }
 
 /**

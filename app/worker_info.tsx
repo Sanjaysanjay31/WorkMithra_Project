@@ -1,7 +1,10 @@
 import Avatar from '@/components/avatar';
 import BottomNav from '@/components/bottom-nav';
+import { authFetch, readApiError } from '@/lib/api';
 import { addNotification } from '@/lib/notifications';
+import { ensureSocket } from '@/lib/socket';
 import { storage } from '@/lib/storage';
+import { JobHistoryResponse, ReviewResponse, WorkerResponse } from '@/lib/types';
 import { Ionicons } from '@expo/vector-icons';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import * as Location from 'expo-location';
@@ -21,9 +24,6 @@ import {
 } from 'react-native';
 import { WebView } from 'react-native-webview';
 
-const DEFAULT_API_URL = Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://127.0.0.1:8000';
-const BASE_URL = process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL;
-
 
 type Tab = 'profile' | 'reviews' | 'chat' | 'booking' | 'map';
 
@@ -32,36 +32,6 @@ type HistoryItem = { id: string; date: string; time: string; price: number; stat
 function toRad(d: number) { return (d * Math.PI) / 180; }
 
 function pad(n: number) { return n < 10 ? `0${n}` : String(n); }
-
-function buildUpcomingDates(days = 30): { value: string; label: string }[] {
-  const out: { value: string; label: string }[] = [];
-  const today = new Date();
-  const monthNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-  const dayNames = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
-  for (let i = 0; i < days; i++) {
-    const d = new Date(today);
-    d.setDate(today.getDate() + i);
-    const value = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-    const prefix = i === 0 ? 'Today' : i === 1 ? 'Tomorrow' : dayNames[d.getDay()];
-    const label = `${prefix}, ${d.getDate()} ${monthNames[d.getMonth()]}`;
-    out.push({ value, label });
-  }
-  return out;
-}
-
-function buildTimeSlots(): { value: string; label: string }[] {
-  const out: { value: string; label: string }[] = [];
-  for (let h = 8; h <= 20; h++) {
-    for (const m of [0, 30]) {
-      const value = `${pad(h)}:${pad(m)}:00`;
-      const hr12 = ((h + 11) % 12) + 1;
-      const ampm = h < 12 ? 'AM' : 'PM';
-      const label = `${hr12}:${pad(m)} ${ampm}`;
-      out.push({ value, label });
-    }
-  }
-  return out;
-}
 
 function formatTimeLabel(value: string): string {
   if (!value) return '';
@@ -85,7 +55,7 @@ export default function WorkerInfoPage() {
   const { id } = useLocalSearchParams();
   const workerId = String(id || '');
   const [activeTab, setActiveTab] = useState<Tab>('profile');
-  const [worker, setWorker] = useState<any>(null);
+  const [worker, setWorker] = useState<WorkerResponse | null>(null);
   const [loading, setLoading] = useState(true);
 
   // Booking form state
@@ -110,9 +80,9 @@ export default function WorkerInfoPage() {
     const wid = Number(id);
     if (!wid) return;
     try {
-      const res = await fetch(`${BASE_URL}/reviews/?worker_id=${wid}`);
+      const res = await authFetch(`/reviews/?worker_id=${wid}`);
       if (!res.ok) return;
-      const data: any[] = await res.json();
+      const data: ReviewResponse[] = await res.json();
       setReviews(
         data.map((r) => ({
           id: r.id,
@@ -130,36 +100,28 @@ export default function WorkerInfoPage() {
       Alert.alert('Feedback', 'Please write something before submitting.');
       return;
     }
-    let uid = 0;
-    try {
-      const authRaw = await storage.get('workmithra:auth');
-      if (authRaw) { const auth = JSON.parse(authRaw); if (auth.id) uid = auth.id; }
-    } catch {}
     const wid = Number(id);
     if (!wid || Number.isNaN(wid)) {
       Alert.alert('Submit failed', `Invalid worker id: ${id}`);
       return;
     }
-    const url = `${BASE_URL}/reviews/`;
-    const body = { worker_id: wid, user_id: uid || null, rating: feedbackRating, review_text: feedbackText };
-    console.log('[review] POST', url, body);
+    const url = `/reviews/`;
+    const body = { worker_id: wid, rating: feedbackRating, review_text: feedbackText };
     try {
-      const res = await fetch(url, {
+      const res = await authFetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
+        json: body,
       });
       const text = await res.text();
-      console.log('[review] response', res.status, text.slice(0, 300));
       if (!res.ok) {
-        Alert.alert('Submit failed', `HTTP ${res.status}\n${text.slice(0, 200)}\n\nURL: ${url}`);
+        Alert.alert('Submit failed', `HTTP ${res.status}\n${text.slice(0, 200)}`);
         return;
       }
       setFeedbackText('');
       await loadReviews();
       Alert.alert('Success', 'Thank you for your feedback!');
     } catch (e: any) {
-      Alert.alert('Submit failed', `${e?.message || 'Network error'}\n\nURL: ${url}`);
+      Alert.alert('Submit failed', `${e?.message || 'Network error'}`);
     }
   }
 
@@ -176,8 +138,9 @@ export default function WorkerInfoPage() {
   async function fetchWorkerDetails() {
     setLoading(true);
     try {
-      const res = await fetch(`${BASE_URL}/workers/${id}`);
-      const data = await res.json();
+      const res = await authFetch(`/workers/${id}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data: WorkerResponse = await res.json();
       setWorker(data);
     } catch (e) {
       console.warn('Failed to fetch worker', e);
@@ -191,9 +154,9 @@ export default function WorkerInfoPage() {
     const wid = Number(id);
     if (wid) {
       try {
-        const res = await fetch(`${BASE_URL}/job-history/?worker_id=${wid}`);
+        const res = await authFetch(`/job-history/?worker_id=${wid}`);
         if (res.ok) {
-          const rows: any[] = await res.json();
+          const rows: JobHistoryResponse[] = await res.json();
           if (Array.isArray(rows) && rows.length) {
             setHistory(
               rows.map((r) => ({
@@ -248,18 +211,7 @@ export default function WorkerInfoPage() {
   const handleCall = () => worker?.phone && Linking.openURL(`tel:${worker.phone}`);
 
   useEffect(() => {
-    (async () => {
-      try {
-        const authRaw = await storage.get('workmithra:auth');
-        if (authRaw) {
-          const auth = JSON.parse(authRaw);
-          if (auth.id) {
-            const { initializeSocket } = require('@/lib/socket');
-            initializeSocket(auth.id);
-          }
-        }
-      } catch {}
-    })();
+    ensureSocket();
   }, []);
 
   async function handleBookNow() {
@@ -284,35 +236,39 @@ export default function WorkerInfoPage() {
 
     setLoading(true);
     try {
-      // 1. Create booking in DB
-      const res = await fetch(`${BASE_URL}/bookings`, {
+      // Use the customer's real address from their profile when available.
+      let customerAddress = 'Home Address (Default)';
+      try {
+        const pRes = await authFetch(`/profiles/user/${currentUid}`);
+        if (pRes.ok) {
+          const prof = await pRes.json();
+          customerAddress = prof.address || prof.location || customerAddress;
+        }
+      } catch {}
+
+      // 1. Create booking in DB (user_id comes from the auth token server-side)
+      const res = await authFetch('/bookings', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          user_id: currentUid,
+        json: {
           worker_id: Number(workerId),
           booking_date: bookDate,
           booking_time: bookTime.length === 5 ? `${bookTime}:00` : bookTime,
           problem_description: bookNote,
           estimated_price: bookPrice && !isNaN(Number(bookPrice)) ? Number(bookPrice) : null,
-          customer_address: 'Home Address (Default)', // In real app, get from user profile
+          customer_address: customerAddress,
           status: 'pending'
-        })
+        },
       });
       
-      if (!res.ok) throw new Error('Failed to create booking');
+      if (!res.ok) {
+        // Surface the backend's reason (e.g. worker unavailable, bad slot).
+        const detail = await readApiError(res, 'Failed to create booking');
+        throw new Error(detail);
+      }
       const bookingData = await res.json();
 
-      // 2. Send real-time notification via Socket.IO
-      const { sendBookingRequest } = require('@/lib/socket');
-      sendBookingRequest({
-        booking_id: bookingData.id,
-        worker_id: Number(workerId),
-        client_id: currentUid,
-        booking_date: bookDate,
-        booking_time: bookTime,
-        problem_description: bookNote,
-      });
+      // 2. Real-time notification to the worker is emitted by the backend
+      //    (POST /bookings pushes 'new_booking_request' over Socket.IO).
 
       // 3. Update local history
       const agreedPrice = bookPrice && !isNaN(Number(bookPrice)) ? Number(bookPrice) : 0;
@@ -345,9 +301,9 @@ export default function WorkerInfoPage() {
       );
       setBookDate(''); setBookTime(''); setBookNote(''); setBookPrice('');
       setActiveTab('profile');
-    } catch (e) {
+    } catch (e: any) {
       console.error('Booking failed', e);
-      Alert.alert('Error', 'Failed to create booking. Please try again.');
+      Alert.alert('Booking failed', e?.message || 'Failed to create booking. Please try again.');
     } finally {
       setLoading(false);
     }
@@ -383,7 +339,7 @@ export default function WorkerInfoPage() {
         </View>
 
         <View style={styles.workerHeader}>
-          <Avatar uri={worker.profile_image} name={worker.full_name} size={90} style={styles.largeAvatar as any} />
+          <Avatar uri={worker.profile_image} name={worker.full_name} size={90} style={styles.largeAvatar} />
           <Text style={styles.workerNameLarge}>{worker.full_name}</Text>
           <Text style={styles.workerSkill}>{worker.skill || 'Professional'}</Text>
           <View style={styles.ratingRow}>
@@ -405,13 +361,13 @@ export default function WorkerInfoPage() {
         <ScrollView style={styles.tabContent} showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 100 }}>
           {activeTab === 'profile' && (
             <View style={styles.tabPane}>
-              <Detail label="Name" value={worker.full_name} />
+              <Detail label="Name" value={worker.full_name || undefined} />
               <Detail label="Age" value={worker.age ? `${worker.age} years` : '—'} />
               <Detail label="Domain" value={worker.skill || 'General'} />
               <Detail label="Wage" value={`₹${worker.hourly_rate || '—'} / hour`} />
               <Detail label="Experience" value={`${worker.experience_years ?? 0} years`} />
               <Detail label="Completed Jobs" value={String(worker.completed_jobs ?? worker.total_jobs ?? 0)} />
-              <Detail label="Phone" value={worker.phone} />
+              <Detail label="Phone" value={worker.phone || undefined} />
               <Detail label="Alt. Phone" value={worker.alternate_phone || worker.alt_phone || '—'} />
               <Detail label="City" value={worker.city || '—'} />
               <Detail label="Address" value={worker.address || worker.location || '—'} />
@@ -457,7 +413,7 @@ export default function WorkerInfoPage() {
                     <Text style={styles.reviewRating}>⭐ {r.rating.toFixed(1)}</Text>
                   </View>
                   <Text style={styles.reviewDate}>{r.date}</Text>
-                  <Text style={styles.reviewText}>"{r.text}"</Text>
+                  <Text style={styles.reviewText}>&quot;{r.text}&quot;</Text>
                 </View>
               ))}
             </View>

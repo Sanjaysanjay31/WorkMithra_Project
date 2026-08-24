@@ -1,6 +1,8 @@
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
+import { loginRequest } from '@/lib/auth-api';
 import { platformNoShadow, platformShadow } from '@/lib/shadow';
+import { ensureSocket } from '@/lib/socket';
 import { storage } from '@/lib/storage';
 import { Ionicons } from '@expo/vector-icons';
 import { Stack, useRouter } from 'expo-router';
@@ -17,10 +19,6 @@ import {
     TouchableOpacity,
     View,
 } from 'react-native';
-
-// Use 10.0.2.2 for Android emulator to reach localhost on host machine
-const DEFAULT_API_URL = Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://127.0.0.1:8000';
-const BASE_URL = process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL;
 
 export default function LoginScreen() {
   const router = useRouter();
@@ -45,57 +43,40 @@ export default function LoginScreen() {
     }
     setLoading(true);
 
-    // We no longer perform offline login by checking plaintext password.
     try {
-      const cached = await storage.get('workmithra:auth');
-      if (cached) {
-        // Just parsing to check validity, but we will always authenticate with server
+      const data = await loginRequest(identifier, password, role);
+
+      // A login is only valid if the server returned both a user id and a
+      // token — never fall back to a guessed id.
+      if (!data.user?.id || !data.access_token) {
+        setLoading(false);
+        notify('Login failed', 'Server response was missing credentials. Please try again.');
+        return;
       }
-    } catch { }
-    try {
-      console.log(`Connecting to: ${BASE_URL}/login`);
-      const response = await fetch(`${BASE_URL}/login`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ identifier, password, role }),
-      });
-
-      let data: any = {};
-      try { data = await response.json(); } catch { }
-
-      if (response.ok) {
-        setLoading(false);
-        try {
-          const authData = {
-             id: data.user?.id || '1',
-             phone: identifier,
-             token: data.access_token || '',
-             role: role,
-          };
-          await storage.set('workmithra:auth', JSON.stringify(authData));
-        } catch {}
-        if (role === 'user') {
-          router.replace('/homePage');
-        } else {
-          router.replace('/worker_dashboard');
-        }
+      setLoading(false);
+      try {
+        const authData = {
+           id: data.user.id,
+           phone: identifier,
+           token: data.access_token,
+           role: role,
+        };
+        await storage.set('workmithra:auth', JSON.stringify(authData));
+      } catch {}
+      // Connect the realtime socket for the session now that the token is
+      // persisted. ensureSocket() no-ops if anything is missing.
+      ensureSocket();
+      if (role === 'user') {
+        router.replace('/homePage');
       } else {
-        setLoading(false);
-        notify('Login failed', data.detail || `Server responded with ${response.status}`);
+        router.replace('/worker_dashboard');
       }
     } catch (error: any) {
       setLoading(false);
-      const proceed = Platform.OS === 'web' && typeof window !== 'undefined'
-        ? window.confirm(`Unable to reach backend at ${BASE_URL}.\n\nContinue in offline/demo mode?`)
-        : false;
-      if (proceed) {
-        if (role === 'user') {
-          router.replace('/homePage');
-        } else {
-          router.replace('/worker_dashboard');
-        }
+      if (error?.name === 'AuthApiError') {
+        notify('Login failed', error.message);
       } else {
-        notify('Connection Error', `Unable to connect to server at ${BASE_URL}. Please ensure backend is running.`);
+        notify('Connection Error', 'Unable to reach the server. Please check your connection and ensure the backend is running.');
       }
     }
   };
@@ -194,7 +175,7 @@ export default function LoginScreen() {
               </TouchableOpacity>
 
               <View style={styles.registerContainer}>
-                <Text style={styles.registerText}>Don't have an account? </Text>
+                <Text style={styles.registerText}>Don&apos;t have an account? </Text>
                 <TouchableOpacity onPress={() => router.push('/register')}>
                   <Text style={styles.registerLink}>Register Now</Text>
                 </TouchableOpacity>

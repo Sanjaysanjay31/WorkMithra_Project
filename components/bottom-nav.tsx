@@ -1,10 +1,17 @@
 import { Ionicons } from '@expo/vector-icons';
-import { useRouter } from 'expo-router';
+import { Href, useRouter } from 'expo-router';
 import React from 'react';
 import { Platform, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
-interface BottomNavProps {
-  currentRoute: 'home' | 'bookings' | 'switch_role' | 'profile';
+export type NavRoute =
+  | 'home' | 'bookings' | 'switch_role' | 'profile'
+  | 'dashboard' | 'requests';
+
+interface NavItem {
+  id: NavRoute;
+  label: string;
+  icon: string;
+  route: Href;
 }
 
 const ACTIVE = '#fff';
@@ -12,27 +19,40 @@ const ACTIVE_BG = '#6F42C1';
 const INACTIVE = '#e5e7eb';
 const BAR_BG = '#2a1a4a';
 
-export default function BottomNav({ currentRoute }: BottomNavProps) {
-  const router = useRouter();
+const CLIENT_ITEMS: NavItem[] = [
+  { id: 'home', label: 'Home', icon: 'home', route: '/homePage' },
+  { id: 'bookings', label: 'Bookings', icon: 'calendar', route: '/bookings' },
+  { id: 'switch_role', label: 'Switch', icon: 'repeat', route: '/login' },
+  { id: 'profile', label: 'Profile', icon: 'person', route: '/profile' },
+];
 
-  const navItems = [
-    { id: 'home', label: 'Home', icon: 'home', route: '/homePage' },
-    { id: 'bookings', label: 'Bookings', icon: 'calendar', route: '/bookings' },
-    { id: 'switch_role', label: 'Switch', icon: 'repeat', route: '/login' },
-    { id: 'profile', label: 'Profile', icon: 'person', route: '/profile' },
-  ];
+const WORKER_ITEMS: NavItem[] = [
+  { id: 'dashboard', label: 'Dashboard', icon: 'grid', route: '/worker_dashboard' },
+  { id: 'requests', label: 'Requests', icon: 'mail', route: '/worker_bookings' },
+  { id: 'switch_role', label: 'Switch', icon: 'repeat', route: '/login' },
+  { id: 'profile', label: 'Profile', icon: 'person', route: '/worker_profile' },
+];
+
+interface BottomNavProps {
+  currentRoute: NavRoute;
+  role?: 'user' | 'worker';
+}
+
+export default function BottomNav({ currentRoute, role = 'user' }: BottomNavProps) {
+  const router = useRouter();
+  const items = role === 'worker' ? WORKER_ITEMS : CLIENT_ITEMS;
 
   return (
     <View style={styles.wrap}>
       <View style={styles.navBar}>
-        {navItems.map((item) => {
+        {items.map((item) => {
           const active = currentRoute === item.id;
           return (
             <TouchableOpacity
               key={item.id}
               style={styles.navItem}
               activeOpacity={0.7}
-              onPress={() => router.push(item.route as any)}
+              onPress={() => router.push(item.route)}
             >
               <View style={[styles.iconWrap, active && styles.iconWrapActive]}>
                 <Ionicons

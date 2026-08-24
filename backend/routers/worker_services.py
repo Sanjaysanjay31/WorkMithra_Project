@@ -3,8 +3,15 @@ from typing import List, Optional, Dict, Any
 from sqlalchemy.orm import Session
 from sqlalchemy.orm import joinedload
 import database, models, schemas
+from auth import get_current_user
 
 router = APIRouter()
+
+
+def _assert_own_worker(worker_id: int, current: Dict[str, Any]) -> None:
+    """Workers may only manage their own service links."""
+    if current.get("role") != "worker" or str(worker_id) != str(current.get("sub")):
+        raise HTTPException(status_code=403, detail="You can only manage your own services")
 
 
 def _to_dict(ws: models.WorkerService) -> Dict[str, Any]:
@@ -20,8 +27,13 @@ def _to_dict(ws: models.WorkerService) -> Dict[str, Any]:
 
 
 @router.post("/")
-def attach_service(payload: schemas.WorkerServiceBase, db: Session = Depends(database.get_db)):
+def attach_service(
+    payload: schemas.WorkerServiceBase,
+    db: Session = Depends(database.get_db),
+    current: Dict[str, Any] = Depends(get_current_user),
+):
     """Attach a service to a worker (with optional price + experience level)."""
+    _assert_own_worker(payload.worker_id, current)
     worker = db.query(models.Worker).filter(models.Worker.id == payload.worker_id).first()
     if not worker:
         raise HTTPException(status_code=404, detail="Worker not found")
@@ -61,6 +73,7 @@ def list_worker_services(
     worker_id: Optional[int] = None,
     service_id: Optional[int] = None,
     db: Session = Depends(database.get_db),
+    current: Dict[str, Any] = Depends(get_current_user),
 ):
     """List worker-service links. Filter by worker_id and/or service_id."""
     q = db.query(models.WorkerService).options(joinedload(models.WorkerService.service))
@@ -72,10 +85,15 @@ def list_worker_services(
 
 
 @router.delete("/{link_id}")
-def detach_service(link_id: int, db: Session = Depends(database.get_db)):
+def detach_service(
+    link_id: int,
+    db: Session = Depends(database.get_db),
+    current: Dict[str, Any] = Depends(get_current_user),
+):
     ws = db.query(models.WorkerService).filter(models.WorkerService.id == link_id).first()
     if not ws:
         raise HTTPException(status_code=404, detail="Worker-service link not found")
+    _assert_own_worker(ws.worker_id, current)
     db.delete(ws)
     db.commit()
     return {"ok": True}
@@ -86,8 +104,10 @@ def detach_by_pair(
     worker_id: int,
     service_id: int,
     db: Session = Depends(database.get_db),
+    current: Dict[str, Any] = Depends(get_current_user),
 ):
     """Convenience: detach by (worker_id, service_id) pair."""
+    _assert_own_worker(worker_id, current)
     ws = (
         db.query(models.WorkerService)
         .filter(

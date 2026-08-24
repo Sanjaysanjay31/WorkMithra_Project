@@ -1,6 +1,8 @@
 import Avatar from '@/components/avatar';
 import WorkerBottomNav from '@/components/worker-bottom-nav';
+import { authFetch } from '@/lib/api';
 import { pickImageNative, pickImageWeb } from '@/lib/image-picker';
+import { disconnectSocket } from '@/lib/socket';
 import { storage } from '@/lib/storage';
 import { Ionicons } from '@expo/vector-icons';
 import { Stack, useRouter } from 'expo-router';
@@ -17,8 +19,6 @@ import {
     View,
 } from 'react-native';
 
-const DEFAULT_API_URL = Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://127.0.0.1:8000';
-const BASE_URL = process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL;
 const WORKER_KEY = 'workmithra:worker_profile';
 
 type WorkerForm = {
@@ -57,7 +57,7 @@ export default function WorkerProfilePage() {
   const [confirmPwd, setConfirmPwd] = useState('');
   const [showPwd, setShowPwd] = useState(false);
   const [pwdLoading, setPwdLoading] = useState(false);
-  const [currentWorkerId, setCurrentWorkerId] = useState('1');
+  const [currentWorkerId, setCurrentWorkerId] = useState('');
 
   useEffect(() => { load(); }, []);
 
@@ -87,7 +87,7 @@ export default function WorkerProfilePage() {
 
     if (!wid) return;
     try {
-      const res = await fetch(`${BASE_URL}/workers/${wid}`);
+      const res = await authFetch(`/workers/${wid}`);
       if (!res.ok) return;
       const w = await res.json();
       const fromServer: WorkerForm = {
@@ -119,6 +119,10 @@ export default function WorkerProfilePage() {
   }
 
   async function save() {
+    if (!currentWorkerId) {
+      Alert.alert('Not logged in', 'Please log in again to save your profile.');
+      return;
+    }
     if (!profile.full_name.trim() || !profile.phone.trim()) {
       Alert.alert('Missing info', 'Name and phone are required.');
       return;
@@ -126,10 +130,9 @@ export default function WorkerProfilePage() {
     setSaving(true);
     try {
       await storage.set(WORKER_KEY, JSON.stringify({ ...profile, __uid: currentWorkerId }));
-      await fetch(`${BASE_URL}/workers/${currentWorkerId}`, {
+      await authFetch(`/workers/${currentWorkerId}`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(profile),
+        json: profile,
       });
     } catch {}
     setSaving(false);
@@ -137,6 +140,10 @@ export default function WorkerProfilePage() {
   }
 
   async function pickAndUploadImage() {
+    if (!currentWorkerId) {
+      Alert.alert('Not logged in', 'Please log in again to upload a photo.');
+      return;
+    }
     setUploading(true);
     try {
       const fd = new FormData();
@@ -155,7 +162,7 @@ export default function WorkerProfilePage() {
       }
       fd.append('user_id', currentWorkerId);
       fd.append('role', 'worker');
-      const res = await fetch(`${BASE_URL}/upload-profile-image`, { method: 'POST', body: fd });
+      const res = await authFetch('/upload-profile-image', { method: 'POST', body: fd });
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || 'Upload failed');
       const next = { ...profile, profile_image: data.url };
@@ -175,10 +182,9 @@ export default function WorkerProfilePage() {
     if (newPwd !== confirmPwd) return Alert.alert('Mismatch', 'New passwords do not match.');
     setPwdLoading(true);
     try {
-      const res = await fetch(`${BASE_URL}/change-password`, {
+      const res = await authFetch('/change-password', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: profile.email, current_password: currentPwd, new_password: newPwd }),
+        json: { email: profile.email, current_password: currentPwd, new_password: newPwd },
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.detail || 'Change failed');
@@ -200,7 +206,7 @@ export default function WorkerProfilePage() {
           {/* Hero header */}
           <View style={styles.hero}>
             <View style={styles.avatarWrap}>
-              <Avatar uri={profile.profile_image} name={profile.full_name} size={130} style={styles.avatar as any} />
+              <Avatar uri={profile.profile_image} name={profile.full_name} size={130} style={styles.avatar} />
               <TouchableOpacity style={styles.cameraBadge} onPress={pickAndUploadImage} activeOpacity={0.85}>
                 {uploading ? <ActivityIndicator color="#fff" size="small" /> : <Ionicons name="camera" size={16} color="#fff" />}
               </TouchableOpacity>
@@ -321,6 +327,7 @@ export default function WorkerProfilePage() {
             <TouchableOpacity
               style={styles.pwdOption}
               onPress={async () => {
+                disconnectSocket();
                 await storage.remove('workmithra:auth');
                 await storage.remove('workmithra:worker_profile').catch(() => {});
                 await storage.remove('workmithra:user_profile').catch(() => {});
@@ -341,6 +348,7 @@ export default function WorkerProfilePage() {
               style={styles.pwdOption}
               onPress={async () => {
                 const doLogout = async () => {
+                  disconnectSocket();
                   await storage.remove('workmithra:auth');
                   await storage.remove('workmithra:worker_profile').catch(() => {});
                   await storage.remove('workmithra:user_profile').catch(() => {});

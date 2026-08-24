@@ -1,8 +1,10 @@
 import Avatar from '@/components/avatar';
 import BottomNav from '@/components/bottom-nav';
 import { aiExtract, webSTTControlled } from '@/lib/ai';
+import { authFetch, expectJson } from '@/lib/api';
 import { unreadCount } from '@/lib/notifications';
 import { storage } from '@/lib/storage';
+import { WorkerResponse } from '@/lib/types';
 import { Ionicons } from '@expo/vector-icons';
 import { Stack, useRouter } from 'expo-router';
 import React, { useEffect, useRef, useState } from 'react';
@@ -21,9 +23,6 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-const DEFAULT_API_URL = Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://127.0.0.1:8000';
-const BASE_URL = process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL;
-
 type SortKey = 'wage_asc' | 'wage_desc' | 'experience' | 'rating' | 'location' | 'jobs';
 type AvailNow = 'now' | 'today' | null;
 
@@ -31,12 +30,12 @@ export default function HomePage() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const [searchQuery, setSearchQuery] = useState('');
-  const [workers, setWorkers] = useState<any[]>([]);
+  const [workers, setWorkers] = useState<WorkerResponse[]>([]);
   const [loading, setLoading] = useState(false);
   const [listening, setListening] = useState(false);
   const [unread, setUnread] = useState(0);
 
-  const [userId, setUserId] = useState<string>('1');
+  const [userId, setUserId] = useState<string>('');
 
   useEffect(() => {
     (async () => {
@@ -71,7 +70,12 @@ export default function HomePage() {
   const [sortBy, setSortBy] = useState<SortKey[]>([]);
 
   useEffect(() => {
-    fetchWorkers();
+    // Debounce so typing in the search box doesn't fire a request per keystroke.
+    const timer = setTimeout(() => {
+      fetchWorkers();
+    }, searchQuery ? 350 : 0);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchQuery, minWage, maxWage, minExperience, minRating, minJobs, verifiedOnly, availability, sortBy]);
 
   async function fetchWorkers() {
@@ -88,9 +92,11 @@ export default function HomePage() {
       if (availability) params.append('availability', availability);
       if (sortBy.length > 0) params.append('sort_by', sortBy.join(','));
 
-      const res = await fetch(`${BASE_URL}/workers/smart-match?${params.toString()}`);
-      const data = await res.json();
-      setWorkers(data || []);
+      const data = await expectJson<WorkerResponse[]>(
+        await authFetch(`/workers/smart-match?${params.toString()}`),
+        'Could not load workers',
+      );
+      setWorkers(Array.isArray(data) ? data : []);
     } catch (e) {
       console.warn('Failed to fetch workers', e);
     } finally {
@@ -100,7 +106,7 @@ export default function HomePage() {
 
   const filteredWorkers = workers;
 
-  function onPressWorker(w: any) {
+  function onPressWorker(w: WorkerResponse) {
     router.push({ pathname: '/worker_info', params: { id: String(w.id) } });
   }
 
@@ -171,9 +177,9 @@ export default function HomePage() {
     setSortBy([]);
   }
 
-  const renderWorker = ({ item }: { item: any }) => (
+  const renderWorker = ({ item }: { item: WorkerResponse }) => (
     <View style={styles.workerCard}>
-      <Avatar uri={item.profile_image} name={item.full_name} size={60} style={styles.workerAvatar as any} />
+      <Avatar uri={item.profile_image} name={item.full_name} size={60} style={styles.workerAvatar} />
       <View style={styles.workerInfo}>
         <Text style={styles.workerName}>{item.full_name}</Text>
         <Text style={styles.workerDomain}>{item.skill || 'General Worker'}</Text>

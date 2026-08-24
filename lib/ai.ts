@@ -1,8 +1,9 @@
 import { Audio } from 'expo-av';
 import { Platform } from 'react-native';
+import { BASE_URL, authFetch, getToken } from '@/lib/api';
 
-const DEFAULT_API_URL = Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://127.0.0.1:8000';
-export const BASE_URL = process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL;
+// Re-exported for existing imports; the value comes from lib/api (single source).
+export { BASE_URL };
 
 export type LangCode =
   | 'en-IN' | 'hi-IN' | 'te-IN' | 'ta-IN' | 'kn-IN' | 'ml-IN'
@@ -44,10 +45,9 @@ export async function aiDetectLang(text: string): Promise<LangCode> {
   if (/^[a-zA-Z0-9\s.,!?'"()-]+$/.test(text.trim())) return 'en-IN';
 
   try {
-    const res = await fetch(`${BASE_URL}/ai/detect-lang`, {
+    const res = await authFetch('/ai/detect-lang', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text }),
+      json: { text },
     });
     if (!res.ok) throw new Error('detect failed');
     const data = await res.json();
@@ -59,10 +59,9 @@ export async function aiDetectLang(text: string): Promise<LangCode> {
 
 export async function aiTranslate(text: string, source: LangCode, target: LangCode): Promise<string> {
   if (!text.trim() || source === target) return text;
-  const res = await fetch(`${BASE_URL}/ai/translate`, {
+  const res = await authFetch('/ai/translate', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text, source_lang: source, target_lang: target }),
+    json: { text, source_lang: source, target_lang: target },
   });
   if (!res.ok) throw new Error('translate failed');
   const data = await res.json();
@@ -70,20 +69,18 @@ export async function aiTranslate(text: string, source: LangCode, target: LangCo
 }
 
 export async function aiExtract(text: string, schemaHint: string): Promise<any> {
-  const res = await fetch(`${BASE_URL}/ai/extract`, {
+  const res = await authFetch('/ai/extract', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text, schema: schemaHint }),
+    json: { text, schema: schemaHint },
   });
   if (!res.ok) throw new Error('extract failed');
   return res.json();
 }
 
 export async function aiChat(prompt: string, system?: string): Promise<string> {
-  const res = await fetch(`${BASE_URL}/ai/chat`, {
+  const res = await authFetch('/ai/chat', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ prompt, system }),
+    json: { prompt, system },
   });
   if (!res.ok) {
     let detail = `${res.status}`;
@@ -113,10 +110,9 @@ export function cleanTextForSpeech(text: string): string {
 export async function aiTTS(text: string, targetLang: LangCode = 'en-IN'): Promise<string> {
   const cleanText = cleanTextForSpeech(text);
   if (!cleanText) throw new Error('No text for TTS');
-  const res = await fetch(`${BASE_URL}/ai/tts`, {
+  const res = await authFetch('/ai/tts', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text: cleanText, target_lang: targetLang }),
+    json: { text: cleanText, target_lang: targetLang },
   });
   if (!res.ok) throw new Error('tts failed');
   const blob = await res.blob();
@@ -138,7 +134,7 @@ let _currentAudio: any = null;
 let _currentIsNative = false;
 let _muted = false;
 let _paused = false;
-let _pauseResolvers: Array<() => void> = [];
+let _pauseResolvers: (() => void)[] = [];
 
 export function setMuted(v: boolean) {
   _muted = v;
@@ -222,14 +218,26 @@ export async function playAudio(url: string): Promise<void> {
   _currentAudio = sound;
   _currentIsNative = true;
   return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      if (_currentAudio === sound) _currentAudio = null;
+      resolve();
+    };
     sound.setOnPlaybackStatusUpdate((status: any) => {
       if (!status?.isLoaded) return;
       if (status.didJustFinish) {
         try { sound.unloadAsync(); } catch {}
-        if (_currentAudio === sound) _currentAudio = null;
-        resolve();
+        finish();
       }
     });
+    // Safety net: if the finished event never fires (corrupt/empty clip),
+    // don't leave the forever — release the sound after a generous cap.
+    setTimeout(() => {
+      try { sound.unloadAsync(); } catch {}
+      finish();
+    }, 90000);
   });
 }
 
@@ -350,7 +358,6 @@ function nativeSTTControlled(lang: LangCode = 'en-IN'): { stop: () => void; resu
         await Audio.setAudioModeAsync({ allowsRecordingIOS: false });
       } catch {}
       if (!uri) { rejectFn(new Error('Recording produced no audio file')); return; }
-      console.log('[STT] uri=', uri, 'elapsedMs=', elapsed);
 
       // Sarvam handles m4a, but renaming to .mp4 avoids any extension-based rejection.
       const origName = uri.split('/').pop() || 'speech.m4a';
@@ -364,11 +371,12 @@ function nativeSTTControlled(lang: LangCode = 'en-IN'): { stop: () => void; resu
       form.append('lang', lang === 'auto' ? 'unknown' : lang);
 
       const sttUrl = `${BASE_URL}/ai/stt`;
-      console.log('[STT] POST', sttUrl, 'name=', safeName, 'mime=', mime, 'lang=', lang);
+      const token = await getToken();
+      const headers: Record<string, string> = {};
+      if (token) headers['Authorization'] = `Bearer ${token}`;
 
-      const res = await fetch(sttUrl, { method: 'POST', body: form });
+      const res = await fetch(sttUrl, { method: 'POST', body: form, headers });
       const text = await res.text();
-      console.log('[STT] response', res.status, text.slice(0, 400));
       if (!res.ok) {
         rejectFn(new Error(`STT failed (${res.status}): ${text.slice(0, 200)}`));
         return;
@@ -376,7 +384,6 @@ function nativeSTTControlled(lang: LangCode = 'en-IN'): { stop: () => void; resu
       let data: any = {};
       try { data = JSON.parse(text); } catch { data = { transcript: text }; }
       const transcript = data.transcript || data.text || data.output || '';
-      console.log('[STT] transcript=', transcript || '(empty)');
       if (!transcript || !transcript.trim()) {
         rejectFn(new Error(`No speech detected. Backend returned: ${text.slice(0, 200) || '(empty)'}`));
         return;

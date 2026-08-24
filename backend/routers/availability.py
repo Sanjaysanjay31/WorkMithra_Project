@@ -2,8 +2,15 @@ from fastapi import APIRouter, Depends, HTTPException
 from typing import List, Optional, Dict, Any
 from sqlalchemy.orm import Session
 import database, models, schemas
+from auth import get_current_user
 
 router = APIRouter()
+
+
+def _assert_own_worker(worker_id: int, current: Dict[str, Any]) -> None:
+    """Workers may only manage their own availability slots."""
+    if current.get("role") != "worker" or str(worker_id) != str(current.get("sub")):
+        raise HTTPException(status_code=403, detail="You can only manage your own availability")
 
 
 def _to_dict(a: models.WorkerAvailability) -> Dict[str, Any]:
@@ -18,10 +25,15 @@ def _to_dict(a: models.WorkerAvailability) -> Dict[str, Any]:
 
 
 @router.post("/")
-def create_availability(payload: schemas.WorkerAvailabilityBase, db: Session = Depends(database.get_db)):
+def create_availability(
+    payload: schemas.WorkerAvailabilityBase,
+    db: Session = Depends(database.get_db),
+    current: Dict[str, Any] = Depends(get_current_user),
+):
     """Add an availability slot for a worker. (worker_id, available_day) pair is upserted."""
     if not payload.worker_id:
         raise HTTPException(status_code=400, detail="worker_id is required")
+    _assert_own_worker(payload.worker_id, current)
     worker = db.query(models.Worker).filter(models.Worker.id == payload.worker_id).first()
     if not worker:
         raise HTTPException(status_code=404, detail="Worker not found")
@@ -59,6 +71,7 @@ def create_availability(payload: schemas.WorkerAvailabilityBase, db: Session = D
 def list_availability(
     worker_id: Optional[int] = None,
     db: Session = Depends(database.get_db),
+    current: Dict[str, Any] = Depends(get_current_user),
 ):
     q = db.query(models.WorkerAvailability)
     if worker_id is not None:
@@ -67,10 +80,16 @@ def list_availability(
 
 
 @router.put("/{slot_id}")
-def update_availability(slot_id: int, payload: schemas.WorkerAvailabilityBase, db: Session = Depends(database.get_db)):
+def update_availability(
+    slot_id: int,
+    payload: schemas.WorkerAvailabilityBase,
+    db: Session = Depends(database.get_db),
+    current: Dict[str, Any] = Depends(get_current_user),
+):
     a = db.query(models.WorkerAvailability).filter(models.WorkerAvailability.id == slot_id).first()
     if not a:
         raise HTTPException(status_code=404, detail="Availability slot not found")
+    _assert_own_worker(a.worker_id, current)
     if payload.available_day is not None:
         a.available_day = payload.available_day
     if payload.start_time is not None:
@@ -85,10 +104,15 @@ def update_availability(slot_id: int, payload: schemas.WorkerAvailabilityBase, d
 
 
 @router.delete("/{slot_id}")
-def delete_availability(slot_id: int, db: Session = Depends(database.get_db)):
+def delete_availability(
+    slot_id: int,
+    db: Session = Depends(database.get_db),
+    current: Dict[str, Any] = Depends(get_current_user),
+):
     a = db.query(models.WorkerAvailability).filter(models.WorkerAvailability.id == slot_id).first()
     if not a:
         raise HTTPException(status_code=404, detail="Availability slot not found")
+    _assert_own_worker(a.worker_id, current)
     db.delete(a)
     db.commit()
     return {"ok": True}

@@ -1,11 +1,16 @@
 import Avatar from '@/components/avatar';
-import WorkerBottomNav from '@/components/worker-bottom-nav';
+import BottomNav from '@/components/bottom-nav';
+import { authFetch, expectJson } from '@/lib/api';
+import { isActiveStatus, normalizeBookingStatus } from '@/lib/booking-status';
+import { formatBookingDateTime, isBookingDateTimePast } from '@/lib/format';
 import { addNotification } from '@/lib/notifications';
 import { platformShadow } from '@/lib/shadow';
+import { storage } from '@/lib/storage';
+import { BookingResponse } from '@/lib/types';
 import { Ionicons } from '@expo/vector-icons';
 import { Stack, useRouter } from 'expo-router';
 import React, { useEffect, useState } from 'react';
-import { Alert, Modal, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { Alert, Modal, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 
 type Tab = 'pending' | 'accepted';
 
@@ -13,35 +18,24 @@ type Request = {
   id: string;
   client_id: string;
   client: string;
-  avatar: string;
+  avatar?: string;
   job: string;
   date: string;
   price: number;
   status: 'pending' | 'accepted';
 };
 
-const SAMPLE: Request[] = [
-  { id: '1', client_id: '1', client: 'Ravi Kumar', avatar: 'https://i.pravatar.cc/200?img=12', job: 'Pipe leak repair', date: 'Today, 4:00 PM', price: 600, status: 'pending' },
-  { id: '2', client_id: '2', client: 'Priya Sharma', avatar: 'https://i.pravatar.cc/200?img=47', job: 'Tap installation', date: 'Tomorrow, 10:00 AM', price: 400, status: 'pending' },
-  { id: '3', client_id: '3', client: 'Anil Reddy', avatar: 'https://i.pravatar.cc/200?img=33', job: 'Bathroom drainage', date: 'Yesterday', price: 1500, status: 'accepted' },
-];
-
-import { formatBookingDateTime } from '@/lib/format';
-import { storage } from '@/lib/storage';
-const DEFAULT_API_URL = Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://127.0.0.1:8000';
-const BASE_URL = process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL;
-
 export default function WorkerBookings() {
   const router = useRouter();
   const [tab, setTab] = useState<Tab>('pending');
   const [requests, setRequests] = useState<Request[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [, setLoading] = useState(true);
   const [quoteFor, setQuoteFor] = useState<Request | null>(null);
   const [quoteAmount, setQuoteAmount] = useState('');
 
   useEffect(() => {
     (async () => {
-      let uid = '1';
+      let uid = '';
       try {
         const authRaw = await storage.get('workmithra:auth');
         if (authRaw) {
@@ -49,45 +43,54 @@ export default function WorkerBookings() {
           if (auth.id) uid = String(auth.id);
         }
       } catch {}
+      if (!uid) {
+        // Not logged in — never fall back to a guessed user id.
+        setLoading(false);
+        return;
+      }
 
       try {
-        const res = await fetch(`${BASE_URL}/bookings?worker_id=${uid}`);
-        if (res.ok) {
-          const data = await res.json();
+        // The worker's token scopes this list to their own bookings.
+        const data: BookingResponse[] = await expectJson(
+          await authFetch('/bookings'),
+          'Could not load booking requests',
+        );
 
-          // Fetch real client names for unique user_ids
-          const uniqueUids = Array.from(new Set(data.map((b: any) => b.user_id).filter(Boolean)));
-          const userMap: Record<string, { name: string; avatar?: string }> = {};
-          await Promise.all(uniqueUids.map(async (uid: any) => {
-            try {
-              const r = await fetch(`${BASE_URL}/profiles/user/${uid}`);
-              if (r.ok) {
-                const u = await r.json();
-                userMap[String(uid)] = {
-                  name: u.full_name || `User ${uid}`,
-                  avatar: u.profile_image,
-                };
-              }
-            } catch {}
-          }));
-
-          const mapped: Request[] = data.map((b: any) => {
-            const info = userMap[String(b.user_id)] || {};
+        // Client name/avatar come embedded on each booking — no extra requests.
+        const mapped: Request[] = data
+          .map((b) => {
+            const info = b.user;
+            const status = normalizeBookingStatus(b.status);
             return {
-              id: String(b.id),
-              client_id: String(b.user_id),
-              client: info.name || `User ${b.user_id}`,
-              avatar: info.avatar || `https://i.pravatar.cc/150?u=${b.user_id}`,
-              job: b.problem_description || 'General Service',
-              date: formatBookingDateTime(b.booking_date, b.booking_time) || 'Date not set',
-              price: b.estimated_price || b.final_price || 0,
-              status: b.status === 'accepted' || b.status === 'upcoming' || b.status === 'success' || b.status === 'completed' ? 'accepted' : 'pending',
+              booking: b,
+              canonical: status,
+              item: {
+                id: String(b.id),
+                client_id: String(b.user_id),
+                client: info?.full_name || `User ${b.user_id}`,
+                avatar: info?.profile_image || undefined,
+                job: b.problem_description || 'General Service',
+                date: formatBookingDateTime(b.booking_date, b.booking_time) || 'Date not set',
+                price: b.estimated_price || b.final_price || 0,
+                // This inbox shows active requests only: pending, or accepted (upcoming).
+                status: (status === 'upcoming' ? 'accepted' : 'pending') as 'pending' | 'accepted',
+              },
             };
-          });
-          setRequests(mapped.filter(r => r.status === 'pending' || r.status === 'accepted'));
-        }
-      } catch (e) {
+          })
+          // The inbox holds actionable requests only: an active status AND a
+          // scheduled slot that hasn't passed yet. Once the time is gone a
+          // request can no longer be accepted/declined, so it drops out of the
+          // inbox (completed work still shows on the dashboard history).
+          .filter(
+            (row) =>
+              isActiveStatus(row.canonical) &&
+              !isBookingDateTimePast(row.booking.booking_date, row.booking.booking_time),
+          )
+          .map((row) => row.item);
+        setRequests(mapped);
+      } catch (e: any) {
         console.warn('Failed to fetch requests', e);
+        Alert.alert('Booking requests', e?.message || 'Could not load booking requests. Reopen to retry.');
       } finally {
         setLoading(false);
       }
@@ -96,25 +99,37 @@ export default function WorkerBookings() {
 
   const filtered = requests.filter((r) => r.status === tab);
 
-  async function updateStatus(id: string, status: 'accepted' | 'pending') {
+  async function updateStatus(id: string, action: 'accepted' | 'declined') {
     const r = requests.find((x) => x.id === id);
-    setRequests((rs) => rs.map((x) => (x.id === id ? { ...x, status } : x)));
     if (!r) return;
-    
-    // Update on backend
+
+    const backendStatus = action === 'accepted' ? 'upcoming' : 'rejected';
     try {
-      await fetch(`${BASE_URL}/bookings/${id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: status === 'accepted' ? 'upcoming' : 'rejected' })
-      });
-    } catch {}
+      await expectJson(
+        await authFetch(`/bookings/${id}`, {
+          method: 'PUT',
+          json: { status: backendStatus },
+        }),
+        action === 'accepted' ? 'Could not accept the booking' : 'Could not decline the booking',
+      );
+    } catch (e: any) {
+      Alert.alert('Update failed', e?.message || 'Could not update the booking. Please try again.');
+      return;
+    }
+
+    // Update the UI only after the server confirmed the change. A declined
+    // booking is no longer active, so it leaves the inbox entirely.
+    if (action === 'accepted') {
+      setRequests((rs) => rs.map((x) => (x.id === id ? { ...x, status: 'accepted' } : x)));
+    } else {
+      setRequests((rs) => rs.filter((x) => x.id !== id));
+    }
 
     // Notify the user about acceptance / decline.
-    const accepted = status === 'accepted';
+    const accepted = action === 'accepted';
     addNotification({
       audience: 'user',
-      recipient_id: r.client_id, 
+      recipient_id: String(r.client_id),
       kind: accepted ? 'booking_accepted' : 'booking_declined',
       title: accepted ? 'Booking accepted ✓' : 'Booking declined',
       body: accepted
@@ -132,14 +147,20 @@ export default function WorkerBookings() {
       return;
     }
     const r = quoteFor;
-    setRequests((rs) => rs.map((x) => (x.id === r.id ? { ...x, price: amt } : x)));
     try {
-      await fetch(`${BASE_URL}/bookings/${r.id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ user_id: Number(r.client_id), estimated_price: amt })
-      });
-    } catch {}
+      await expectJson(
+        await authFetch(`/bookings/${r.id}`, {
+          method: 'PUT',
+          json: { estimated_price: amt },
+        }),
+        'Could not send the quote',
+      );
+    } catch (e: any) {
+      Alert.alert('Quote not sent', e?.message || 'Could not send the quote. Please try again.');
+      return;
+    }
+
+    setRequests((rs) => rs.map((x) => (x.id === r.id ? { ...x, price: amt } : x)));
 
     addNotification({
       audience: 'user',
@@ -181,7 +202,7 @@ export default function WorkerBookings() {
             filtered.map((r) => (
               <TouchableOpacity key={r.id} style={styles.card} activeOpacity={0.85} onPress={() => openClient(r)}>
                 <View style={styles.leftCol}>
-                  <Avatar uri={r.avatar} name={r.client} size={60} style={styles.avatar as any} />
+                  <Avatar uri={r.avatar} name={r.client} size={60} style={styles.avatar} />
                 </View>
                 <View style={styles.rightCol}>
                   <View style={styles.headerRow}>
@@ -217,7 +238,7 @@ export default function WorkerBookings() {
                         </TouchableOpacity>
                         <TouchableOpacity
                           style={[styles.actionBtn, styles.declineBtn]}
-                          onPress={(e) => { e.stopPropagation?.(); updateStatus(r.id, 'pending'); }}
+                          onPress={(e) => { e.stopPropagation?.(); updateStatus(r.id, 'declined'); }}
                         >
                           <Ionicons name="close" size={13} color="#666" />
                           <Text style={styles.declineText}>Decline</Text>
@@ -267,7 +288,7 @@ export default function WorkerBookings() {
         </View>
       </Modal>
 
-      <WorkerBottomNav currentRoute="requests" />
+      <BottomNav currentRoute="requests" role="worker" />
     </View>
   );
 }

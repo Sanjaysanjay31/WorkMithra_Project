@@ -1,11 +1,20 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from typing import List, Optional, Dict, Any
 from sqlalchemy.orm import Session
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from datetime import datetime
 import database, models, schemas
+from auth import get_current_user
 
 router = APIRouter()
+
+
+def _current_user_id(current: Dict[str, Any]) -> int:
+    try:
+        return int(current["sub"])
+    except (KeyError, ValueError, TypeError):
+        raise HTTPException(status_code=401, detail="Invalid token payload")
 
 
 def _to_dict(r: models.RatingReview, db: Session) -> Dict[str, Any]:
@@ -40,23 +49,71 @@ def _recompute_worker_rating(db: Session, worker_id: int) -> None:
 
 
 @router.post("/")
-def create_review(payload: schemas.RatingReviewBase, db: Session = Depends(database.get_db)):
-    """Create a new review. Updates the worker's aggregate rating."""
+def create_review(
+    payload: schemas.RatingReviewBase,
+    db: Session = Depends(database.get_db),
+    current: Dict[str, Any] = Depends(get_current_user),
+):
+    """Create a new review. The reviewer is always the authenticated user.
+
+    Reviews require a COMPLETED booking between the reviewer and the worker —
+    ratings can't be fabricated without real work. One review per booking."""
     if payload.worker_id is None:
         raise HTTPException(status_code=400, detail="worker_id is required")
     if payload.rating is None or payload.rating < 0 or payload.rating > 5:
         raise HTTPException(status_code=400, detail="rating must be between 0 and 5")
+    # Reviews are written by clients about workers. A worker token must not be
+    # able to create (or collide with) reviews via a same-numbered user id.
+    if current.get("role", "user") != "user":
+        raise HTTPException(status_code=403, detail="Only clients can write reviews")
+
+    reviewer_id = _current_user_id(current)
+
+    worker = db.query(models.Worker).filter(models.Worker.id == payload.worker_id).first()
+    if worker is None:
+        raise HTTPException(status_code=404, detail="Worker not found")
+
+    # Find a completed booking between this reviewer and worker. If the client
+    # supplied a booking_id it must be that one; otherwise any completed
+    # booking between the pair is used.
+    booking_q = db.query(models.Booking).filter(
+        models.Booking.user_id == reviewer_id,
+        models.Booking.worker_id == payload.worker_id,
+        models.Booking.status == "completed",
+    )
+    if payload.booking_id is not None:
+        booking_q = booking_q.filter(models.Booking.id == payload.booking_id)
+    booking = booking_q.first()
+    if booking is None:
+        raise HTTPException(
+            status_code=403,
+            detail="You can only review a worker after a completed booking with them",
+        )
+
+    existing = (
+        db.query(models.RatingReview)
+        .filter(models.RatingReview.booking_id == booking.id)
+        .first()
+    )
+    if existing:
+        raise HTTPException(status_code=400, detail="This booking has already been reviewed")
 
     review = models.RatingReview(
-        booking_id=payload.booking_id,
-        user_id=payload.user_id,
+        booking_id=booking.id,
+        user_id=reviewer_id,
         worker_id=payload.worker_id,
         rating=float(payload.rating),
         review_text=payload.review_text,
         created_at=datetime.utcnow(),
     )
     db.add(review)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # Lost a race on the unique booking_id constraint — the other request
+        # created the review first.
+        db.rollback()
+        raise HTTPException(status_code=409, detail="This booking has already been reviewed")
     db.refresh(review)
     _recompute_worker_rating(db, payload.worker_id)
     return _to_dict(review, db)
@@ -66,8 +123,8 @@ def create_review(payload: schemas.RatingReviewBase, db: Session = Depends(datab
 def list_reviews(
     worker_id: Optional[int] = None,
     user_id: Optional[int] = None,
-    skip: int = 0,
-    limit: int = 50,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=100),
     db: Session = Depends(database.get_db),
 ):
     """List reviews, optionally filtered by worker_id or user_id (latest first)."""
@@ -89,10 +146,19 @@ def get_review(review_id: int, db: Session = Depends(database.get_db)):
 
 
 @router.delete("/{review_id}")
-def delete_review(review_id: int, db: Session = Depends(database.get_db)):
+def delete_review(
+    review_id: int,
+    db: Session = Depends(database.get_db),
+    current: Dict[str, Any] = Depends(get_current_user),
+):
     review = db.query(models.RatingReview).filter(models.RatingReview.id == review_id).first()
     if not review:
         raise HTTPException(status_code=404, detail="Review not found")
+    # Reviews belong to the client who wrote them. Worker tokens are rejected
+    # outright — ids overlap between the users and workers tables, so an
+    # id-only check would let worker #N delete user #N's review.
+    if current.get("role", "user") != "user" or review.user_id != _current_user_id(current):
+        raise HTTPException(status_code=403, detail="You can only delete your own review")
     worker_id = review.worker_id
     db.delete(review)
     db.commit()

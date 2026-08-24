@@ -1,5 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
-import { useRouter } from 'expo-router';
+import { Href, useRouter } from 'expo-router';
 import React from 'react';
 import { Platform, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
@@ -15,7 +15,7 @@ const BAR_BG = '#2a1a4a';
 export default function WorkerBottomNav({ currentRoute }: Props) {
   const router = useRouter();
 
-  const navItems = [
+  const navItems: { id: Props['currentRoute']; label: string; icon: string; route: Href }[] = [
     { id: 'dashboard', label: 'Dashboard', icon: 'grid', route: '/worker_dashboard' },
     { id: 'requests', label: 'Requests', icon: 'mail', route: '/worker_bookings' },
     { id: 'switch_role', label: 'Switch', icon: 'repeat', route: '/login' },
@@ -32,7 +32,7 @@ export default function WorkerBottomNav({ currentRoute }: Props) {
               key={item.id}
               style={styles.navItem}
               activeOpacity={0.7}
-              onPress={() => router.push(item.route as any)}
+              onPress={() => router.push(item.route)}
             >
               <View style={[styles.iconWrap, active && styles.iconWrapActive]}>
                 <Ionicons

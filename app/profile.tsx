@@ -1,6 +1,8 @@
 import Avatar from '@/components/avatar';
 import BottomNav from '@/components/bottom-nav';
+import { authFetch } from '@/lib/api';
 import { pickImageNative, pickImageWeb } from '@/lib/image-picker';
+import { disconnectSocket } from '@/lib/socket';
 import { storage } from '@/lib/storage';
 import { Ionicons } from '@expo/vector-icons';
 import { Stack, useRouter } from 'expo-router';
@@ -17,8 +19,6 @@ import {
     View,
 } from 'react-native';
 
-const DEFAULT_API_URL = Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://127.0.0.1:8000';
-const BASE_URL = process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL;
 const PROFILE_KEY = 'workmithra:profile';
 
 type ProfileForm = {
@@ -48,7 +48,7 @@ export default function ProfilePage() {
   const [confirmPwd, setConfirmPwd] = useState('');
   const [showPwd, setShowPwd] = useState(false);
   const [pwdLoading, setPwdLoading] = useState(false);
-  const [currentUserId, setCurrentUserId] = useState('1');
+  const [currentUserId, setCurrentUserId] = useState('');
 
   useEffect(() => { load(); }, []);
 
@@ -79,7 +79,7 @@ export default function ProfilePage() {
 
     if (!uid) return;
     try {
-      const res = await fetch(`${BASE_URL}/profiles/user/${uid}`);
+      const res = await authFetch(`/profiles/user/${uid}`);
       if (!res.ok) return;
       const u = await res.json();
       const fresh: ProfileForm = {
@@ -103,24 +103,39 @@ export default function ProfilePage() {
   }
 
   async function save() {
+    if (!currentUserId) {
+      Alert.alert('Not logged in', 'Please log in again to save your profile.');
+      return;
+    }
     if (!profile.full_name.trim() || !profile.phone.trim()) {
       Alert.alert('Missing info', 'Name and phone are required.');
       return;
     }
     setSaving(true);
-    try { await storage.set(PROFILE_KEY, JSON.stringify({ ...profile, __uid: currentUserId })); } catch {}
     try {
-      await fetch(`${BASE_URL}/profiles/user/${currentUserId}`, {
+      const res = await authFetch(`/profiles/user/${currentUserId}`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(profile),
+        json: profile,
       });
-    } catch {}
-    setSaving(false);
-    Alert.alert('Saved', 'Your profile has been saved.');
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.detail || `Save failed (${res.status})`);
+      }
+      // Only cache locally after the server confirms the write.
+      await storage.set(PROFILE_KEY, JSON.stringify({ ...profile, __uid: currentUserId }));
+      Alert.alert('Saved', 'Your profile has been saved.');
+    } catch (e: any) {
+      Alert.alert('Save failed', e?.message || 'Could not save your profile. Please try again.');
+    } finally {
+      setSaving(false);
+    }
   }
 
   async function pickAndUploadImage() {
+    if (!currentUserId) {
+      Alert.alert('Not logged in', 'Please log in again to upload a photo.');
+      return;
+    }
     setUploading(true);
     try {
       const fd = new FormData();
@@ -139,7 +154,7 @@ export default function ProfilePage() {
       }
       fd.append('user_id', currentUserId);
       fd.append('role', 'user');
-      const res = await fetch(`${BASE_URL}/upload-profile-image`, { method: 'POST', body: fd });
+      const res = await authFetch('/upload-profile-image', { method: 'POST', body: fd });
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || 'Upload failed');
       const next = { ...profile, profile_image: data.url };
@@ -155,23 +170,27 @@ export default function ProfilePage() {
   async function changePasswordWithCurrent() {
     if (!profile.email.trim()) return Alert.alert('Email needed', 'Please enter your email in the form first.');
     if (!currentPwd || !newPwd) return Alert.alert('Missing fields', 'Enter current and new password.');
-    if (newPwd.length < 6) return Alert.alert('Weak password', 'Use at least 6 characters.');
+    if (newPwd.length < 8) return Alert.alert('Weak password', 'Use at least 8 characters.');
     if (newPwd !== confirmPwd) return Alert.alert('Mismatch', 'New passwords do not match.');
     setPwdLoading(true);
     try {
-      const res = await fetch(`${BASE_URL}/change-password`, {
+      const res = await authFetch('/change-password', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: profile.email, current_password: currentPwd, new_password: newPwd }),
+        json: { email: profile.email, current_password: currentPwd, new_password: newPwd },
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.detail || 'Change failed');
-      // update local auth cache
+      // Never write the new password to storage. If a cached session for this
+      // account carries a stale password field, strip it out.
       try {
         const raw = await storage.get('workmithra:auth');
-        const auth = raw ? JSON.parse(raw) : {};
-        auth.password = newPwd;
-        await storage.set('workmithra:auth', JSON.stringify(auth));
+        if (raw) {
+          const auth = JSON.parse(raw);
+          if (auth && typeof auth === 'object' && 'password' in auth) {
+            delete auth.password;
+            await storage.set('workmithra:auth', JSON.stringify(auth));
+          }
+        }
       } catch {}
       setCurrentPwd(''); setNewPwd(''); setConfirmPwd(''); setShowPwdForm(false);
       Alert.alert('Done', 'Password changed successfully.');
@@ -191,7 +210,7 @@ export default function ProfilePage() {
           {/* Avatar header */}
           <View style={styles.headerBg}>
             <View style={styles.avatarWrap}>
-              <Avatar uri={profile.profile_image} name={profile.full_name} size={130} style={styles.avatar as any} />
+              <Avatar uri={profile.profile_image} name={profile.full_name} size={130} style={styles.avatar} />
               <TouchableOpacity style={styles.cameraBadge} onPress={pickAndUploadImage} activeOpacity={0.85}>
                 {uploading ? (
                   <ActivityIndicator color="#fff" size="small" />
@@ -231,7 +250,9 @@ export default function ProfilePage() {
             <TouchableOpacity
               style={styles.pwdOption}
               onPress={async () => {
+                disconnectSocket();
                 await storage.remove('workmithra:auth');
+                await storage.remove(PROFILE_KEY).catch(() => {});
                 await storage.remove('workmithra:user_profile').catch(() => {});
                 await storage.remove('workmithra:worker_profile').catch(() => {});
                 router.replace('/login');
@@ -251,7 +272,9 @@ export default function ProfilePage() {
               style={styles.pwdOption}
               onPress={async () => {
                 const doLogout = async () => {
+                  disconnectSocket();
                   await storage.remove('workmithra:auth');
+                  await storage.remove(PROFILE_KEY).catch(() => {});
                   await storage.remove('workmithra:user_profile').catch(() => {});
                   await storage.remove('workmithra:worker_profile').catch(() => {});
                   router.replace('/login');

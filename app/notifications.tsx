@@ -1,5 +1,4 @@
 import BottomNav from '@/components/bottom-nav';
-import WorkerBottomNav from '@/components/worker-bottom-nav';
 import { clearAll, listNotifications, markAllRead, markRead, Notification, NotifAudience } from '@/lib/notifications';
 import { Ionicons } from '@expo/vector-icons';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
@@ -93,7 +92,7 @@ export default function NotificationsPage() {
             <View style={styles.empty}>
               <Ionicons name="notifications-outline" size={42} color="#ccc" />
               <Text style={styles.emptyText}>No notifications yet</Text>
-              <Text style={styles.emptySub}>You'll see booking updates and messages here.</Text>
+              <Text style={styles.emptySub}>You&apos;ll see booking updates and messages here.</Text>
             </View>
           ) : (
             items.map((n) => {
@@ -118,8 +117,8 @@ export default function NotificationsPage() {
         </ScrollView>
       </View>
       {audience === 'worker'
-        ? <WorkerBottomNav currentRoute="requests" />
-        : <BottomNav currentRoute="home" />}
+        ? <BottomNav currentRoute="requests" role="worker" />
+        : <BottomNav currentRoute="home" role="user" />}
     </View>
   );
 }

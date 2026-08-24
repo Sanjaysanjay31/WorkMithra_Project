@@ -1,15 +1,21 @@
 from fastapi import APIRouter, Depends, HTTPException
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from sqlalchemy.orm import Session
 from datetime import datetime
 import database, models, schemas
+from auth import get_current_user, require_role
 
 router = APIRouter()
 
 
 @router.post("/", response_model=schemas.ServiceResponse)
-def create_service(payload: schemas.ServiceCreate, db: Session = Depends(database.get_db)):
-    """Create a new service (e.g. Plumbing, Electrician)."""
+def create_service(
+    payload: schemas.ServiceCreate,
+    db: Session = Depends(database.get_db),
+    current: Dict[str, Any] = Depends(require_role("admin")),
+):
+    """Create a new service (e.g. Plumbing, Electrician). Admin only — the
+    service catalog is global infrastructure, not user content."""
     if not payload.service_name or not payload.service_name.strip():
         raise HTTPException(status_code=400, detail="service_name is required")
     s = models.Service(
@@ -49,7 +55,13 @@ def get_service(service_id: int, db: Session = Depends(database.get_db)):
 
 
 @router.put("/{service_id}", response_model=schemas.ServiceResponse)
-def update_service(service_id: int, payload: schemas.ServiceBase, db: Session = Depends(database.get_db)):
+def update_service(
+    service_id: int,
+    payload: schemas.ServiceBase,
+    db: Session = Depends(database.get_db),
+    current: Dict[str, Any] = Depends(require_role("admin")),
+):
+    """Update a service. Admin only."""
     s = db.query(models.Service).filter(models.Service.id == service_id).first()
     if not s:
         raise HTTPException(status_code=404, detail="Service not found")
@@ -64,7 +76,12 @@ def update_service(service_id: int, payload: schemas.ServiceBase, db: Session = 
 
 
 @router.delete("/{service_id}")
-def delete_service(service_id: int, db: Session = Depends(database.get_db)):
+def delete_service(
+    service_id: int,
+    db: Session = Depends(database.get_db),
+    current: Dict[str, Any] = Depends(require_role("admin")),
+):
+    """Delete a service. Admin only."""
     s = db.query(models.Service).filter(models.Service.id == service_id).first()
     if not s:
         raise HTTPException(status_code=404, detail="Service not found")

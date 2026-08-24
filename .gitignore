@@ -47,3 +47,19 @@ backend/.env
 
 # Frontend API keys
 .env
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+venv/
+.venv/
+env/
+*.egg-info/
+
+# IDE
+.idea/
+.vscode/
+
+# ZCode session artifacts
+.zcode/

@@ -58,7 +58,8 @@
           }
         }
       ],
-      "@react-native-community/datetimepicker"
+      "@react-native-community/datetimepicker",
+      "expo-secure-store"
     ],
     "experiments": {
       "typedRoutes": true,
@@ -68,8 +69,7 @@
       "router": {},
       "eas": {
         "projectId": "0bbd76ca-52d8-409f-ae0e-05bc38b227ee"
-      },
-      "EXPO_PUBLIC_API_URL": "https://workmithra.onrender.com"
+      }
     },
     "owner": "sanjaysanjay31"
   }

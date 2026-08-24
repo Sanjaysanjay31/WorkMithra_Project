@@ -160,8 +160,13 @@ def _trim_assistant_reply(text: str) -> str:
     if valid_positions:
         first_line = first_line[:min(valid_positions)].strip()
 
-    if len(first_line) > 80:
-        first_line = first_line[:77].rstrip() + "..."
+    # Cap length at a word boundary so we never slice a Telugu/other word mid-way.
+    if len(first_line) > 160:
+        cut = first_line[:157].rstrip()
+        last_space = cut.rfind(" ")
+        if last_space > 80:
+            cut = cut[:last_space]
+        first_line = cut.rstrip() + "..."
     return first_line.strip()
 
 
@@ -203,15 +208,17 @@ def _sarvam_chat(messages: list, max_tokens: int = 2048) -> str:
     content = (msg.get("content") or "").strip()
     if content:
         return _trim_assistant_reply(content)
-    reasoning = (msg.get("reasoning_content") or "").strip()
-    clean_reasoning = _clean_reasoning_fallback(reasoning)
-    if clean_reasoning:
-        return _trim_assistant_reply(clean_reasoning)
+    # Never return reasoning_content as the answer — it is the model's internal
+    # (usually English) analysis, not a user-facing reply. Fail instead so the
+    # caller can fall back to another provider or a polite error message.
     raise RuntimeError("Sarvam chat returned empty content")
 
 
 def _hf_chat(messages: list, max_tokens: int = 512) -> str:
-    """Fallback: HF Inference Providers router, multiple provider attempts."""
+    """Fallback: HF Inference Providers router, a couple of provider attempts.
+
+    Bounded tightly (2 candidates x 1 attempt x 30s) so a degraded provider
+    can't hold a worker thread for minutes."""
     if not HF_TOKEN:
         raise RuntimeError("HF_TOKEN not set")
     headers = {"Authorization": f"Bearer {HF_TOKEN}", "Content-Type": "application/json"}
@@ -219,32 +226,28 @@ def _hf_chat(messages: list, max_tokens: int = 512) -> str:
     candidates = [
         (HF_MODEL, "https://router.huggingface.co/v1/chat/completions"),
         ("meta-llama/Llama-3.1-8B-Instruct:novita", "https://router.huggingface.co/v1/chat/completions"),
-        ("meta-llama/Meta-Llama-3-8B-Instruct", "https://router.huggingface.co/v1/chat/completions"),
-        ("Qwen/Qwen2.5-7B-Instruct", "https://router.huggingface.co/v1/chat/completions"),
     ]
     last_err = ""
     import time
     for model, url in candidates:
-        for _ in range(2):
-            try:
-                r = requests.post(
-                    url, headers=headers,
-                    json={"model": model, "messages": messages, "max_tokens": max_tokens, "temperature": 0.3},
-                    timeout=60,
-                )
-                if r.status_code == 503:
-                    time.sleep(3); continue
-                if r.status_code >= 400:
-                    last_err = f"{model} -> {r.status_code} {r.text[:200]}"
-                    break
-                data = r.json()
-                if "choices" in data and data["choices"]:
-                    return data["choices"][0]["message"]["content"]
-                last_err = f"{model} -> unexpected: {str(data)[:200]}"
-                break
-            except Exception as e:
-                last_err = f"{model} -> {e}"
-                break
+        try:
+            r = requests.post(
+                url, headers=headers,
+                json={"model": model, "messages": messages, "max_tokens": max_tokens, "temperature": 0.3},
+                timeout=30,
+            )
+            if r.status_code == 503:
+                time.sleep(1); continue
+            if r.status_code >= 400:
+                last_err = f"{model} -> {r.status_code} {r.text[:200]}"
+                continue
+            data = r.json()
+            if "choices" in data and data["choices"]:
+                return data["choices"][0]["message"]["content"]
+            last_err = f"{model} -> unexpected: {str(data)[:200]}"
+        except Exception as e:
+            last_err = f"{model} -> {e}"
+            continue
     raise RuntimeError(f"HF chat failed. Last: {last_err}")
 
 

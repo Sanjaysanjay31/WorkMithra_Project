@@ -1,15 +1,17 @@
 import Avatar from '@/components/avatar';
 import BottomNav from '@/components/bottom-nav';
-import { formatBookingDateTime } from '@/lib/format';
+import { authFetch, expectJson } from '@/lib/api';
+import { BookingStatus, isActiveStatus, normalizeBookingStatus } from '@/lib/booking-status';
+import { formatBookingDateTime, isBookingDateTimePast } from '@/lib/format';
 import { platformShadow } from '@/lib/shadow';
 import { storage } from '@/lib/storage';
+import { BookingResponse, WorkerBrief } from '@/lib/types';
 import { Stack, useRouter } from 'expo-router';
 import React, { useEffect, useState } from 'react';
 import {
     ActivityIndicator,
     Alert,
     Modal,
-    Platform,
     ScrollView,
     StyleSheet,
     Text,
@@ -18,33 +20,29 @@ import {
     View
 } from 'react-native';
 
-const DEFAULT_API_URL = Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://127.0.0.1:8000';
-const BASE_URL = process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL;
-
 type Tab = 'present' | 'past';
-type Status = 'upcoming' | 'success' | 'rejected';
-
-type Worker = {
-  id: number;
-  full_name?: string;
-  skill?: string;
-  hourly_rate?: number;
-  rating?: number;
-  profile_image?: string;
-};
 
 type Booking = {
   id: string;
   user_id: number;
-  worker: Worker;
-  status: Status;
+  worker: WorkerBrief;
+  status: BookingStatus;
   amount: number;
   date: string;
 };
 
-function statusColor(s: Status) {
-  if (s === 'success') return { bg: '#dcfce7', fg: '#166534', label: '✓ Success' };
+function statusColor(s: BookingStatus, isPast: boolean) {
+  if (s === 'completed') return { bg: '#dcfce7', fg: '#166534', label: '✓ Completed' };
   if (s === 'rejected') return { bg: '#fee2e2', fg: '#991b1b', label: '✗ Rejected' };
+  if (isPast) {
+    // In the Past tab the slot has already gone, so describe the OUTCOME rather
+    // than a still-open state: a request nobody accepted is "Not accepted", and
+    // an accepted job that was never finished is "Not completed". "Pending" and
+    // "Upcoming" only make sense for future bookings in the Present tab.
+    if (s === 'pending') return { bg: '#f3f4f6', fg: '#6b7280', label: '✗ Not accepted' };
+    return { bg: '#ffedd5', fg: '#9a3412', label: '⏱ Not completed' };
+  }
+  if (s === 'pending') return { bg: '#fef3c7', fg: '#92400e', label: '⏳ Pending' };
   return { bg: '#dbeafe', fg: '#1e40af', label: '⏳ Upcoming' };
 }
 
@@ -53,9 +51,7 @@ function statusColor(s: Status) {
 export default function BookingsPage() {
   const router = useRouter();
   const [tab, setTab] = useState<Tab>('present');
-  const [workers, setWorkers] = useState<Worker[]>([]);
   const [loading, setLoading] = useState(true);
-  const [currentUserId, setCurrentUserId] = useState(0);
 
   const [present, setPresent] = useState<Booking[]>([]);
   const [past, setPast] = useState<Booking[]>([]);
@@ -70,17 +66,21 @@ export default function BookingsPage() {
       return;
     }
     const b = priceFor;
-    setPresent((rs) => rs.map((x) => (x.id === b.id ? { ...x, amount: amt } : x)));
     try {
-      await fetch(`${BASE_URL}/bookings/${b.id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ user_id: b.user_id, estimated_price: amt })
-      });
-    } catch {}
-    setPriceFor(null);
-    setPriceAmount('');
-    Alert.alert('Saved', `Agreed price set to ₹${amt}.`);
+      await expectJson(
+        await authFetch(`/bookings/${b.id}`, {
+          method: 'PUT',
+          json: { estimated_price: amt },
+        }),
+        'Could not save the agreed price',
+      );
+      setPresent((rs) => rs.map((x) => (x.id === b.id ? { ...x, amount: amt } : x)));
+      setPriceFor(null);
+      setPriceAmount('');
+      Alert.alert('Saved', `Agreed price set to ₹${amt}.`);
+    } catch (e: any) {
+      Alert.alert('Price not saved', e?.message || 'Could not save the agreed price. Please try again.');
+    }
   }
 
   useEffect(() => {
@@ -91,43 +91,48 @@ export default function BookingsPage() {
         if (authRaw) {
           const auth = JSON.parse(authRaw);
           if (auth.id) uid = Number(auth.id);
-          setCurrentUserId(uid);
         }
       } catch {}
       try {
-        const workersRes = await fetch(`${BASE_URL}/workers`);
-        const workersList: Worker[] = workersRes.ok ? await workersRes.json() : [];
-        setWorkers(workersList);
-
-        const bookingsRes = await fetch(`${BASE_URL}/bookings`);
-        const bookingsList = bookingsRes.ok ? await bookingsRes.json() : [];
+        // The backend embeds worker details on each booking, so one request is enough.
+        const bookingsList: BookingResponse[] = await expectJson(
+          await authFetch('/bookings'),
+          'Could not load your bookings',
+        );
 
         const realPresent: Booking[] = [];
         const realPast: Booking[] = [];
 
-        bookingsList.forEach((b: any) => {
+        bookingsList.forEach((b) => {
           if (b.user_id === uid || b.worker_id === uid) {
-             const w = workersList.find(wk => wk.id === b.worker_id) || { id: b.worker_id || 0 };
+             const w: WorkerBrief = b.worker || { id: b.worker_id || 0 };
+             const status = normalizeBookingStatus(b.status);
              const bookingItem: Booking = {
                id: String(b.id),
                user_id: b.user_id,
-               worker: w as Worker,
-               status: b.status,
+               worker: w,
+               status,
                amount: b.estimated_price || b.final_price || 0,
                date: formatBookingDateTime(b.booking_date, b.booking_time) || 'Date not set',
              };
-             if (b.status === 'upcoming' || b.status === 'pending') {
-               realPresent.push(bookingItem);
-             } else {
+             // Present = an upcoming slot that hasn't happened yet.
+             // Past = the scheduled time has passed OR it reached a terminal
+             // state. We keep the real status label (pending/upcoming/rejected/
+             // completed) so a never-accepted booking still shows as Pending.
+             const isPast = isBookingDateTimePast(b.booking_date, b.booking_time) || !isActiveStatus(status);
+             if (isPast) {
                realPast.push(bookingItem);
+             } else {
+               realPresent.push(bookingItem);
              }
           }
         });
 
         setPresent(realPresent);
         setPast(realPast);
-      } catch (e) {
+      } catch (e: any) {
         console.warn('Failed to fetch bookings', e);
+        Alert.alert('Bookings', e?.message || 'Could not load your bookings. Pull down or reopen to retry.');
       } finally {
         setLoading(false);
       }
@@ -137,7 +142,7 @@ export default function BookingsPage() {
   const data = tab === 'present' ? present : past;
 
   const renderCard = (b: Booking) => {
-    const sc = statusColor(b.status);
+    const sc = statusColor(b.status, tab === 'past');
     return (
       <TouchableOpacity
         key={b.id}
@@ -146,7 +151,7 @@ export default function BookingsPage() {
         onPress={() => router.push({ pathname: '/worker_info', params: { id: String(b.worker.id) } })}
       >
         <View style={styles.leftCol}>
-          <Avatar uri={b.worker.profile_image} name={b.worker.full_name} size={70} style={styles.avatar as any} />
+          <Avatar uri={b.worker.profile_image} name={b.worker.full_name} size={70} style={styles.avatar} />
         </View>
         <View style={styles.rightCol}>
           <Text style={styles.name} numberOfLines={1}>{b.worker.full_name || 'Worker'}</Text>
@@ -159,8 +164,8 @@ export default function BookingsPage() {
           </View>
           <View style={styles.metaRow}>
             <Text style={styles.date}>{b.date}</Text>
-            <Text style={[styles.amount, b.amount <= 0 && { color: '#FF9800', fontSize: 11 }]}>
-              {b.status === 'rejected' ? '—' : (b.amount > 0 ? `₹${b.amount}` : 'Quote pending')}
+            <Text style={[styles.amount, b.amount <= 0 && tab === 'present' && { color: '#FF9800', fontSize: 11 }]}>
+              {b.status === 'rejected' ? '—' : b.amount > 0 ? `₹${b.amount}` : tab === 'past' ? '—' : 'Quote pending'}
             </Text>
           </View>
           {tab === 'present' && b.status !== 'rejected' && (

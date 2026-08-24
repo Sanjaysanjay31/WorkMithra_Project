@@ -1,10 +1,8 @@
 import React, { useEffect, useRef } from 'react';
-import { StyleSheet, View, Dimensions, Image, Animated, Easing, TouchableOpacity, Text } from 'react-native';
+import { StyleSheet, View, Animated, Easing, TouchableOpacity, Text } from 'react-native';
 import { platformShadow } from '@/lib/shadow';
 import { ThemedText } from '@/components/themed-text';
 import { useRouter } from 'expo-router';
-
-const { width, height } = Dimensions.get('window');
 
 export default function LandingScreen() {
   const router = useRouter();

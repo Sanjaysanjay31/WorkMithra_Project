@@ -1,16 +1,16 @@
 import React from 'react';
-import { Image, StyleSheet, Text, View, ViewStyle } from 'react-native';
+import { Image, ImageStyle, StyleProp, StyleSheet, Text, View } from 'react-native';
 
 const PALETTE = ['#6F42C1', '#10b981', '#FF6B6B', '#0284c7', '#FF9800', '#0ea5e9', '#e11d48', '#7c3aed'];
 
-function initials(name?: string): string {
+function initials(name?: string | null): string {
   if (!name || !name.trim()) return '?';
   const parts = name.trim().split(/\s+/);
   if (parts.length === 1) return parts[0].charAt(0).toUpperCase();
   return (parts[0].charAt(0) + parts[parts.length - 1].charAt(0)).toUpperCase();
 }
 
-function colorFor(name?: string): string {
+function colorFor(name?: string | null): string {
   const s = name || '';
   let h = 0;
   for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
@@ -25,9 +25,9 @@ export default function Avatar({
   textColor = '#fff',
 }: {
   uri?: string | null;
-  name?: string;
+  name?: string | null;
   size?: number;
-  style?: ViewStyle;
+  style?: StyleProp<ImageStyle>;
   textColor?: string;
 }) {
   const radius = size / 2;
@@ -37,7 +37,7 @@ export default function Avatar({
     return (
       <Image
         source={{ uri }}
-        style={[{ width: size, height: size, borderRadius: radius, backgroundColor: '#e9ecef' }, style as any]}
+        style={[{ width: size, height: size, borderRadius: radius, backgroundColor: '#e9ecef' }, style]}
       />
     );
   }

@@ -1,6 +1,11 @@
 """
 Socket.IO Manager for WorkMithra
-Manages connections, rooms, and user tracking for realtime communication
+Manages connections, rooms, and user tracking for realtime communication.
+
+Identity model: users and workers live in SEPARATE tables with overlapping
+numeric ids, so a bare user_id is ambiguous. Every connection is therefore
+keyed by (role, user_id) — "user:5" and "worker:5" are different people.
+Private Socket.IO rooms follow the same scheme: "user_5" / "worker_5".
 """
 
 from typing import Dict, List, Set, Optional, Tuple
@@ -9,130 +14,122 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+VALID_ROLES = ("user", "worker")
+
+
+def _key(role: str, user_id: int) -> str:
+    return f"{role}:{int(user_id)}"
+
 
 class SocketManager:
     """Manages Socket.IO connections, rooms, and user tracking"""
-    
+
     def __init__(self):
-        # Map of user_id -> set of socket_ids connected
-        self.user_connections: Dict[int, Set[str]] = {}
-        
-        # Map of socket_id -> user_id
-        self.socket_to_user: Dict[str, int] = {}
-        
-        # Map of conversation_room -> {user_id1, user_id2}
-        self.conversation_rooms: Dict[str, Set[int]] = {}
-        
-        # Map of user_id -> online status
-        self.user_status: Dict[int, str] = {}
-        
-        # Map of booking_id -> {client_id, worker_id}
-        self.booking_rooms: Dict[int, Set[int]] = {}
-        
-        # Track last activity timestamp for users
-        self.last_activity: Dict[int, datetime] = {}
+        # Map of identity key ("role:user_id") -> set of socket_ids connected
+        self.user_connections: Dict[str, Set[str]] = {}
 
-    def add_connection(self, user_id: int, socket_id: str) -> None:
+        # Map of socket_id -> identity key
+        self.socket_to_user: Dict[str, str] = {}
+
+        # Map of identity key -> online status
+        self.user_status: Dict[str, str] = {}
+
+        # Track last activity timestamp per identity
+        self.last_activity: Dict[str, datetime] = {}
+
+    def add_connection(self, user_id: int, socket_id: str, role: str = "user") -> None:
         """Register a new socket connection for a user"""
-        if user_id not in self.user_connections:
-            self.user_connections[user_id] = set()
-        
-        self.user_connections[user_id].add(socket_id)
-        self.socket_to_user[socket_id] = user_id
-        self.user_status[user_id] = "online"
-        self.last_activity[user_id] = datetime.utcnow()
-        
-        logger.info(f"User {user_id} connected with socket {socket_id}")
+        if role not in VALID_ROLES:
+            role = "user"
+        key = _key(role, user_id)
+        if key not in self.user_connections:
+            self.user_connections[key] = set()
 
-    def remove_connection(self, socket_id: str) -> Optional[int]:
-        """Remove a socket connection and return the user_id"""
-        user_id = self.socket_to_user.pop(socket_id, None)
-        
-        if user_id is not None:
-            if user_id in self.user_connections:
-                self.user_connections[user_id].discard(socket_id)
-                
-                # If no more connections for this user, mark as offline
-                if not self.user_connections[user_id]:
-                    del self.user_connections[user_id]
-                    self.user_status[user_id] = "offline"
-                    logger.info(f"User {user_id} disconnected - now offline")
-                else:
-                    logger.info(f"User {user_id} socket {socket_id} disconnected but has other connections")
-            
-            return user_id
-        
-        return None
+        self.user_connections[key].add(socket_id)
+        self.socket_to_user[socket_id] = key
+        self.user_status[key] = "online"
+        self.last_activity[key] = datetime.utcnow()
 
-    def get_user_sockets(self, user_id: int) -> List[str]:
+        logger.info(f"{key} connected with socket {socket_id}")
+
+    def remove_connection(self, socket_id: str) -> Optional[Tuple[int, str]]:
+        """Remove a socket connection.
+
+        Returns (user_id, role) ONLY when this was the user's last socket —
+        i.e. the user actually went offline. Returns None when the user still
+        has other live sockets, so callers don't broadcast a false
+        'user_offline'."""
+        key = self.socket_to_user.pop(socket_id, None)
+        if key is None:
+            return None
+
+        sockets = self.user_connections.get(key)
+        if sockets is not None:
+            sockets.discard(socket_id)
+            if sockets:
+                logger.info(f"{key} socket {socket_id} disconnected but has other connections")
+                return None
+            # Last socket gone — user is offline. Clean up all state so the
+            # dicts don't grow without bound.
+            del self.user_connections[key]
+            self.user_status.pop(key, None)
+            self.last_activity.pop(key, None)
+            logger.info(f"{key} disconnected - now offline")
+
+        role, _, uid = key.partition(":")
+        try:
+            return int(uid), role
+        except ValueError:
+            return None
+
+    def get_user_sockets(self, user_id: int, role: str = "user") -> List[str]:
         """Get all socket IDs connected to a user"""
-        return list(self.user_connections.get(user_id, set()))
+        return list(self.user_connections.get(_key(role, user_id), set()))
 
-    def is_user_online(self, user_id: int) -> bool:
+    def is_user_online(self, user_id: int, role: str = "user") -> bool:
         """Check if a user is online"""
-        return user_id in self.user_connections and len(self.user_connections[user_id]) > 0
+        return bool(self.user_connections.get(_key(role, user_id)))
 
-    def get_user_status(self, user_id: int) -> str:
-        """Get user's current status (online/offline)"""
-        return self.user_status.get(user_id, "offline")
+    def get_user_status(self, user_id: int, role: str = "user") -> str:
+        """Get user's current status (offline when not connected)"""
+        return self.user_status.get(_key(role, user_id), "offline")
 
-    def set_user_status(self, user_id: int, status: str) -> None:
+    def set_user_status(self, user_id: int, status: str, role: str = "user") -> None:
         """Set user's status"""
-        self.user_status[user_id] = status
-        self.last_activity[user_id] = datetime.utcnow()
+        key = _key(role, user_id)
+        if key in self.user_connections:
+            self.user_status[key] = status
+            self.last_activity[key] = datetime.utcnow()
 
-    def create_conversation_room(self, user_id_1: int, user_id_2: int) -> str:
-        """Create or get a conversation room between two users"""
-        # Sort IDs to ensure consistent room naming
-        room_id = f"conv_{min(user_id_1, user_id_2)}_{max(user_id_1, user_id_2)}"
-        
-        if room_id not in self.conversation_rooms:
-            self.conversation_rooms[room_id] = {user_id_1, user_id_2}
-        
-        return room_id
+    def get_online_users(self) -> List[Tuple[int, str]]:
+        """Get list of all online identities as (user_id, role) tuples"""
+        out: List[Tuple[int, str]] = []
+        for key in self.user_connections.keys():
+            role, _, uid = key.partition(":")
+            try:
+                out.append((int(uid), role))
+            except ValueError:
+                continue
+        return out
 
-    def create_booking_room(self, booking_id: int, client_id: int, worker_id: int) -> str:
-        """Create or get a booking room"""
-        room_id = f"booking_{booking_id}"
-        
-        if room_id not in self.booking_rooms:
-            self.booking_rooms[room_id] = {client_id, worker_id}
-        
-        return room_id
-
-    def get_booking_room(self, booking_id: int) -> str:
-        """Get the room ID for a booking"""
-        return f"booking_{booking_id}"
-
-    def get_booking_participants(self, booking_id: int) -> Optional[Set[int]]:
-        """Get the participant IDs for a booking"""
-        room_id = f"booking_{booking_id}"
-        return self.booking_rooms.get(room_id)
-
-    def get_conversation_participants(self, user_id_1: int, user_id_2: int) -> Optional[Set[int]]:
-        """Get participants in a conversation"""
-        room_id = f"conv_{min(user_id_1, user_id_2)}_{max(user_id_1, user_id_2)}"
-        return self.conversation_rooms.get(room_id)
-
-    def get_online_users(self) -> List[int]:
-        """Get list of all online users"""
-        return list(self.user_connections.keys())
-
-    def get_user_for_socket(self, socket_id: str) -> Optional[int]:
-        """Get user ID for a socket"""
-        return self.socket_to_user.get(socket_id)
+    def get_user_for_socket(self, socket_id: str) -> Optional[Tuple[int, str]]:
+        """Get (user_id, role) for a socket, or None if unauthenticated"""
+        key = self.socket_to_user.get(socket_id)
+        if key is None:
+            return None
+        role, _, uid = key.partition(":")
+        try:
+            return int(uid), role
+        except ValueError:
+            return None
 
     def get_stats(self) -> dict:
         """Get connection statistics"""
         total_connections = sum(len(sockets) for sockets in self.user_connections.values())
-        online_users = len([u for u in self.user_status.values() if u == "online"])
-        
         return {
             "total_online_users": len(self.user_connections),
             "total_connections": total_connections,
-            "online_users": online_users,
-            "conversation_rooms": len(self.conversation_rooms),
-            "booking_rooms": len(self.booking_rooms),
+            "online_users": total_connections,
         }
 
 

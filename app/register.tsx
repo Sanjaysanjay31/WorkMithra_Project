@@ -1,5 +1,6 @@
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
+import { isValidationErrors, registerRequest, sendOtp, verifyOtp } from '@/lib/auth-api';
 import { platformNoShadow, platformShadow } from '@/lib/shadow';
 import { storage } from '@/lib/storage';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
@@ -7,7 +8,6 @@ import { Stack, useRouter } from 'expo-router';
 import React, { useState } from 'react';
 import {
     ActivityIndicator,
-    Dimensions,
     KeyboardAvoidingView,
     Platform,
     ScrollView,
@@ -18,10 +18,14 @@ import {
     View
 } from 'react-native';
 
-const { width } = Dimensions.get('window');
-// Use 10.0.2.2 for Android emulator to reach localhost on host machine
-const DEFAULT_API_URL = Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://127.0.0.1:8000';
-const BASE_URL = process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL;
+type FieldErrors = {
+  name: string;
+  phone: string;
+  email: string;
+  otp: string;
+  password: string;
+  confirmPassword: string;
+};
 
 export default function RegisterScreen() {
   const router = useRouter();
@@ -34,7 +38,7 @@ export default function RegisterScreen() {
     password: '',
     confirmPassword: '',
   });
-  const [errors, setErrors] = useState({
+  const [errors, setErrors] = useState<FieldErrors>({
     name: '',
     phone: '',
     email: '',
@@ -58,22 +62,15 @@ export default function RegisterScreen() {
     setLoading(true);
     setMessage({ type: '', text: '' });
     try {
-      console.log(`Sending OTP via: ${BASE_URL}/send-otp`);
-      const res = await fetch(`${BASE_URL}/send-otp`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: formData.email }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || 'Failed to send OTP');
+      const data = await sendOtp(formData.email);
       setIsOtpSent(true);
       setMessage({ type: 'success', text: data.message || 'OTP sent to your email' });
       setErrors(prev => ({ ...prev, email: '' }));
-      setLoading(false);
     } catch (error: any) {
+      setMessage({ type: 'error', text: error?.message || 'Failed to send OTP' });
+      setErrors(prev => ({ ...prev, email: error?.message || 'Failed to send OTP' }));
+    } finally {
       setLoading(false);
-      setMessage({ type: 'error', text: `Connection Error: ${error.message}` });
-      setErrors(prev => ({ ...prev, email: error.message }));
     }
   };
 
@@ -85,21 +82,15 @@ export default function RegisterScreen() {
     setLoading(true);
     setMessage({ type: '', text: '' });
     try {
-      const res = await fetch(`${BASE_URL}/verify-otp`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: formData.email, otp: formData.otp }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || 'OTP verification failed');
+      const data = await verifyOtp(formData.email, formData.otp);
       setIsOtpVerified(true);
       setMessage({ type: 'success', text: data.message || 'OTP verified successfully' });
       setErrors(prev => ({ ...prev, otp: '' }));
-      setLoading(false);
     } catch (error: any) {
+      setMessage({ type: 'error', text: error?.message || 'OTP verification failed' });
+      setErrors(prev => ({ ...prev, otp: error?.message || 'OTP verification failed' }));
+    } finally {
       setLoading(false);
-      setMessage({ type: 'error', text: `Error: ${error.message}` });
-      setErrors(prev => ({ ...prev, otp: error.message }));
     }
   };
 
@@ -116,64 +107,51 @@ export default function RegisterScreen() {
     setMessage({ type: '', text: '' });
     try {
       setErrors({ name: '', phone: '', email: '', otp: '', password: '', confirmPassword: '' });
-      const payload = {
+      await registerRequest({
         full_name: formData.name,
         phone: formData.phone,
         email: formData.email,
         password: formData.password,
         role: role,
-      };
-      console.log(`Registering via: ${BASE_URL}/register`);
-      const res = await fetch(`${BASE_URL}/register`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
       });
-      const data = await res.json();
-      if (!res.ok) {
-        // handle validation errors from FastAPI (422)
-        if (res.status === 422 && data && Array.isArray(data.detail)) {
-          const fieldErrors: any = { name: '', phone: '', email: '', otp: '', password: '', confirmPassword: '' };
-          data.detail.forEach((err: any) => {
-            const loc = err.loc || [];
-            const field = loc[loc.length - 1];
-            // map backend field names to frontend fields
-            if (field === 'full_name') fieldErrors.name = err.msg;
-            else if (field === 'phone' || field === 'phone_number') fieldErrors.phone = err.msg;
-            else if (field === 'email') fieldErrors.email = err.msg;
-            else if (field === 'password') fieldErrors.password = err.msg;
-            else fieldErrors.name = fieldErrors.name || err.msg;
-          });
-          setErrors(fieldErrors);
-          setMessage({ type: 'error', text: 'Please fix the highlighted fields' });
-          setLoading(false);
-          return;
-        }
-        throw new Error(data.detail || 'Registration failed');
-      }
-      setLoading(false);
       await persistRegistration();
       setMessage({ type: 'success', text: 'Registration successful!' });
       setTimeout(() => {
         router.replace('/login');
       }, 1500);
     } catch (error: any) {
+      // Map FastAPI 422 validation errors to per-field messages.
+      const detail: unknown = error?.detail;
+      if (error?.name === 'AuthApiError' && error.status === 422 && isValidationErrors(detail)) {
+        const fieldErrors: FieldErrors = { name: '', phone: '', email: '', otp: '', password: '', confirmPassword: '' };
+        detail.forEach((err) => {
+          const loc = err.loc || [];
+          const field = loc[loc.length - 1];
+          // map backend field names to frontend fields
+          if (field === 'full_name') fieldErrors.name = err.msg;
+          else if (field === 'phone' || field === 'phone_number') fieldErrors.phone = err.msg;
+          else if (field === 'email') fieldErrors.email = err.msg;
+          else if (field === 'password') fieldErrors.password = err.msg;
+          else fieldErrors.name = fieldErrors.name || err.msg;
+        });
+        setErrors(fieldErrors);
+        setMessage({ type: 'error', text: 'Please fix the highlighted fields' });
+        return;
+      }
+      // No offline fallback: a registration that never reached the server is
+      // not a real account, and login requires the server. Surface the error.
+      setMessage({ type: 'error', text: error?.message || 'Registration failed. Please check your connection and try again.' });
+    } finally {
       setLoading(false);
-      // Backend unreachable — still save locally so the user can log in
-      await persistRegistration();
-      setMessage({ type: 'success', text: 'Registered (offline). You can now log in.' });
-      setTimeout(() => router.replace('/login'), 1200);
     }
   };
 
   async function persistRegistration() {
     try {
-      await storage.set('workmithra:auth', JSON.stringify({
-        phone: formData.phone,
-        email: formData.email,
-        password: formData.password,
-        name: formData.name,
-      }));
+      // Prefill the profile form for convenience. NEVER persist the password —
+      // credentials belong only in the backend. The session token is issued at
+      // login and stored under workmithra:auth by the login screen, so we don't
+      // write that key here (there is no id/token yet at registration).
       await storage.set('workmithra:profile', JSON.stringify({
         full_name: formData.name,
         phone: formData.phone,
@@ -278,16 +256,21 @@ export default function RegisterScreen() {
                       autoCapitalize="none"
                       value={formData.email}
                       editable={!isOtpVerified}
-                      onChangeText={(text) => setFormData({ ...formData, email: text })}
+                      onChangeText={(text) => {
+                        // Editing the email invalidates any OTP already sent to
+                        // the previous address — force the user to request a new one.
+                        setFormData({ ...formData, email: text, otp: '' });
+                        if (isOtpSent) setIsOtpSent(false);
+                      }}
                     />
                   </View>
                   {!isOtpVerified && (
                     <TouchableOpacity 
                       style={[styles.otpButton, isOtpSent && styles.otpButtonSent]} 
                       onPress={handleSendOtp} 
-                      disabled={loading || isOtpSent}
+                      disabled={loading}
                     >
-                      <Text style={styles.otpButtonText}>{loading ? '...' : (isOtpSent ? 'Sent' : 'Get OTP')}</Text>
+                      <Text style={styles.otpButtonText}>{loading ? '...' : (isOtpSent ? 'Resend' : 'Get OTP')}</Text>
                     </TouchableOpacity>
                   )}
                   {isOtpVerified && (

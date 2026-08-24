@@ -1,13 +1,14 @@
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Body
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Body, Depends
 from fastapi.responses import Response
 from typing import Optional, Dict, Any
 from services import ai as ai_svc
+from auth import get_current_user
 
 router = APIRouter()
 
 
 @router.post("/tts")
-def tts(payload: Dict[str, Any] = Body(...)):
+def tts(payload: Dict[str, Any] = Body(...), current: Dict[str, Any] = Depends(get_current_user)):
     text = (payload.get("text") or "").strip()
     target = payload.get("target_lang") or "en-IN"
     if not text:
@@ -20,7 +21,7 @@ def tts(payload: Dict[str, Any] = Body(...)):
 
 
 @router.post("/stt")
-async def stt(file: UploadFile = File(...), lang: str = Form("unknown")):
+async def stt(file: UploadFile = File(...), lang: str = Form("unknown"), current: Dict[str, Any] = Depends(get_current_user)):
     try:
         audio_bytes = await file.read()
         result = ai_svc.sarvam_stt(audio_bytes, filename=file.filename or "audio.wav", lang=lang)
@@ -30,7 +31,7 @@ async def stt(file: UploadFile = File(...), lang: str = Form("unknown")):
 
 
 @router.post("/detect-lang")
-def detect_lang(payload: Dict[str, Any] = Body(...)):
+def detect_lang(payload: Dict[str, Any] = Body(...), current: Dict[str, Any] = Depends(get_current_user)):
     text = (payload.get("text") or "").strip()
     if not text:
         raise HTTPException(status_code=400, detail="text is required")
@@ -42,7 +43,7 @@ def detect_lang(payload: Dict[str, Any] = Body(...)):
 
 
 @router.post("/translate")
-def translate(payload: Dict[str, Any] = Body(...)):
+def translate(payload: Dict[str, Any] = Body(...), current: Dict[str, Any] = Depends(get_current_user)):
     text = (payload.get("text") or "").strip()
     src = payload.get("source_lang") or "auto"
     tgt = payload.get("target_lang") or "en-IN"
@@ -63,7 +64,7 @@ def translate(payload: Dict[str, Any] = Body(...)):
 
 
 @router.post("/extract")
-def extract(payload: Dict[str, Any] = Body(...)):
+def extract(payload: Dict[str, Any] = Body(...), current: Dict[str, Any] = Depends(get_current_user)):
     """Extract structured fields from free text using Llama."""
     text = (payload.get("text") or "").strip()
     schema = payload.get("schema") or "{ \"value\": string }"
@@ -76,7 +77,7 @@ def extract(payload: Dict[str, Any] = Body(...)):
 
 
 @router.post("/chat")
-def chat(payload: Dict[str, Any] = Body(...)):
+def chat(payload: Dict[str, Any] = Body(...), current: Dict[str, Any] = Depends(get_current_user)):
     prompt = (payload.get("prompt") or "").strip()
     system = payload.get("system")
     if not prompt:

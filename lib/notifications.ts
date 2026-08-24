@@ -1,7 +1,4 @@
-import { Platform } from 'react-native';
-
-const DEFAULT_API_URL = Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://127.0.0.1:8000';
-const BASE_URL = process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL;
+import { authFetch } from '@/lib/api';
 
 export type NotifAudience = 'user' | 'worker';
 
@@ -34,7 +31,7 @@ function normalize(raw: any): Notification {
 export async function listNotifications(audience: NotifAudience, recipientId: string): Promise<Notification[]> {
   if (!recipientId) return [];
   try {
-    const res = await fetch(`${BASE_URL}/notifications/?audience=${audience}&recipient_id=${encodeURIComponent(recipientId)}`);
+    const res = await authFetch(`/notifications/?audience=${audience}&recipient_id=${encodeURIComponent(recipientId)}`);
     if (!res.ok) return [];
     const data = await res.json();
     return Array.isArray(data) ? data.map(normalize) : [];
@@ -45,17 +42,16 @@ export async function listNotifications(audience: NotifAudience, recipientId: st
 
 export async function addNotification(n: Omit<Notification, 'id' | 'created_at' | 'read'>): Promise<Notification | null> {
   try {
-    const res = await fetch(`${BASE_URL}/notifications/`, {
+    const res = await authFetch('/notifications/', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+      json: {
         audience: n.audience,
         recipient_id: n.recipient_id,
         title: n.title,
         body: n.body,
         kind: n.kind,
         data: n.data,
-      }),
+      },
     });
     if (!res.ok) return null;
     return normalize(await res.json());
@@ -67,7 +63,7 @@ export async function addNotification(n: Omit<Notification, 'id' | 'created_at' 
 export async function unreadCount(audience: NotifAudience, recipientId: string): Promise<number> {
   if (!recipientId) return 0;
   try {
-    const res = await fetch(`${BASE_URL}/notifications/unread-count?audience=${audience}&recipient_id=${encodeURIComponent(recipientId)}`);
+    const res = await authFetch(`/notifications/unread-count?audience=${audience}&recipient_id=${encodeURIComponent(recipientId)}`);
     if (!res.ok) return 0;
     const data = await res.json();
     return Number(data?.count || 0);
@@ -78,23 +74,22 @@ export async function unreadCount(audience: NotifAudience, recipientId: string):
 
 export async function markAllRead(audience: NotifAudience, recipientId: string): Promise<void> {
   try {
-    await fetch(`${BASE_URL}/notifications/mark-all-read`, {
+    await authFetch('/notifications/mark-all-read', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ audience, recipient_id: recipientId }),
+      json: { audience, recipient_id: recipientId },
     });
   } catch {}
 }
 
 export async function markRead(_audience: NotifAudience, _recipientId: string, id: string): Promise<void> {
   try {
-    await fetch(`${BASE_URL}/notifications/${encodeURIComponent(id)}/read`, { method: 'POST' });
+    await authFetch(`/notifications/${encodeURIComponent(id)}/read`, { method: 'POST' });
   } catch {}
 }
 
 export async function clearAll(audience: NotifAudience, recipientId: string): Promise<void> {
   try {
-    await fetch(`${BASE_URL}/notifications/?audience=${audience}&recipient_id=${encodeURIComponent(recipientId)}`, {
+    await authFetch(`/notifications/?audience=${audience}&recipient_id=${encodeURIComponent(recipientId)}`, {
       method: 'DELETE',
     });
   } catch {}

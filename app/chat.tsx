@@ -1,5 +1,7 @@
 import { aiDetectLang, aiTranslate, LangCode, LANGS, speak as speakTTS, webSTT } from '@/lib/ai';
+import { authFetch, expectJson } from '@/lib/api';
 import { platformShadow } from '@/lib/shadow';
+import { ensureSocket, onMessageReceived } from '@/lib/socket';
 import { storage } from '@/lib/storage';
 import { Ionicons } from '@expo/vector-icons';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
@@ -19,9 +21,6 @@ import {
   View,
 } from 'react-native';
 
-const DEFAULT_API_URL = Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://127.0.0.1:8000';
-const BASE_URL = process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL;
-
 type Side = 'client' | 'worker';
 
 interface Bubble {
@@ -30,6 +29,7 @@ interface Bubble {
   original: string;
   srcLang: LangCode;
   translations: Partial<Record<LangCode, string>>;
+  failed?: boolean;
 }
 
 interface ServerChatMessage {
@@ -38,10 +38,15 @@ interface ServerChatMessage {
   message: string;
 }
 
-const createSystemBubble = (workerName?: string): Bubble => ({
+const createSystemBubble = (otherName?: string, myRole: 'user' | 'worker' = 'user'): Bubble => ({
   id: 'sys',
   side: 'worker',
-  original: workerName ? `Hello, this is ${workerName}. How can I help you?` : 'Hello! How can I help you?',
+  original:
+    myRole === 'worker'
+      ? `Chat with ${otherName || 'client'} — messages are auto-translated.`
+      : otherName
+        ? `Hello, this is ${otherName}. How can I help you?`
+        : 'Hello! How can I help you?',
   srcLang: 'en-IN',
   translations: {},
 });
@@ -67,6 +72,7 @@ export default function ChatScreen() {
   const [listening, setListening] = useState<boolean>(false);
   const [speakingId, setSpeakingId] = useState<string | null>(null);
   const [currentUserId, setCurrentUserId] = useState<string>('');
+  const [myRole, setMyRole] = useState<'user' | 'worker'>('user');
   const [keyboardVisible, setKeyboardVisible] = useState(false);
   const [keyboardHeight, setKeyboardHeight] = useState(0);
 
@@ -98,18 +104,21 @@ export default function ChatScreen() {
 
     async function loadConversation() {
       let uid = '';
+      let role: 'user' | 'worker' = 'user';
       try {
         const authRaw = await storage.get('workmithra:auth');
         if (authRaw) {
           const auth = JSON.parse(authRaw);
           if (auth?.id) uid = String(auth.id);
+          if (auth?.role === 'worker') role = 'worker';
         }
       } catch (error) {
         console.warn('Failed to parse auth data', error);
       }
 
       setCurrentUserId(uid);
-      const sysMsg = createSystemBubble(workerName);
+      setMyRole(role);
+      const sysMsg = createSystemBubble(workerName, role);
 
       if (!uid || !workerId) {
         setMsgs([sysMsg]);
@@ -117,16 +126,13 @@ export default function ChatScreen() {
       }
 
       try {
-        const response = await fetch(`${BASE_URL}/chat/conversation/${uid}/${workerId}`, {
-          signal: controller.signal,
-        });
+        const history = await expectJson<ServerChatMessage[]>(
+          await authFetch(`/chat/conversation/${uid}/${workerId}`, {
+            signal: controller.signal,
+          }),
+          'Could not load chat history',
+        );
 
-        if (!response.ok) {
-          setMsgs([sysMsg]);
-          return;
-        }
-
-        const history = await response.json();
         if (!Array.isArray(history)) {
           setMsgs([sysMsg]);
           return;
@@ -146,19 +152,48 @@ export default function ChatScreen() {
     return () => controller.abort();
   }, [workerId, workerName, scrollToBottom]);
 
+  // Realtime: new messages arrive over Socket.IO; a slow 30s reconcile fetch
+  // covers anything missed while the socket was disconnected.
   useEffect(() => {
     if (!currentUserId || !workerId) return;
-    const controller = new AbortController();
 
-    async function pollConversation() {
-      try {
-        const response = await fetch(`${BASE_URL}/chat/conversation/${currentUserId}/${workerId}`, {
-          signal: controller.signal,
+    let cancelled = false;
+    let offMessage: (() => void) | null = null;
+
+    // ensureSocket() is async — the listener must be registered only after the
+    // socket exists, otherwise onMessageReceived no-ops and realtime is lost.
+    void (async () => {
+      await ensureSocket();
+      if (cancelled) return;
+      offMessage = onMessageReceived((data) => {
+        // Only messages from this worker; my own come back via the REST response.
+        if (String(data.sender_id) !== String(workerId)) return;
+        setMsgs((prev) => {
+          if (prev.some((bubble) => bubble.id === String(data.id))) return prev;
+          scrollToBottom();
+          return [
+            ...prev,
+            {
+              id: String(data.id),
+              side: 'worker' as Side,
+              original: data.message ?? '',
+              srcLang: 'en-IN' as LangCode,
+              translations: {},
+            },
+          ];
         });
+      });
+    })();
 
-        if (!response.ok) return;
-
-        const history = await response.json();
+    const controller = new AbortController();
+    async function reconcile() {
+      try {
+        const history = await expectJson<ServerChatMessage[]>(
+          await authFetch(`/chat/conversation/${currentUserId}/${workerId}`, {
+            signal: controller.signal,
+          }),
+          'Could not refresh chat',
+        );
         if (!Array.isArray(history)) return;
 
         setMsgs((prev) => {
@@ -173,12 +208,14 @@ export default function ChatScreen() {
         });
       } catch (error: any) {
         if (controller.signal.aborted) return;
-        console.warn('Chat polling failed', error);
+        console.warn('Chat reconcile failed', error);
       }
     }
 
-    const intervalId = setInterval(pollConversation, 3000);
+    const intervalId = setInterval(reconcile, 30000);
     return () => {
+      cancelled = true;
+      offMessage?.();
       controller.abort();
       clearInterval(intervalId);
     };
@@ -251,22 +288,20 @@ export default function ChatScreen() {
 
       if (currentUserId && workerId) {
         try {
-          const response = await fetch(`${BASE_URL}/chat/`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ sender_id: Number(currentUserId), receiver_id: Number(workerId), message: trimmed }),
-          });
-
-          if (response.ok) {
-            const saved = await response.json();
-            if (saved?.id) {
-              setMsgs((prev) => prev.map((item) => (item.id === tempId ? { ...item, id: String(saved.id) } : item)));
-            }
-          } else {
-            console.warn('Failed to save chat message', response.status);
+          const saved = await expectJson<{ id?: number }>(
+            await authFetch('/chat/', {
+              method: 'POST',
+              json: { receiver_id: Number(workerId), message: trimmed },
+            }),
+            'Message could not be sent',
+          );
+          if (saved?.id) {
+            setMsgs((prev) => prev.map((item) => (item.id === tempId ? { ...item, id: String(saved.id) } : item)));
           }
-        } catch (error) {
+        } catch (error: any) {
           console.warn('Failed to save chat message', error);
+          setMsgs((prev) => prev.map((item) => (item.id === tempId ? { ...item, failed: true } : item)));
+          Alert.alert('Message not sent', error?.message || 'Could not send the message. Check your connection and try again.');
         }
       }
 
@@ -324,6 +359,9 @@ export default function ChatScreen() {
           )}
           <View style={[styles.bubble, mine ? styles.bMine : styles.bThem]}>
             <Text style={[styles.original, mine ? styles.textMine : styles.textThem]}>{view.text}</Text>
+            {item.failed && (
+              <Text style={styles.failedTag}>⚠ Not sent</Text>
+            )}
             {showSubtitle && (
               <Text style={[styles.subtitle, mine ? styles.subMine : styles.subThem]} numberOfLines={2}>
                 ({item.srcLang.split('-')[0].toUpperCase()}) {item.original}
@@ -365,6 +403,7 @@ export default function ChatScreen() {
   );
 
   const myLang = me === 'client' ? clientLang : workerLang;
+  const otherLabel = myRole === 'worker' ? 'Client' : 'Worker';
   const composerBottomOffset = keyboardVisible && Platform.OS === 'android' ? Math.max(keyboardHeight - 24, 0) : 0;
 
   return (
@@ -400,7 +439,7 @@ export default function ChatScreen() {
 
             <View style={styles.langSection}>
               <LangPicker label="You speak" value={clientLang} onChange={setClientLang} />
-              <LangPicker label={`${workerName || 'Worker'} speaks`} value={workerLang} onChange={setWorkerLang} />
+              <LangPicker label={`${workerName || otherLabel} speaks`} value={workerLang} onChange={setWorkerLang} />
             </View>
 
             <FlatList
@@ -488,6 +527,7 @@ const styles = StyleSheet.create({
   textMine: { color: '#0b3d1a' },
   textThem: { color: '#222' },
   subtitle: { fontSize: 10, marginTop: 4, fontStyle: 'italic' },
+  failedTag: { fontSize: 10, marginTop: 4, fontWeight: '700', color: '#dc2626' },
   subMine: { color: '#3a6e44' },
   subThem: { color: '#888' },
   speakBtn: { position: 'absolute', right: 6, bottom: 6, padding: 2 },

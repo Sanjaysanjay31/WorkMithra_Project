@@ -1,28 +1,25 @@
 import Avatar from '@/components/avatar';
 import WorkerBottomNav from '@/components/worker-bottom-nav';
+import { authFetch } from '@/lib/api';
+import { isCompletedStatus, normalizeBookingStatus } from '@/lib/booking-status';
 import { unreadCount } from '@/lib/notifications';
 import { platformShadow } from '@/lib/shadow';
 import { storage } from '@/lib/storage';
+import { BookingResponse, ReviewResponse } from '@/lib/types';
 import { Ionicons } from '@expo/vector-icons';
 import { Stack, useRouter } from 'expo-router';
 import React, { useEffect, useState } from 'react';
 import {
     Image,
-    Platform,
     ScrollView,
     StyleSheet,
     Text,
     TouchableOpacity,
     View,
 } from 'react-native';
-
-const DEFAULT_API_URL = Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://127.0.0.1:8000';
-const BASE_URL = process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL;
+import { PastWorkItem } from './mock_data';
 
 const WORKER_PROFILE_KEY = 'workmithra:worker_profile';
-const WORKER_PASTWORK_KEY = 'workmithra:worker_pastwork';
-
-import { PastWorkItem } from './mock_data';
 
 type Tab = 'details' | 'past';
 
@@ -51,7 +48,7 @@ export default function WorkerDashboard() {
   const [pastWork, setPastWork] = useState<PastWorkItem[]>([]);
   const [unread, setUnread] = useState(0);
 
-  const [userId, setUserId] = useState<string>('1');
+  const [userId, setUserId] = useState<string>('');
 
   useEffect(() => {
     (async () => {
@@ -79,9 +76,12 @@ export default function WorkerDashboard() {
       const p = await storage.get(WORKER_PROFILE_KEY);
       if (p) try { setProfile(JSON.parse(p)); } catch {}
 
+      // Wait for the real user id from storage — never query with a guessed id.
+      if (!userId) return;
+
       // Live profile from backend
       try {
-        const wRes = await fetch(`${BASE_URL}/workers/${userId}`);
+        const wRes = await authFetch(`/workers/${userId}`);
         if (wRes.ok) {
           const w = await wRes.json();
           const merged: WorkerProfile = {
@@ -109,51 +109,38 @@ export default function WorkerDashboard() {
       }
 
       try {
-        const res = await fetch(`${BASE_URL}/bookings?worker_id=${userId}`);
+        // The worker's token scopes this list to their own bookings.
+        const res = await authFetch('/bookings');
         if (!res.ok) return;
-        const data: any[] = await res.json();
-        const completed = data.filter((b: any) => b.status === 'success' || b.status === 'completed');
+        const data: BookingResponse[] = await res.json();
+        const completed = data.filter((b) => isCompletedStatus(normalizeBookingStatus(b.status)));
 
         // Fetch all reviews for this worker once, then index by booking_id.
-        const reviewByBooking: Record<string, any> = {};
+        const reviewByBooking: Record<string, ReviewResponse> = {};
         try {
-          const rr = await fetch(`${BASE_URL}/reviews/?worker_id=${userId}`);
+          const rr = await authFetch(`/reviews/?worker_id=${userId}`);
           if (rr.ok) {
-            const reviews: any[] = await rr.json();
+            const reviews: ReviewResponse[] = await rr.json();
             for (const r of reviews) {
               if (r.booking_id != null) reviewByBooking[String(r.booking_id)] = r;
             }
           }
         } catch {}
 
-        // Fetch each unique user's name once.
-        const uniqueUserIds = Array.from(new Set(completed.map((b) => b.user_id).filter(Boolean)));
-        const nameById: Record<string, string> = {};
-        await Promise.all(
-          uniqueUserIds.map(async (uid) => {
-            try {
-              const pr = await fetch(`${BASE_URL}/profiles/user/${uid}`);
-              if (pr.ok) {
-                const p = await pr.json();
-                if (p?.full_name) nameById[String(uid)] = p.full_name;
-              }
-            } catch {}
-          }),
-        );
-
-        const past = completed.map((b: any) => {
+        // Client name/avatar come embedded on each booking — no extra requests.
+        const past = completed.map((b) => {
           const review = reviewByBooking[String(b.id)];
+          const client = b.user;
           return {
             id: String(b.id),
-            client_name: nameById[String(b.user_id)] || `User ${b.user_id}`,
-            client_avatar: `https://i.pravatar.cc/150?u=${b.user_id}`,
+            client_name: client?.full_name || `User ${b.user_id}`,
+            client_avatar: client?.profile_image || undefined,
             place: b.customer_address || 'Local Area',
             date: b.booking_date || 'Recent',
             description: b.problem_description || 'Completed service',
             payment: b.final_price || b.estimated_price || 0,
             rating: review ? Number(review.rating) || 0 : 0,
             review: review ? (review.review_text || '') : '',
-            photo: 'https://placehold.co/400x200/e9ecef/a3a3a3?text=Job+Completed',
           };
         });
         setPastWork(past);
@@ -187,7 +174,7 @@ export default function WorkerDashboard() {
               </View>
             )}
           </TouchableOpacity>
-          <Avatar uri={profile.profile_image} name={profile.full_name} size={88} style={styles.heroAvatar as any} />
+          <Avatar uri={profile.profile_image} name={profile.full_name} size={88} style={styles.heroAvatar} />
           <Text style={styles.heroName}>{profile.full_name || 'Worker'}</Text>
           {profile.skill ? <Text style={styles.heroSkill}>{profile.skill}</Text> : null}
           <View style={styles.heroBadges}>
@@ -262,8 +249,15 @@ export default function WorkerDashboard() {
               ) : (
                 pastWork.map((w) => (
                   <View key={w.id} style={styles.pastCard}>
-                    {/* Cover photo of the completed work */}
-                    <Image source={{ uri: w.photo }} style={styles.workPhoto} />
+                    {/* Cover area for the completed work (no photo upload yet) */}
+                    {w.photo ? (
+                      <Image source={{ uri: w.photo }} style={styles.workPhoto} />
+                    ) : (
+                      <View style={[styles.workPhoto, styles.workPhotoPlaceholder]}>
+                        <Ionicons name="checkmark-circle" size={28} color="#10b981" />
+                        <Text style={styles.workPhotoPlaceholderText}>Job Completed</Text>
+                      </View>
+                    )}
 
                     {/* Description + place + date */}
                     <View style={styles.workBody}>
@@ -275,7 +269,7 @@ export default function WorkerDashboard() {
 
                       {/* Client row + payment + rating */}
                       <View style={styles.clientRow}>
-                        <Image source={{ uri: w.client_avatar }} style={styles.clientAvatar} />
+                        <Avatar uri={w.client_avatar} name={w.client_name} size={32} style={styles.clientAvatar} />
                         <View style={{ flex: 1 }}>
                           <Text style={styles.clientName} numberOfLines={1}>{w.client_name}</Text>
                           <View style={styles.starRow}>
@@ -291,7 +285,7 @@ export default function WorkerDashboard() {
                       {/* Review */}
                       <View style={styles.reviewBox}>
                         <Ionicons name="chatbox-ellipses" size={14} color="#6F42C1" />
-                        <Text style={styles.reviewText}>"{w.review}"</Text>
+                        <Text style={styles.reviewText}>&quot;{w.review}&quot;</Text>
                       </View>
                     </View>
                   </View>
@@ -362,6 +356,8 @@ const styles = StyleSheet.create({
 
   pastCard: { backgroundColor: '#fff', borderRadius: 14, marginBottom: 14, overflow: 'hidden', borderWidth: 1, borderColor: '#eee', ...platformShadow('0px 1px 4px rgba(0,0,0,0.07)', '#000', 0, 1, 0.07, 2, 1) },
   workPhoto: { width: '100%', height: 140, backgroundColor: '#e9ecef' },
+  workPhotoPlaceholder: { justifyContent: 'center', alignItems: 'center', gap: 6 },
+  workPhotoPlaceholderText: { fontSize: 12, fontWeight: '700', color: '#9ca3af' },
   workBody: { padding: 12 },
   workHeaderRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   workPlace: { fontSize: 13, fontWeight: '800', color: '#333', flex: 1, marginRight: 8 },

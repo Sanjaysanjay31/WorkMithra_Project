@@ -33,6 +33,33 @@ Mobile, Android emulator, iOS simulator, and web browser all run from the same E
 
 ---
 
+## Local Development
+
+### Frontend
+
+```bash
+npm install
+cp .env.example .env   # then fill in real values
+npm start              # Expo dev server
+npm test               # Jest unit tests
+npx tsc --noEmit       # type check
+```
+
+`EXPO_PUBLIC_API_URL` is read from `.env` (or the shell environment) at build time — Expo inlines `EXPO_PUBLIC_*` variables, and `app.json` does **not** supply them. If it is unset, `lib/api.ts` falls back to a local dev URL (`http://10.0.2.2:8000` on Android emulators, `http://127.0.0.1:8000` elsewhere) and warns in production builds. Set it to the deployed backend before building for release.
+
+### Backend
+
+```bash
+cd backend
+pip install -r requirements.txt
+cp .env.example .env   # then fill in real values (JWT_SECRET is required)
+uvicorn main:app --reload
+```
+
+`JWT_SECRET` must be set or the server refuses to start. `RATE_LIMITING=0` disables rate limiting for tests.
+
+---
+
 ## Modules
 
 ### 1. Authentication (`app/login.tsx`, `app/register.tsx`, `app/forgot-password.tsx`)

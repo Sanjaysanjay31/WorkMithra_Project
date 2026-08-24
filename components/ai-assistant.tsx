@@ -1,5 +1,7 @@
-import { aiChat, aiExtract, aiTranslate, ALL_LANGS, cleanTextForSpeech, LangCode, LANGS, pauseAudio, resumeAudio, setMuted, speakLong, stopAudio, webSTT } from '@/lib/ai';
+import { aiChat, aiExtract, aiTranslate, cleanTextForSpeech, LangCode, pauseAudio, resumeAudio, setMuted, speakLong, stopAudio, webSTT } from '@/lib/ai';
+import { appendHistory, clearHistory, loadHistory } from '@/lib/assistant-history';
 import { assistantBus } from '@/lib/assistant-bus';
+import { getScreenContext, Step, WORKER_STEPS } from '@/lib/assistant-context';
 import { platformShadow } from '@/lib/shadow';
 import { storage } from '@/lib/storage';
 import { Ionicons } from '@expo/vector-icons';
@@ -19,10 +21,9 @@ import {
     TouchableOpacity,
     View,
 } from 'react-native';
+import LanguagePicker from './language-picker';
 
 type Msg = { who: 'ai' | 'me'; text: string };
-
-const SESSION_KEY = 'workmithra:assistant_session';
 
 const LANG_NAME: Record<string, string> = {
   'en-IN': 'English',
@@ -40,118 +41,13 @@ const LANG_NAME: Record<string, string> = {
   'ur-IN': 'Urdu',
 };
 
-type ScreenContext = {
-  name: string;
-  purpose: string;          // told to LLM
-  suggestions: string[];    // quick chips
-  onboardSteps?: Step[];    // trigger guided onboarding
-};
-
-type Step =
-  | { id: 'name'; q: string; key: 'full_name' }
-  | { id: 'phone'; q: string; key: 'phone' }
-  | { id: 'role'; q: string; key: 'role' }
-  | { id: 'skill'; q: string; key: 'skill' }
-  | { id: 'experience'; q: string; key: 'experience_years' }
-  | { id: 'wage'; q: string; key: 'hourly_rate' }
-  | { id: 'location'; q: string; key: 'location' }
-  | { id: 'timings'; q: string; key: 'timings' };
-
-const REGISTRATION_STEPS: Step[] = [
-  { id: 'name', q: 'What is your name?', key: 'full_name' },
-  { id: 'phone', q: 'What is your mobile number?', key: 'phone' },
-  { id: 'role', q: 'How would you like to use WorkMithra — User, Worker, or Both?', key: 'role' },
-];
-
-const WORKER_STEPS: Step[] = [
-  { id: 'skill', q: 'What work do you do?', key: 'skill' },
-  { id: 'experience', q: 'How many years of experience do you have?', key: 'experience_years' },
-  { id: 'wage', q: 'How much do you charge per hour in rupees?', key: 'hourly_rate' },
-  { id: 'location', q: 'Which areas do you work in?', key: 'location' },
-  { id: 'timings', q: 'What are your available timings?', key: 'timings' },
-];
-
-function getScreenContext(pathname: string): ScreenContext {
-  const p = (pathname || '').replace(/\/+/g, '/').replace(/\/$/, '').toLowerCase();
-  const segments = p.split('/').filter(Boolean);
-  const current = segments[segments.length - 1] || 'home';
-  const screenLabel = current
-    .split('_')
-    .filter(Boolean)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(' ') || 'WorkMithra';
-
-  const routeHints: Record<string, Partial<ScreenContext>> = {
-    login: {
-      name: 'Login',
-      purpose: 'The user is on the login screen and may need help signing in or recovering access.',
-      suggestions: ['How do I login?', 'I forgot my password', 'I am new — register me'],
-    },
-    register: {
-      name: 'Register',
-      purpose: 'The user is on the registration screen and may need help completing the form.',
-      suggestions: ['Help me fill the form', 'I did not get the OTP', 'What does Verify OTP mean?'],
-      onboardSteps: REGISTRATION_STEPS,
-    },
-    worker_profile: {
-      name: 'Worker Profile',
-      purpose: 'The user is editing worker profile details and may need help filling them in.',
-      suggestions: ['Help me create profile', 'What domain should I pick?'],
-      onboardSteps: WORKER_STEPS,
-    },
-    chat: {
-      name: 'AI Translation Chat',
-      purpose: 'The user is in live chat and may need help using voice or translation features.',
-      suggestions: ['How do I send voice?', 'Change my language', 'Read this message aloud'],
-    },
-  };
-
-  const hint = routeHints[current] || {};
-
-  return {
-    name: hint.name || screenLabel,
-    purpose: hint.purpose || `The user is currently on the ${screenLabel} screen in the WorkMithra app. Help them clearly and briefly based on what they need right now.`,
-    suggestions: hint.suggestions || ['What can I do here?', 'Help me with this page', 'How does this work?'],
-    onboardSteps: hint.onboardSteps,
-  };
-}
-
 export function AIAssistant() {
   const pathname = usePathname() || '';
   const ctx = useMemo(() => getScreenContext(pathname), [pathname]);
 
   const [visible, setVisible] = useState(false);
   const [lang, setLang] = useState<LangCode>('en-IN');
-  const [pinned, setPinned] = useState<LangCode[]>(LANGS.map((l) => l.code));
-  const [showLangSearch, setShowLangSearch] = useState(false);
-  const [langQuery, setLangQuery] = useState('');
 
-  // Load pinned list from storage on mount
-  useEffect(() => {
-    (async () => {
-      try {
-        const raw = await storage.get('workmithra:pinned_langs');
-        if (raw) {
-          const arr = JSON.parse(raw);
-          if (Array.isArray(arr) && arr.length) setPinned(arr);
-        }
-      } catch {}
-    })();
-  }, []);
-
-  function togglePin(code: LangCode) {
-    setPinned((prev) => {
-      const next = prev.includes(code) ? prev.filter((c) => c !== code) : [...prev, code];
-      storage.set('workmithra:pinned_langs', JSON.stringify(next)).catch(() => {});
-      return next;
-    });
-  }
-
-  const filteredLangs = ALL_LANGS.filter((l) => {
-    const q = langQuery.trim().toLowerCase();
-    if (!q) return true;
-    return l.english.toLowerCase().includes(q) || l.label.toLowerCase().includes(q) || l.code.toLowerCase().includes(q);
-  });
   const [msgs, setMsgs] = useState<Msg[]>([]);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
@@ -171,23 +67,13 @@ export function AIAssistant() {
   const [translatedSuggestions, setTranslatedSuggestions] = useState<string[]>(ctx.suggestions);
   const [guideMeLabel, setGuideMeLabel] = useState<string>('Guide me');
 
-  // Restore conversation from local storage (school-project simple — no DB).
+  // Restore conversation — server-backed when logged in, local cache otherwise.
   useEffect(() => {
     (async () => {
-      try {
-        const raw = await storage.get(SESSION_KEY);
-        if (raw) {
-          const arr = JSON.parse(raw) as Msg[];
-          if (Array.isArray(arr) && arr.length) setMsgs(arr);
-        }
-      } catch {}
+      const arr = await loadHistory();
+      if (arr.length) setMsgs(arr);
     })();
   }, []);
-
-  // Persist every change to storage so navigation keeps the chat.
-  useEffect(() => {
-    storage.set(SESSION_KEY, JSON.stringify(msgs)).catch(() => {});
-  }, [msgs]);
 
   const SCRIPT_RE: Record<string, RegExp> = {
     'hi-IN': /[ऀ-ॿ]/, 'te-IN': /[ఀ-౿]/, 'ta-IN': /[஀-௿]/,
@@ -296,7 +182,7 @@ export function AIAssistant() {
     setCollected({});
     setOnboardActive(false);
     setStepIdx(0);
-    storage.remove(SESSION_KEY).catch(() => {});
+    clearHistory().catch(() => {});
   }
 
   function openModal() {
@@ -308,7 +194,6 @@ export function AIAssistant() {
   useEffect(() => {
     const off = assistantBus.subscribe(() => openModal());
     return () => { off(); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // FAB is always visible — it's draggable so users can move it out of the way
@@ -371,7 +256,7 @@ export function AIAssistant() {
     setOnboardActive(false);
     let text = `Hello! I am your WorkMithra assistant on ${ctx.name}. How can I help you?`;
     if (lang === 'te-IN') {
-      text = `నమస్కారం! వర్క్‌మిత్రా సహాయకుడిని. నేను మీకు ఎలా సహాయపడగలను?`;
+      text = `నమస్కారం! నేను మీ వర్క్‌మిత్ర సహాయకుడిని. మీకు ఎలా సహాయపడగలను?`;
     } else if (lang !== 'en-IN') {
       text = await safeTranslate(text, 'en-IN', lang);
     }
@@ -419,6 +304,8 @@ export function AIAssistant() {
       setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 50);
       return next;
     });
+    // Persist per-message (local mirror + server sync when logged in).
+    appendHistory(m).catch(() => {});
   }
 
   async function safeTranslate(text: string, src: LangCode, tgt: LangCode): Promise<string> {
@@ -602,8 +489,7 @@ export function AIAssistant() {
       catch { return { skill: text }; }
     }
     if (step.id === 'location') return { location: text };
-    if (step.id === 'timings') return { timings: text };
-    return { [(step as any).key || 'val']: text };
+    return { timings: text };
   }
 
   async function finishOnboard(data: Record<string, any>) {
@@ -674,54 +560,7 @@ export function AIAssistant() {
               </TouchableOpacity>
             </View>
 
-            <View style={styles.langRow}>
-              {ALL_LANGS.filter((l) => pinned.includes(l.code)).map((l) => (
-                <TouchableOpacity key={l.code} style={[styles.langChip, lang === l.code && styles.langChipActive]} onPress={() => setLang(l.code)}>
-                  <Text style={[styles.langText, lang === l.code && styles.langTextActive]}>{l.label}</Text>
-                </TouchableOpacity>
-              ))}
-              <TouchableOpacity style={[styles.langChip, { backgroundColor: '#fff', borderWidth: 1, borderColor: '#6F42C1' }]} onPress={() => setShowLangSearch((v) => !v)}>
-                <Ionicons name={showLangSearch ? 'close' : 'add'} size={11} color="#6F42C1" />
-                <Text style={[styles.langText, { color: '#6F42C1' }]}> More</Text>
-              </TouchableOpacity>
-            </View>
-
-            {showLangSearch && (
-              <View style={styles.langSearchBox}>
-                <View style={styles.langSearchInputWrap}>
-                  <Ionicons name="search" size={14} color="#999" />
-                  <TextInput
-                    style={styles.langSearchInput}
-                    placeholder="Search language (e.g. Bengali, Marathi)"
-                    placeholderTextColor="#999"
-                    value={langQuery}
-                    onChangeText={setLangQuery}
-                  />
-                </View>
-                <View style={styles.langGrid}>
-                  {filteredLangs.map((l) => {
-                    const isPinned = pinned.includes(l.code);
-                    const isActive = lang === l.code;
-                    return (
-                      <View key={l.code} style={styles.langGridItem}>
-                        <TouchableOpacity
-                          style={[styles.langChip, isActive && styles.langChipActive]}
-                          onPress={() => setLang(l.code)}
-                        >
-                          <Text style={[styles.langText, isActive && styles.langTextActive]}>
-                            {l.label} <Text style={{ opacity: 0.6, fontSize: 10 }}>({l.english})</Text>
-                          </Text>
-                        </TouchableOpacity>
-                        <TouchableOpacity onPress={() => togglePin(l.code)} style={styles.pinBtn}>
-                          <Ionicons name={isPinned ? 'pin' : 'pin-outline'} size={14} color={isPinned ? '#10b981' : '#999'} />
-                        </TouchableOpacity>
-                      </View>
-                    );
-                  })}
-                  {filteredLangs.length === 0 && <Text style={styles.langEmpty}>No language matches "{langQuery}"</Text>}
-                </View>
-              </View>
-            )}
+            <LanguagePicker lang={lang} onSelect={setLang} />
 
             <FlatList
               ref={listRef}
@@ -816,23 +655,11 @@ const styles = StyleSheet.create({
   header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 },
   title: { fontSize: 15, fontWeight: '800', color: '#6f42c1' },
   screenTag: { fontSize: 10, color: '#666', marginTop: 1 },
-  langRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 6 },
-  langChip: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 12, backgroundColor: '#f0f0f0' },
-  langChipActive: { backgroundColor: '#6F42C1' },
-  langText: { fontSize: 11, fontWeight: '600', color: '#333' },
-  langTextActive: { color: '#fff' },
   chat: { flex: 1, backgroundColor: '#fafafa', borderRadius: 10 },
   bubble: { maxWidth: '85%', borderRadius: 12, padding: 10, marginVertical: 4 },
   aiBubble: { backgroundColor: '#f0e6ff', alignSelf: 'flex-start' },
   meBubble: { backgroundColor: '#6F42C1', alignSelf: 'flex-end' },
   bubbleText: { fontSize: 13, color: '#333', lineHeight: 18 },
-  langSearchBox: { backgroundColor: '#f8f8f8', borderRadius: 10, padding: 8, marginBottom: 8 },
-  langSearchInputWrap: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#fff', borderRadius: 8, paddingHorizontal: 8, paddingVertical: 4, gap: 4 },
-  langSearchInput: { flex: 1, fontSize: 12, color: '#333', paddingVertical: 4 },
-  langGrid: { marginTop: 6, flexDirection: 'row', flexWrap: 'wrap', gap: 4 },
-  langGridItem: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#fff', borderRadius: 12, paddingRight: 4 },
-  pinBtn: { paddingHorizontal: 4, paddingVertical: 4 },
-  langEmpty: { fontSize: 11, color: '#999', padding: 8 },
   controlsRow: { flexDirection: 'row', justifyContent: 'center', gap: 8, marginTop: 8 },
   ctrlBtn: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 14, paddingVertical: 8, borderRadius: 18 },
   ctrlText: { color: '#fff', fontSize: 12, fontWeight: '800' },
