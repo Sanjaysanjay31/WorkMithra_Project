@@ -32,10 +32,10 @@ export function isValidationErrors(detail: unknown): detail is FastApiValidation
   return Array.isArray(detail) && detail.every((e) => e && Array.isArray(e.loc) && typeof e.msg === 'string');
 }
 
-async function postJson<T>(path: string, body: unknown): Promise<T> {
+async function postJson<T>(path: string, body: unknown, extraHeaders?: Record<string, string>): Promise<T> {
   const res = await fetch(`${BASE_URL}${path}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...extraHeaders },
     body: JSON.stringify(body),
   });
   let data: any = {};
@@ -65,10 +65,21 @@ export interface RegisterPayload {
   email: string;
   password: string;
   role: 'user' | 'worker';
+  /**
+   * Proof the registrant completed the email OTP challenge. Issued by
+   * /verify-otp; the backend rejects registrations without it so accounts
+   * can't be created with unverified (or someone else's) email.
+   */
+  verify_token?: string;
 }
 
 export function registerRequest(payload: RegisterPayload) {
-  return postJson<{ id?: number; full_name?: string; email?: string; role?: string }>('/register', payload);
+  // The proof token travels in the X-Verify-Token header — NOT the URL.
+  // Query strings land in server/proxy access logs; headers don't. (The
+  // backend still accepts the query-param form for older clients.)
+  const { verify_token, ...body } = payload;
+  const extraHeaders = verify_token ? { 'X-Verify-Token': verify_token } : undefined;
+  return postJson<{ id?: number; full_name?: string; email?: string; role?: string }>('/register', body, extraHeaders);
 }
 
 export function sendOtp(email: string) {
@@ -76,7 +87,7 @@ export function sendOtp(email: string) {
 }
 
 export function verifyOtp(email: string, otp: string) {
-  return postJson<{ message?: string; reset_token?: string; user?: unknown }>('/verify-otp', { email, otp });
+  return postJson<{ message?: string; reset_token?: string; verify_token?: string; user?: unknown }>('/verify-otp', { email, otp });
 }
 
 export function resetPassword(email: string, password: string, otpToken: string) {

@@ -12,6 +12,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from fastapi.testclient import TestClient
 from main import app
+from conftest import issue_verify_token
 
 client = TestClient(app)
 
@@ -32,7 +33,7 @@ def _register_and_login(role: str):
         "password": "strongpass123",
         "role": role,
     }
-    r = client.post("/register", json=payload)
+    r = client.post("/register", json=payload, params={"verify_token": issue_verify_token(email)})
     assert r.status_code == 200, r.text
     account_id = r.json()["id"]
 
@@ -65,6 +66,44 @@ def test_register_rejects_weak_password():
         "email": f"weak-{tag}@example.com", "password": "short", "role": "user",
     })
     assert r.status_code == 422, r.text
+
+
+def test_register_requires_email_verification():
+    """Registration without a verify_token (or with a forged/mismatched one)
+    must be rejected — the OTP challenge is the only proof the registrant
+    controls the email inbox."""
+    tag = _uniq()
+    email = f"noverify-{tag}@example.com"
+    payload = {
+        "full_name": f"NoVerify {tag}",
+        "phone": f"+91{tag}"[:15],
+        "email": email,
+        "password": "strongpass123",
+        "role": "user",
+    }
+    # No token at all.
+    r = client.post("/register", json=payload)
+    assert r.status_code == 400, r.text
+
+    # Garbage token.
+    r = client.post("/register", json=payload, params={"verify_token": "not-a-real-token"})
+    assert r.status_code == 400, r.text
+
+    # Valid token but issued for a DIFFERENT email.
+    other_token = issue_verify_token(f"other-{tag}@example.com")
+    r = client.post("/register", json=payload, params={"verify_token": other_token})
+    assert r.status_code == 400, r.text
+
+    # Correct token succeeds...
+    token = issue_verify_token(email)
+    r = client.post("/register", json=payload, params={"verify_token": token})
+    assert r.status_code == 200, r.text
+
+    # ...and is single-use: replaying the SAME consumed token must fail at the
+    # verification gate (not the duplicate-email check).
+    r = client.post("/register", json=payload, params={"verify_token": token})
+    assert r.status_code == 400, r.text
+    assert "verif" in str(r.json().get("detail", "")).lower(), r.text
 
 
 def test_login_rejects_wrong_password():

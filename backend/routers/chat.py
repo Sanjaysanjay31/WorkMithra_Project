@@ -1,12 +1,17 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from typing import List, Dict, Any, Optional
 from sqlalchemy.orm import Session
 from datetime import datetime
 import database, models, schemas
 from auth import get_current_user
+from rate_limit import limiter
 from socket_events import emit_to_user
 
 router = APIRouter()
+
+# Messaging is a paid-feature surface (DB writes per keystroke-scale abuse).
+# Generous for real conversations, hostile to bulk spam.
+SEND_RATE_LIMIT = "30/minute"
 
 
 def _current_user_id(current: Dict[str, Any]) -> int:
@@ -14,6 +19,28 @@ def _current_user_id(current: Dict[str, Any]) -> int:
         return int(current["sub"])
     except (KeyError, ValueError, TypeError):
         raise HTTPException(status_code=401, detail="Invalid token payload")
+
+
+def _participants_share_booking(db: Session, a_id: int, a_role: str, b_id: int, b_role: str) -> bool:
+    """True when the two identities appear together on at least one booking.
+
+    This is what makes messaging opt-in rather than an open channel: you can
+    only talk to someone you actually hired or were hired by. Users and
+    workers live in separate tables, so the pair always normalizes to one
+    (user_id, worker_id) row lookup."""
+    if {a_role, b_role} != {"user", "worker"}:
+        return False
+    user_side = a_id if a_role == "user" else b_id
+    worker_side = a_id if a_role == "worker" else b_id
+    return (
+        db.query(models.Booking.id)
+        .filter(
+            models.Booking.user_id == user_side,
+            models.Booking.worker_id == worker_side,
+        )
+        .first()
+        is not None
+    )
 
 
 def _resolve_receiver_role(db: Session, receiver_id: int, booking_id: Optional[int], sender_role: str) -> Optional[str]:
@@ -41,13 +68,17 @@ def _resolve_receiver_role(db: Session, receiver_id: int, booking_id: Optional[i
 
 
 @router.post("/", response_model=dict)
+@limiter.limit(SEND_RATE_LIMIT)
 def send_message(
+    request: Request,
     message: schemas.ChatMessageBase,
     db: Session = Depends(database.get_db),
     current: Dict[str, Any] = Depends(get_current_user),
 ):
     """Send a chat message. The sender is always the authenticated user.
 
+    Messaging is gated on an existing booking relationship: without it the
+    endpoint would be a spam/phishing channel to the entire user+worker base.
     The message is persisted first (source of truth), then pushed to the
     receiver over Socket.IO as a best-effort realtime notification."""
     if not message.receiver_id:
@@ -65,13 +96,22 @@ def send_message(
     if int(message.receiver_id) == sender_id and receiver_role == sender_role:
         raise HTTPException(status_code=400, detail="Cannot send a message to yourself")
 
-    # When a booking is referenced, both participants must belong to it.
+    # When a booking is referenced, BOTH participants must belong to it —
+    # otherwise a participant of booking X could attach booking_id=X to a
+    # message addressed to an unrelated third party.
     if message.booking_id is not None:
         booking = db.query(models.Booking).filter(models.Booking.id == message.booking_id).first()
         if booking is None:
             raise HTTPException(status_code=404, detail="Booking not found")
         if sender_id not in (booking.user_id, booking.worker_id):
             raise HTTPException(status_code=403, detail="You are not part of this booking")
+        if int(message.receiver_id) not in (booking.user_id, booking.worker_id):
+            raise HTTPException(status_code=403, detail="The recipient is not part of this booking")
+    elif not _participants_share_booking(db, sender_id, sender_role, int(message.receiver_id), receiver_role):
+        raise HTTPException(
+            status_code=403,
+            detail="You can only message someone you share a booking with",
+        )
 
     new_message = models.ChatMessage(
         sender_id=sender_id,
@@ -91,6 +131,7 @@ def send_message(
         "sender_id": sender_id,
         "sender_role": sender_role,
         "receiver_id": new_message.receiver_id,
+        "receiver_role": receiver_role,
         "message": new_message.message,
         "booking_id": new_message.booking_id,
         "sent_at": new_message.sent_at.isoformat() if new_message.sent_at else None,
@@ -115,21 +156,19 @@ def get_user_messages(
     """Get messages for a user. Users may only read their own inbox.
 
     Identity is (id, role): users and workers have overlapping id spaces, so
-    an id-only check would let worker #N read user #N's inbox. Rows written
-    before the role columns existed carry NULL roles and stay visible to the
-    id owner for backwards compatibility."""
+    an id-only check would let worker #N read user #N's inbox. Legacy rows
+    with NULL roles are NOT matched — a NULL row would otherwise be readable
+    by user #N AND worker #N, who are different people."""
     if user_id != _current_user_id(current):
         raise HTTPException(status_code=403, detail="You can only read your own messages")
     role = current.get("role", "user")
-    sent_me = (models.ChatMessage.receiver_id == user_id) & (
-        (models.ChatMessage.receiver_role == role) | (models.ChatMessage.receiver_role.is_(None))
-    )
-    from_me = (models.ChatMessage.sender_id == user_id) & (
-        (models.ChatMessage.sender_role == role) | (models.ChatMessage.sender_role.is_(None))
-    )
+    sent_me = (models.ChatMessage.receiver_id == user_id) & (models.ChatMessage.receiver_role == role)
+    from_me = (models.ChatMessage.sender_id == user_id) & (models.ChatMessage.sender_role == role)
     messages = db.query(models.ChatMessage).filter(
         sent_me | from_me
-    ).order_by(models.ChatMessage.sent_at.desc()).offset(skip).limit(limit).all()
+    ).order_by(
+        models.ChatMessage.sent_at.desc(), models.ChatMessage.id.desc()
+    ).offset(skip).limit(limit).all()
     return messages
 
 
@@ -151,18 +190,17 @@ def get_conversation(
     if uid not in (user_id, other_user_id):
         raise HTTPException(status_code=403, detail="You are not part of this conversation")
     # The caller's side of the conversation must involve their own role.
-    # Legacy rows (NULL role columns) remain readable by the id owner.
-    me_as_sender = (models.ChatMessage.sender_id == uid) & (
-        (models.ChatMessage.sender_role == role) | (models.ChatMessage.sender_role.is_(None))
-    )
-    me_as_receiver = (models.ChatMessage.receiver_id == uid) & (
-        (models.ChatMessage.receiver_role == role) | (models.ChatMessage.receiver_role.is_(None))
-    )
+    # Legacy NULL-role rows are excluded: they'd otherwise be visible to two
+    # different people who happen to share a numeric id.
+    me_as_sender = (models.ChatMessage.sender_id == uid) & (models.ChatMessage.sender_role == role)
+    me_as_receiver = (models.ChatMessage.receiver_id == uid) & (models.ChatMessage.receiver_role == role)
     pair = (
         ((models.ChatMessage.sender_id == user_id) & (models.ChatMessage.receiver_id == other_user_id)) |
         ((models.ChatMessage.sender_id == other_user_id) & (models.ChatMessage.receiver_id == user_id))
     )
     messages = db.query(models.ChatMessage).filter(
         pair & (me_as_sender | me_as_receiver)
-    ).order_by(models.ChatMessage.sent_at.asc()).offset(skip).limit(limit).all()
+    ).order_by(
+        models.ChatMessage.sent_at.asc(), models.ChatMessage.id.asc()
+    ).offset(skip).limit(limit).all()
     return messages

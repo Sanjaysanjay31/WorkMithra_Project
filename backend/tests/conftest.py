@@ -32,3 +32,36 @@ def _create_engine_for_tests(url, **kw):
 
 
 sqlalchemy.create_engine = _create_engine_for_tests
+
+
+def issue_verify_token(email: str) -> str:
+    """Test-only stand-in for the email OTP challenge.
+
+    /register requires the `verify_token` issued by /verify-otp, but that
+    endpoint verifies OTPs against Supabase over the network — unavailable in
+    offline tests. This reproduces the server-side half of the flow (pending
+    EmailVerification row + signed email_verify token) so tests can exercise
+    the real registration path end to end.
+    """
+    import secrets
+    from auth import create_email_verify_token, hash_reset_jti
+    from database import SessionLocal
+    import models
+
+    jti = secrets.token_urlsafe(16)
+    db = SessionLocal()
+    try:
+        ev = (
+            db.query(models.EmailVerification)
+            .filter(models.EmailVerification.email == email)
+            .first()
+        )
+        if ev is None:
+            ev = models.EmailVerification(email=email)
+            db.add(ev)
+        ev.jti = hash_reset_jti(jti)
+        ev.consumed_at = None
+        db.commit()
+    finally:
+        db.close()
+    return create_email_verify_token(email, jti)

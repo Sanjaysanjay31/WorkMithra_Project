@@ -1,8 +1,10 @@
 import asyncio
+import functools
 import os
 import socketio
 import logging
 from datetime import datetime
+from typing import Optional
 from socket_manager import socket_manager
 from auth import decode_token_safe
 
@@ -26,6 +28,11 @@ sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins=_allowed_orig
 # Statuses a client may set for itself. Anything else is rejected so a socket
 # can't broadcast arbitrary strings to every connected client.
 _ALLOWED_STATUSES = {"online", "available", "busy", "offline"}
+
+# Room that every authenticated socket joins so presence events reach only
+# logged-in clients instead of broadcasting to the whole world (including
+# unauthenticated connections).
+PRESENCE_ROOM = "presence"
 
 # ---------------------------------------------------------------------------
 # Thread-safe emit bridge
@@ -75,7 +82,16 @@ def _resolve_role(user_id: int, prefer: str = None) -> str:
 
     When the id exists in BOTH tables (they are separate id spaces), prefer
     the given role — callers pass the opposite of their own role, since
-    clients chat with workers and workers chat with clients."""
+    clients chat with workers and workers chat with clients.
+
+    Results are cached: ids never move between tables, and typing indicators
+    make this a per-keystroke lookup — opening a fresh DB session each time
+    churned the connection pool."""
+    return _resolve_role_cached(int(user_id), prefer)
+
+
+@functools.lru_cache(maxsize=2048)
+def _resolve_role_cached(user_id: int, prefer: Optional[str]) -> str:
     import database, models
     db = database.SessionLocal()
     try:
@@ -101,6 +117,47 @@ def _auth(sid):
     return socket_manager.get_user_for_socket(sid)
 
 
+# ---------------------------------------------------------------------------
+# Blocking DB helpers
+#
+# Socket.IO handlers below are async and run on the event loop, so any
+# synchronous SQLAlchemy work must go through asyncio.to_thread() — a slow
+# query would otherwise freeze every connected socket.
+# ---------------------------------------------------------------------------
+
+
+def _load_account(user_id: int, role: str):
+    """(is_active, token_version) for the account a token refers to, or None
+    when the account no longer exists. Returns plain values (not ORM rows) so
+    nothing is touched after the session closes."""
+    import database, models
+    db = database.SessionLocal()
+    try:
+        model = models.Worker if role == "worker" else models.User
+        account = db.query(model).filter(model.id == user_id).first()
+        if account is None:
+            return None
+        return (getattr(account, "is_active", True), getattr(account, "token_version", 0) or 0)
+    finally:
+        db.close()
+
+
+def _persist_worker_status(user_id: int, status_value: str) -> None:
+    """Write a worker's presence status to the DB (booking validation reads it)."""
+    import database, models
+    db = database.SessionLocal()
+    try:
+        db.query(models.Worker).filter(models.Worker.id == user_id).update(
+            {"current_status": status_value}, synchronize_session=False
+        )
+        db.commit()
+    except Exception as e:
+        logger.warning(f"set_status persist failed for worker {user_id}: {e}")
+        db.rollback()
+    finally:
+        db.close()
+
+
 @sio.event
 async def connect(sid, environ):
     logger.info(f"Socket connected: {sid}")
@@ -119,7 +176,7 @@ async def disconnect(sid):
             'user_id': user_id,
             'role': role,
             'timestamp': datetime.utcnow().isoformat()
-        })
+        }, room=PRESENCE_ROOM)
     else:
         logger.info(f"Socket disconnected: {sid}")
 
@@ -161,23 +218,41 @@ async def authenticate(sid, data):
     if role not in ("user", "worker"):
         role = "user"
 
-    # The account must still exist — a JWT for a deleted row gets no room.
-    import database, models
-    db = database.SessionLocal()
-    try:
-        model = models.Worker if role == "worker" else models.User
-        exists = db.query(model.id).filter(model.id == user_id).first() is not None
-    finally:
-        db.close()
-    if not exists:
+    # The account must still exist and be active, and the token must not
+    # predate the last password change/reset (token_version bump). The DB
+    # round-trip runs in a worker thread so it never stalls the event loop.
+    account = await asyncio.to_thread(_load_account, user_id, role)
+    if account is None:
         await sio.emit('auth_error', {'error': 'Account not found'}, room=sid)
         return
+    is_active, current_version = account
+    if is_active is False:
+        await sio.emit('auth_error', {'error': 'Account is disabled'}, room=sid)
+        return
+    try:
+        token_version = int(payload.get("tv", 0))
+    except (TypeError, ValueError):
+        token_version = 0
+    if token_version < current_version:
+        await sio.emit('auth_error', {'error': 'Session expired — please log in again'}, room=sid)
+        return
+
+    # Re-authentication on the same socket (account switch / token refresh):
+    # leave the PREVIOUS identity's room and clean its mapping first, or the
+    # old identity stays marked online forever and the socket keeps receiving
+    # the previous account's events.
+    previous = socket_manager.get_user_for_socket(sid)
+    if previous is not None:
+        prev_uid, prev_role = previous
+        await sio.leave_room(sid, room_for(prev_uid, prev_role))
+        socket_manager.remove_connection(sid)
 
     socket_manager.add_connection(user_id, sid, role)
 
     # Join the user's private room for direct notifications (role-scoped so
-    # user 3 and worker 3 never share a room).
+    # user 3 and worker 3 never share a room), plus the presence room.
     await sio.enter_room(sid, room_for(user_id, role))
+    await sio.enter_room(sid, PRESENCE_ROOM)
 
     await sio.emit('authenticated', {
         'user_id': user_id,
@@ -186,12 +261,12 @@ async def authenticate(sid, data):
         'timestamp': datetime.utcnow().isoformat()
     }, room=sid)
 
-    # Notify others this user is online
+    # Notify other authenticated clients this user is online
     await sio.emit('user_online', {
         'user_id': user_id,
         'role': role,
         'timestamp': datetime.utcnow().isoformat()
-    })
+    }, room=PRESENCE_ROOM)
 
     logger.info(f"{role} {user_id} authenticated on socket {sid}")
 
@@ -284,7 +359,11 @@ async def typing_indicator(sid, data):
 
     # The receiver is normally on the opposite side of the marketplace.
     receiver_role = "worker" if role == "user" else "user"
-    receiver_room = room_for(receiver_id, _resolve_role(receiver_id, prefer=receiver_role))
+    # _resolve_role can hit the DB on a cache miss — keep that off the loop.
+    receiver_room = room_for(
+        receiver_id,
+        await asyncio.to_thread(_resolve_role, receiver_id, receiver_role),
+    )
     await sio.emit('typing', {
         'user_id': user_id,
         'role': role,
@@ -305,12 +384,18 @@ async def set_status(sid, data):
         return
     socket_manager.set_user_status(user_id, status, role)
 
+    # Workers: persist the status too — booking validation reads
+    # workers.current_status from the DB, so an in-memory-only status let
+    # "offline" workers keep accepting bookings (and vice versa).
+    if role == "worker":
+        await asyncio.to_thread(_persist_worker_status, user_id, status)
+
     await sio.emit('user_status_changed', {
         'user_id': user_id,
         'role': role,
         'status': status,
         'timestamp': datetime.utcnow().isoformat()
-    })
+    }, room=PRESENCE_ROOM)
 
     logger.info(f"{role} {user_id} status changed to {status}")
 
@@ -347,7 +432,7 @@ async def get_user_status(sid, data):
 
     target_role = str(data.get('role') or '').strip()
     if target_role not in ("user", "worker"):
-        target_role = _resolve_role(target_user_id)
+        target_role = await asyncio.to_thread(_resolve_role, target_user_id)
 
     status = socket_manager.get_user_status(target_user_id, target_role)
     is_online = socket_manager.is_user_online(target_user_id, target_role)

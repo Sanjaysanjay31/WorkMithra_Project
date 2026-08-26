@@ -1,7 +1,7 @@
 import Avatar from '@/components/avatar';
 import BottomNav from '@/components/bottom-nav';
 import { authFetch, readApiError } from '@/lib/api';
-import { addNotification } from '@/lib/notifications';
+import { AvailabilitySlot, listAvailability } from '@/lib/availability';
 import { ensureSocket } from '@/lib/socket';
 import { storage } from '@/lib/storage';
 import { JobHistoryResponse, ReviewResponse, WorkerResponse } from '@/lib/types';
@@ -13,6 +13,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
     ActivityIndicator,
     Alert,
+    KeyboardAvoidingView,
     Linking,
     Platform,
     ScrollView,
@@ -27,7 +28,17 @@ import { WebView } from 'react-native-webview';
 
 type Tab = 'profile' | 'reviews' | 'chat' | 'booking' | 'map';
 
-type HistoryItem = { id: string; date: string; time: string; price: number; status: 'completed' | 'cancelled' };
+// Real booking statuses — a freshly created booking is pending, not completed.
+type HistoryItem = { id: string; date: string; time: string; price: number; status: 'pending' | 'upcoming' | 'completed' | 'rejected' };
+
+function historyStatusLabel(status: HistoryItem['status']): { text: string; color: string } {
+  switch (status) {
+    case 'completed': return { text: '✓ Completed', color: '#10b981' };
+    case 'upcoming': return { text: '⏳ Upcoming', color: '#1e40af' };
+    case 'rejected': return { text: '✗ Cancelled', color: '#991b1b' };
+    default: return { text: '⏳ Pending', color: '#92400e' };
+  }
+}
 
 function toRad(d: number) { return (d * Math.PI) / 180; }
 
@@ -40,6 +51,20 @@ function formatTimeLabel(value: string): string {
   const hr12 = ((h + 11) % 12) + 1;
   const ampm = h < 12 ? 'AM' : 'PM';
   return `${hr12}:${pad(m)} ${ampm}`;
+}
+
+// JS getDay(): 0 = Sunday. Maps a YYYY-MM-DD date onto the backend's
+// canonical availability day keys.
+const DAY_KEYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+const DAY_SHORT: Record<string, string> = {
+  monday: 'Mon', tuesday: 'Tue', wednesday: 'Wed', thursday: 'Thu',
+  friday: 'Fri', saturday: 'Sat', sunday: 'Sun',
+};
+
+function dayKeyOf(dateStr: string): string {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  if (!y || !m || !d) return '';
+  return DAY_KEYS[new Date(y, m - 1, d).getDay()];
 }
 
 function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number) {
@@ -66,9 +91,17 @@ export default function WorkerInfoPage() {
   const [showDatePicker, setShowDatePicker] = useState(false);
   const [showTimePicker, setShowTimePicker] = useState(false);
   const [history, setHistory] = useState<HistoryItem[]>([]);
+  // The worker's weekly availability (shown on the booking form and checked
+  // before submitting — mirrors the backend's pre-booking validation).
+  const [slots, setSlots] = useState<AvailabilitySlot[]>([]);
+  // Separate from `loading` (which swaps the whole screen for a spinner):
+  // booking must disable the button without hiding the form, and it must
+  // block double-taps that would otherwise create duplicate bookings.
+  const [submitting, setSubmitting] = useState(false);
 
   // Map state
   const [clientLoc, setClientLoc] = useState<{ lat: number; lng: number } | null>(null);
+  const [locUnavailable, setLocUnavailable] = useState(false);
 
   // Feedback state — reviews loaded from backend
   type ReviewItem = { id: string | number; name: string; rating: number; date: string; text: string };
@@ -129,6 +162,8 @@ export default function WorkerInfoPage() {
     fetchWorkerDetails();
     loadHistory();
     loadReviews();
+    // Any authenticated caller may read a worker's slots (pre-booking check).
+    if (Number(id)) listAvailability(Number(id)).then(setSlots);
   }, [id]);
 
   useEffect(() => {
@@ -150,11 +185,30 @@ export default function WorkerInfoPage() {
     }
   }
 
+  async function getCurrentUid(): Promise<string> {
+    try {
+      const authRaw = await storage.get('workmithra:auth');
+      if (authRaw) {
+        const auth = JSON.parse(authRaw);
+        if (auth.id) return String(auth.id);
+      }
+    } catch {}
+    return '';
+  }
+
+  // Cache key is scoped to BOTH the user and the worker — users and workers
+  // have overlapping ids, and the same device may host multiple accounts, so a
+  // worker-only key would leak one user's booking history to another.
+  const historyCacheKey = (uid: string) => `workmithra:history:${uid}:${workerId}`;
+
   async function loadHistory() {
     const wid = Number(id);
+    const uid = await getCurrentUid();
     if (wid) {
       try {
-        const res = await authFetch(`/job-history/?worker_id=${wid}`);
+        // with_worker narrows MY history to jobs done by this worker — the
+        // plain worker_id param is rejected for client tokens by the backend.
+        const res = await authFetch(`/job-history/?with_worker=${wid}`);
         if (res.ok) {
           const rows: JobHistoryResponse[] = await res.json();
           if (Array.isArray(rows) && rows.length) {
@@ -167,39 +221,48 @@ export default function WorkerInfoPage() {
                 status: 'completed' as const,
               })),
             );
+            // Job-history rows carry no price column — render "—" instead of
+            // a fabricated ₹0 on every history card (see historyPrice below).
             return;
           }
         }
       } catch {}
     }
-    // Fall back to locally cached history if backend has nothing yet.
-    try {
-      const raw = await storage.get(`workmithra:history:${workerId}`);
-      if (raw) { setHistory(JSON.parse(raw)); return; }
-    } catch {}
+    // Fall back to locally cached history (scoped to this user) if the backend
+    // has nothing yet.
+    if (uid) {
+      try {
+        const raw = await storage.get(historyCacheKey(uid));
+        if (raw) { setHistory(JSON.parse(raw)); return; }
+      } catch {}
+    }
     setHistory([]);
   }
 
   async function tryGetLocation() {
+    // On failure we leave clientLoc null and flag locUnavailable — the UI
+    // then says "Location unavailable" instead of silently substituting a
+    // hardcoded Hyderabad point (which produced wildly wrong distances for
+    // anyone outside that city).
     if (Platform.OS === 'web') {
       if (typeof navigator === 'undefined' || !navigator.geolocation) {
-        setClientLoc({ lat: 17.385, lng: 78.4867 });
+        setLocUnavailable(true);
         return;
       }
       navigator.geolocation.getCurrentPosition(
         (pos) => setClientLoc({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
-        () => setClientLoc({ lat: 17.385, lng: 78.4867 }),
+        () => setLocUnavailable(true),
         { enableHighAccuracy: false, timeout: 5000 },
       );
       return;
     }
     try {
       const { status } = await Location.requestForegroundPermissionsAsync();
-      if (status !== 'granted') { setClientLoc({ lat: 17.385, lng: 78.4867 }); return; }
+      if (status !== 'granted') { setLocUnavailable(true); return; }
       const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
       setClientLoc({ lat: pos.coords.latitude, lng: pos.coords.longitude });
     } catch {
-      setClientLoc({ lat: 17.385, lng: 78.4867 });
+      setLocUnavailable(true);
     }
   }
 
@@ -215,26 +278,43 @@ export default function WorkerInfoPage() {
   }, []);
 
   async function handleBookNow() {
+    if (submitting) return; // block double-taps creating duplicate bookings
     if (!bookDate.trim() || !bookTime.trim()) {
       Alert.alert('Booking', 'Please enter both date and time.');
       return;
     }
-    
-    let currentUid = 0;
-    try {
-      const authRaw = await storage.get('workmithra:auth');
-      if (authRaw) {
-        const auth = JSON.parse(authRaw);
-        if (auth.id) currentUid = auth.id;
-      }
-    } catch {}
 
+    // Client-side mirror of the backend's availability check — instant,
+    // friendly guidance instead of a 400 round-trip. Only enforced when the
+    // worker has configured slots (no slots = any time can be requested).
+    if (slots.length > 0) {
+      const daySlot = slots.find(
+        (s) => (s.available_day || '').toLowerCase() === dayKeyOf(bookDate),
+      );
+      if (!daySlot || !daySlot.is_available) {
+        Alert.alert(
+          'Worker unavailable',
+          `${worker?.full_name || 'This worker'} doesn't take bookings on that day. Check their working hours under "Book a new slot".`,
+        );
+        return;
+      }
+      const t = bookTime.slice(0, 5);
+      if ((daySlot.start_time && t < daySlot.start_time) || (daySlot.end_time && t > daySlot.end_time)) {
+        Alert.alert(
+          'Outside working hours',
+          `Please pick a time between ${formatTimeLabel(daySlot.start_time || '')} and ${formatTimeLabel(daySlot.end_time || '')} on that day.`,
+        );
+        return;
+      }
+    }
+
+    const currentUid = await getCurrentUid();
     if (!currentUid) {
       Alert.alert('Authentication', 'Please login to book a worker');
       return;
     }
 
-    setLoading(true);
+    setSubmitting(true);
     try {
       // Use the customer's real address from their profile when available.
       let customerAddress = 'Home Address (Default)';
@@ -259,7 +339,7 @@ export default function WorkerInfoPage() {
           status: 'pending'
         },
       });
-      
+
       if (!res.ok) {
         // Surface the backend's reason (e.g. worker unavailable, bad slot).
         const detail = await readApiError(res, 'Failed to create booking');
@@ -270,28 +350,25 @@ export default function WorkerInfoPage() {
       // 2. Real-time notification to the worker is emitted by the backend
       //    (POST /bookings pushes 'new_booking_request' over Socket.IO).
 
-      // 3. Update local history
+      // 3. Update local history with the REAL status (a new booking is
+      //    pending, not completed) and cache it under this user's key.
       const agreedPrice = bookPrice && !isNaN(Number(bookPrice)) ? Number(bookPrice) : 0;
+      const serverStatus = bookingData.status === 'upcoming' ? 'upcoming' : 'pending';
       const newItem: HistoryItem = {
         id: String(bookingData.id),
         date: bookDate,
         time: bookTime,
         price: agreedPrice,
-        status: 'completed', // For history tab, we show it as success/completed usually
+        status: serverStatus,
       };
       const next = [newItem, ...history];
       setHistory(next);
-      await storage.set(`workmithra:history:${workerId}`, JSON.stringify(next));
+      await storage.set(historyCacheKey(currentUid), JSON.stringify(next));
 
-      // 4. Add push-style notifications (local lib)
-      await addNotification({
-        audience: 'worker',
-        recipient_id: workerId,
-        kind: 'booking_request',
-        title: 'New booking request',
-        body: `Booking for ${bookDate} at ${bookTime} · price to be quoted`,
-        data: { booking_id: bookingData.id, ...newItem, note: bookNote },
-      });
+      // No client-side notification POST: the backend persists a
+      // 'booking_request' notification for the worker (and pushes it over
+      // the socket), so an offline worker still sees it — a local-only write
+      // from this device would just duplicate it.
 
       Alert.alert(
         'Booked',
@@ -305,7 +382,7 @@ export default function WorkerInfoPage() {
       console.error('Booking failed', e);
       Alert.alert('Booking failed', e?.message || 'Failed to create booking. Please try again.');
     } finally {
-      setLoading(false);
+      setSubmitting(false);
     }
   }
 
@@ -317,9 +394,30 @@ export default function WorkerInfoPage() {
     );
   }
   if (!worker) {
+    // Not a dead end: give the user a way back AND a way to retry — on web
+    // especially there is no swipe-back gesture to escape this screen.
     return (
       <View style={styles.container}>
-        <Text style={styles.errorText}>Worker not found</Text>
+        <Text style={styles.errorText}>Couldn&apos;t load this worker</Text>
+        <View style={{ flexDirection: 'row', gap: 12, marginTop: 16 }}>
+          <TouchableOpacity
+            accessibilityLabel="Go back"
+            onPress={() => router.back()}
+            style={{ paddingHorizontal: 18, paddingVertical: 10, borderRadius: 10, backgroundColor: '#eee' }}
+          >
+            <Text style={{ fontWeight: '700', color: '#333' }}>Go back</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            accessibilityLabel="Retry loading worker"
+            onPress={() => {
+              setLoading(true);
+              void fetchWorkerDetails();
+            }}
+            style={{ paddingHorizontal: 18, paddingVertical: 10, borderRadius: 10, backgroundColor: '#6F42C1' }}
+          >
+            <Text style={{ fontWeight: '700', color: '#fff' }}>Retry</Text>
+          </TouchableOpacity>
+        </View>
       </View>
     );
   }
@@ -358,7 +456,8 @@ export default function WorkerInfoPage() {
           ))}
         </View>
 
-        <ScrollView style={styles.tabContent} showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 100 }}>
+        <KeyboardAvoidingView style={styles.kav} behavior="padding">
+        <ScrollView style={styles.tabContent} showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 100 }} keyboardShouldPersistTaps="handled">
           {activeTab === 'profile' && (
             <View style={styles.tabPane}>
               <Detail label="Name" value={worker.full_name || undefined} />
@@ -424,12 +523,16 @@ export default function WorkerInfoPage() {
               <Text style={styles.sectionTitle}>Talk to the worker</Text>
               <View style={styles.contactInfo}>
                 <Ionicons name="call-outline" size={24} color="#6F42C1" />
-                <Text style={styles.phoneText}>{worker.phone || '+91 XXXX XXX XXX'}</Text>
+                {/* No fabricated placeholder numbers — if the worker has no
+                    phone on file, say so instead of showing fake data. */}
+                <Text style={styles.phoneText}>{worker.phone || 'No phone number shared'}</Text>
               </View>
-              <TouchableOpacity style={styles.callButton} onPress={handleCall}>
-                <Ionicons name="call" size={20} color="white" />
-                <Text style={styles.callButtonText}>Call Worker</Text>
-              </TouchableOpacity>
+              {worker.phone ? (
+                <TouchableOpacity style={styles.callButton} onPress={handleCall} accessibilityLabel="Call worker">
+                  <Ionicons name="call" size={20} color="white" />
+                  <Text style={styles.callButtonText}>Call Worker</Text>
+                </TouchableOpacity>
+              ) : null}
               <TouchableOpacity
                 style={[styles.chatButton]}
                 onPress={() => router.push({ pathname: '/chat', params: { workerId, workerName: worker.full_name || '' } })}
@@ -447,22 +550,39 @@ export default function WorkerInfoPage() {
                   <Text style={styles.sectionTitle}>
                     {repeatBooking ? `You've booked ${worker.full_name} ${history.length} times` : 'Your history with this worker'}
                   </Text>
-                  {history.map((h) => (
-                    <View key={h.id} style={styles.historyCard}>
-                      <View style={{ flex: 1 }}>
-                        <Text style={styles.historyDate}>{h.date}  ·  {h.time}</Text>
-                        <Text style={styles.historyStatus}>
-                          {h.status === 'completed' ? '✓ Completed' : '✗ Cancelled'}
-                        </Text>
+                  {history.map((h) => {
+                    const st = historyStatusLabel(h.status);
+                    return (
+                      <View key={h.id} style={styles.historyCard}>
+                        <View style={{ flex: 1 }}>
+                          <Text style={styles.historyDate}>{h.date}  ·  {h.time}</Text>
+                          <Text style={[styles.historyStatus, { color: st.color }]}>{st.text}</Text>
+                        </View>
+                        {/* History rows have no price data — show a dash, never ₹0. */}
+                        <Text style={styles.historyPrice}>{h.price > 0 ? `₹${h.price}` : '—'}</Text>
                       </View>
-                      <Text style={styles.historyPrice}>₹{h.price}</Text>
-                    </View>
-                  ))}
+                    );
+                  })}
                 </>
               )}
 
               <Text style={[styles.sectionTitle, { marginTop: 16 }]}>Book a new slot</Text>
               <View style={styles.bookForm}>
+                {slots.some((s) => s.is_available) ? (
+                  <View style={styles.hoursBox}>
+                    <Ionicons name="time-outline" size={14} color="#6F42C1" />
+                    <Text style={styles.hoursText}>
+                      {slots
+                        .filter((s) => s.is_available)
+                        .map((s) => `${DAY_SHORT[(s.available_day || '').toLowerCase()] || s.available_day} ${formatTimeLabel(s.start_time || '')}–${formatTimeLabel(s.end_time || '')}`)
+                        .join('  ·  ')}
+                    </Text>
+                  </View>
+                ) : (
+                  <Text style={styles.hoursNone}>
+                    No weekly hours set — any day/time can be requested.
+                  </Text>
+                )}
                 {Platform.OS === 'web' ? (
                   <>
                     <View style={styles.formRow}>
@@ -532,8 +652,16 @@ export default function WorkerInfoPage() {
                   </Text>
                 </View>
 
-                <TouchableOpacity style={styles.bookNowButton} onPress={handleBookNow}>
-                  <Text style={styles.bookNowButtonText}>Book Now</Text>
+                <TouchableOpacity
+                  style={[styles.bookNowButton, submitting && { opacity: 0.6 }]}
+                  onPress={handleBookNow}
+                  disabled={submitting}
+                >
+                  {submitting ? (
+                    <ActivityIndicator color="#fff" />
+                  ) : (
+                    <Text style={styles.bookNowButtonText}>Book Now</Text>
+                  )}
                 </TouchableOpacity>
               </View>
             </View>
@@ -546,7 +674,7 @@ export default function WorkerInfoPage() {
                 <View style={styles.mapRow}>
                   <Ionicons name="navigate" size={18} color="#6F42C1" />
                   <Text style={styles.mapLabel}>You</Text>
-                  <Text style={styles.mapValue}>{clientLoc ? `${clientLoc.lat.toFixed(3)}, ${clientLoc.lng.toFixed(3)}` : 'Locating…'}</Text>
+                  <Text style={styles.mapValue}>{clientLoc ? `${clientLoc.lat.toFixed(3)}, ${clientLoc.lng.toFixed(3)}` : locUnavailable ? 'Location unavailable' : 'Locating…'}</Text>
                 </View>
                 <View style={styles.mapRow}>
                   <Ionicons name="location" size={18} color="#FF6B6B" />
@@ -560,7 +688,7 @@ export default function WorkerInfoPage() {
                 <View style={styles.distanceRow}>
                   <Text style={styles.distanceLabel}>Distance</Text>
                   <Text style={styles.distanceValue}>
-                    {distanceKm != null ? `${distanceKm.toFixed(1)} km` : '—'}
+                    {distanceKm != null ? `${distanceKm.toFixed(1)} km` : locUnavailable ? 'Location unavailable' : '—'}
                   </Text>
                 </View>
               </View>
@@ -597,6 +725,7 @@ export default function WorkerInfoPage() {
             </View>
           )}
         </ScrollView>
+        </KeyboardAvoidingView>
       </View>
 
       {Platform.OS !== 'web' && showDatePicker && (
@@ -668,6 +797,7 @@ const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: '#fff' },
   container: { flex: 1, backgroundColor: '#fff', justifyContent: 'center', alignItems: 'center' },
   designFrame: { flex: 1, width: '100%', backgroundColor: '#fff' },
+  kav: { flex: 1 },
   errorText: { fontSize: 16, color: '#999' },
   headerRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingTop: 16, paddingBottom: 12 },
   headerTitle: { fontSize: 18, fontWeight: '800', color: '#333' },
@@ -717,6 +847,9 @@ const styles = StyleSheet.create({
   historyPrice: { fontSize: 14, fontWeight: '800', color: '#6F42C1' },
 
   bookForm: { backgroundColor: '#fafafa', borderRadius: 12, padding: 12, borderWidth: 1, borderColor: '#eee' },
+  hoursBox: { flexDirection: 'row', alignItems: 'flex-start', gap: 6, backgroundColor: '#f5f0fb', borderRadius: 8, padding: 8, marginBottom: 10, borderWidth: 1, borderColor: '#e6dbf5' },
+  hoursText: { flex: 1, fontSize: 11, color: '#4c1d95', lineHeight: 16, fontWeight: '600' },
+  hoursNone: { fontSize: 11, color: '#888', marginBottom: 10 },
   formRow: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#fff', borderRadius: 8, paddingHorizontal: 10, marginBottom: 8, borderWidth: 1, borderColor: '#eee', gap: 8 },
   formInput: { flex: 1, paddingVertical: 10, fontSize: 13, color: '#333' },
   priceBox: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', backgroundColor: '#fff', borderRadius: 8, padding: 10, marginVertical: 6 },

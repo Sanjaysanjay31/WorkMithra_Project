@@ -1,5 +1,15 @@
-import { aiDetectLang, aiTranslate, LangCode, LANGS, speak as speakTTS, webSTT } from '@/lib/ai';
+import {
+  aiDetectLang,
+  aiTranslate,
+  getOtherLanguage,
+  LangCode,
+  LANGS,
+  saveMyLanguage,
+  speak as speakTTS,
+  webSTT,
+} from '@/lib/ai';
 import { authFetch, expectJson } from '@/lib/api';
+import { useI18n } from '@/lib/i18n';
 import { platformShadow } from '@/lib/shadow';
 import { ensureSocket, onMessageReceived } from '@/lib/socket';
 import { storage } from '@/lib/storage';
@@ -13,7 +23,6 @@ import {
   Keyboard,
   KeyboardAvoidingView,
   Platform,
-  SafeAreaView,
   StyleSheet,
   Text,
   TextInput,
@@ -38,34 +47,44 @@ interface ServerChatMessage {
   message: string;
 }
 
-const createSystemBubble = (otherName?: string, myRole: 'user' | 'worker' = 'user'): Bubble => ({
+const createSystemBubble = (myRole: 'user' | 'worker' = 'user'): Bubble => ({
   id: 'sys',
-  side: 'worker',
-  original:
-    myRole === 'worker'
-      ? `Chat with ${otherName || 'client'} — messages are auto-translated.`
-      : otherName
-        ? `Hello, this is ${otherName}. How can I help you?`
-        : 'Hello! How can I help you?',
+  // Render on the far side (left) regardless of who is viewing. The text is
+  // an explicit app notice — never phrased as the counterpart speaking,
+  // which would be a fabricated message in a real conversation.
+  side: myRole === 'worker' ? 'client' : 'worker',
+  original: 'Auto-translation is on — messages are translated for each of you as needed.',
   srcLang: 'en-IN',
   translations: {},
 });
 
-const mapServerMessageToBubble = (message: ServerChatMessage, currentUserId: string): Bubble => ({
-  id: String(message.id),
-  side: String(message.sender_id) === currentUserId ? 'client' : 'worker',
-  original: message.message ?? '',
-  srcLang: 'en-IN',
-  translations: {},
-});
+const mapServerMessageToBubble = (
+  message: ServerChatMessage,
+  currentUserId: string,
+  myRole: 'user' | 'worker' = 'user',
+): Bubble => {
+  const mine = String(message.sender_id) === currentUserId;
+  const mySide: Side = myRole === 'worker' ? 'worker' : 'client';
+  return {
+    id: String(message.id),
+    side: mine ? mySide : mySide === 'client' ? 'worker' : 'client',
+    original: message.message ?? '',
+    // Unknown until detection runs — 'en-IN' is the safe no-translate default.
+    srcLang: 'en-IN',
+    translations: {},
+  };
+};
 
 export default function ChatScreen() {
   const router = useRouter();
+  const { t } = useI18n();
   const { workerId, workerName } = useLocalSearchParams<{ workerId?: string; workerName?: string }>();
 
-  const me: Side = 'client';
   const [clientLang, setClientLang] = useState<LangCode>('en-IN');
-  const [workerLang, setWorkerLang] = useState<LangCode>('te-IN');
+  // Neutral default until the counterpart's profile tells us their language —
+  // never assume a specific language (the old 'te-IN' guess was just wrong
+  // for most conversations).
+  const [workerLang, setWorkerLang] = useState<LangCode>('en-IN');
   const [input, setInput] = useState<string>('');
   const [msgs, setMsgs] = useState<Bubble[]>([]);
   const [busy, setBusy] = useState<boolean>(false);
@@ -73,29 +92,45 @@ export default function ChatScreen() {
   const [speakingId, setSpeakingId] = useState<string | null>(null);
   const [currentUserId, setCurrentUserId] = useState<string>('');
   const [myRole, setMyRole] = useState<'user' | 'worker'>('user');
-  const [keyboardVisible, setKeyboardVisible] = useState(false);
-  const [keyboardHeight, setKeyboardHeight] = useState(0);
+
+  // Which bubble side "I" am — derived from the session role, never hardcoded.
+  const me: Side = myRole === 'worker' ? 'worker' : 'client';
+  const otherSide: Side = me === 'client' ? 'worker' : 'client';
 
   const listRef = useRef<FlatList<Bubble> | null>(null);
+  // Ref-based send guard: `busy` state alone can't block a double-tap because
+  // the second press reads the stale value before the re-render lands.
+  const sendingRef = useRef(false);
+  const tempIdSeq = useRef(0);
 
   const scrollToBottom = useCallback(() => {
     setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 50);
   }, []);
 
-  useEffect(() => {
-    const keyboardShow = Keyboard.addListener(Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow', (event) => {
-      setKeyboardVisible(true);
-      setKeyboardHeight(event.endCoordinates?.height || 0);
-      scrollToBottom();
-    });
-    const keyboardHide = Keyboard.addListener(Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide', () => {
-      setKeyboardVisible(false);
-      setKeyboardHeight(0);
-    });
+  // Detect a bubble's language in the background and patch it in. Failures are
+  // silent — the bubble keeps the safe 'en-IN' default.
+  const detectBubbleLang = useCallback((bubbleId: string, text: string) => {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    void aiDetectLang(trimmed)
+      .then((lang) => {
+        setMsgs((prev) =>
+          prev.map((item) => (item.id === bubbleId && item.srcLang !== lang ? { ...item, srcLang: lang } : item)),
+        );
+      })
+      .catch(() => {});
+  }, []);
 
+  useEffect(() => {
+    // Keep the latest message visible when the keyboard opens. The layout
+    // itself is handled by KeyboardAvoidingView — manual height tracking here
+    // used to double-shift the composer on Android.
+    const keyboardShow = Keyboard.addListener(
+      Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow',
+      () => scrollToBottom(),
+    );
     return () => {
       keyboardShow.remove();
-      keyboardHide.remove();
     };
   }, [scrollToBottom]);
 
@@ -118,12 +153,25 @@ export default function ChatScreen() {
 
       setCurrentUserId(uid);
       setMyRole(role);
-      const sysMsg = createSystemBubble(workerName, role);
+      const sysMsg = createSystemBubble(role);
 
       if (!uid || !workerId) {
         setMsgs([sysMsg]);
         return;
       }
+
+      // The other participant's language comes from their profile, so the
+      // picker shows what they actually speak instead of a guess. Until it
+      // arrives the picker keeps the default — translation just targets
+      // whatever is selected, which is still better than guessing.
+      const otherRole: 'user' | 'worker' = role === 'worker' ? 'user' : 'worker';
+      getOtherLanguage(workerId, otherRole, 'en-IN')
+        .then((lang) => { if (role === 'worker') setClientLang(lang); else setWorkerLang(lang); });
+
+      // My own saved language comes from my profile too, so a returning user
+      // keeps their pick instead of resetting to the default each session.
+      getOtherLanguage(uid, role, 'en-IN')
+        .then((lang) => { if (role === 'worker') setWorkerLang(lang); else setClientLang(lang); });
 
       try {
         const history = await expectJson<ServerChatMessage[]>(
@@ -138,9 +186,12 @@ export default function ChatScreen() {
           return;
         }
 
-        const loadedMsgs = history.map((message: ServerChatMessage) => mapServerMessageToBubble(message, uid));
+        const loadedMsgs = history.map((message: ServerChatMessage) => mapServerMessageToBubble(message, uid, role));
         setMsgs([sysMsg, ...loadedMsgs]);
         scrollToBottom();
+        // Detect each message's real language in the background so
+        // translations target the right source (history is not all English).
+        loadedMsgs.forEach((bubble) => detectBubbleLang(bubble.id, bubble.original));
       } catch (error: any) {
         if (controller.signal.aborted) return;
         console.warn('Failed to load chat history', error);
@@ -150,7 +201,7 @@ export default function ChatScreen() {
 
     void loadConversation();
     return () => controller.abort();
-  }, [workerId, workerName, scrollToBottom]);
+  }, [workerId, workerName, scrollToBottom, detectBubbleLang]);
 
   // Realtime: new messages arrive over Socket.IO; a slow 30s reconcile fetch
   // covers anything missed while the socket was disconnected.
@@ -166,22 +217,26 @@ export default function ChatScreen() {
       await ensureSocket();
       if (cancelled) return;
       offMessage = onMessageReceived((data) => {
-        // Only messages from this worker; my own come back via the REST response.
+        // Only messages from the other participant; my own come back via the
+        // REST response. (workerId param = the other side's id for either role.)
         if (String(data.sender_id) !== String(workerId)) return;
+        const bubbleId = String(data.id);
+        const text = data.message ?? '';
         setMsgs((prev) => {
-          if (prev.some((bubble) => bubble.id === String(data.id))) return prev;
+          if (prev.some((bubble) => bubble.id === bubbleId)) return prev;
           scrollToBottom();
           return [
             ...prev,
             {
-              id: String(data.id),
-              side: 'worker' as Side,
-              original: data.message ?? '',
+              id: bubbleId,
+              side: otherSide,
+              original: text,
               srcLang: 'en-IN' as LangCode,
               translations: {},
             },
           ];
         });
+        detectBubbleLang(bubbleId, text);
       });
     })();
 
@@ -200,10 +255,11 @@ export default function ChatScreen() {
           const existingIds = new Set(prev.map((bubble) => bubble.id));
           const newMessages = history
             .filter((message: ServerChatMessage) => !existingIds.has(String(message.id)))
-            .map((message: ServerChatMessage) => mapServerMessageToBubble(message, currentUserId));
+            .map((message: ServerChatMessage) => mapServerMessageToBubble(message, currentUserId, myRole));
 
           if (newMessages.length === 0) return prev;
           scrollToBottom();
+          newMessages.forEach((bubble) => detectBubbleLang(bubble.id, bubble.original));
           return [...prev, ...newMessages];
         });
       } catch (error: any) {
@@ -219,7 +275,7 @@ export default function ChatScreen() {
       controller.abort();
       clearInterval(intervalId);
     };
-  }, [currentUserId, workerId, scrollToBottom]);
+  }, [currentUserId, workerId, scrollToBottom, myRole, otherSide, detectBubbleLang]);
 
   const langForSide = useCallback((side: Side): LangCode => (side === 'client' ? clientLang : workerLang), [clientLang, workerLang]);
 
@@ -256,6 +312,10 @@ export default function ChatScreen() {
     async (text: string) => {
       const trimmed = text.trim();
       if (!trimmed) return;
+      // Block double-taps / rapid Enter presses: the busy state alone is stale
+      // inside this closure, so a ref carries the real in-flight flag.
+      if (sendingRef.current) return;
+      sendingRef.current = true;
 
       setInput('');
       setBusy(true);
@@ -269,7 +329,8 @@ export default function ChatScreen() {
         console.warn('Language detection failed', error);
       }
 
-      const tempId = String(Date.now());
+      tempIdSeq.current += 1;
+      const tempId = `tmp-${Date.now()}-${tempIdSeq.current}`;
       const bubble: Bubble = { id: tempId, side: me, original: trimmed, srcLang, translations: {} };
 
       if (srcLang !== targetLang) {
@@ -305,9 +366,10 @@ export default function ChatScreen() {
         }
       }
 
+      sendingRef.current = false;
       setBusy(false);
     },
-    [clientLang, currentUserId, workerId, scrollToBottom, workerLang],
+    [clientLang, currentUserId, workerId, scrollToBottom, workerLang, me],
   );
 
   const onMic = useCallback(async (): Promise<void> => {
@@ -325,7 +387,7 @@ export default function ChatScreen() {
     } finally {
       setListening(false);
     }
-  }, [clientLang, send, workerLang]);
+  }, [clientLang, send, workerLang, me]);
 
   const onSpeak = useCallback(
     async (bubble: Bubble): Promise<void> => {
@@ -341,7 +403,7 @@ export default function ChatScreen() {
         setSpeakingId(null);
       }
     },
-    [ensureTranslation, speakingId],
+    [ensureTranslation, speakingId, langForSide, me],
   );
 
   const renderBubble = useCallback(
@@ -403,15 +465,26 @@ export default function ChatScreen() {
   );
 
   const myLang = me === 'client' ? clientLang : workerLang;
-  const otherLabel = myRole === 'worker' ? 'Client' : 'Worker';
-  const composerBottomOffset = keyboardVisible && Platform.OS === 'android' ? Math.max(keyboardHeight - 24, 0) : 0;
+  const otherLang = me === 'client' ? workerLang : clientLang;
+  const setMyLang = me === 'client' ? setClientLang : setWorkerLang;
+  const setOtherLang = me === 'client' ? setWorkerLang : setClientLang;
+  // Persist my pick to my profile so the next chat (and the other side's
+  // translation) starts from it; local state updates immediately regardless.
+  const handleMyLangChange = (lang: LangCode) => {
+    setMyLang(lang);
+    saveMyLanguage(currentUserId, myRole, lang);
+  };
+  // "You speak" / "<otherLabel> speaks" — the other side's label depends on who
+// I am, so a worker sees "Client speaks" and a client sees "Worker speaks".
+const otherLabel = myRole === 'worker' ? 'Client' : 'Worker';
 
   return (
-    <SafeAreaView style={styles.safeArea}>
+    // Plain View: the root layout already applies the safe-area insets.
+    // RN's deprecated SafeAreaView would double them on iOS.
+    <View style={styles.safeArea}>
       <KeyboardAvoidingView
         style={styles.keyboardView}
-        behavior={Platform.OS === 'ios' ? 'padding' : 'position'}
-        keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 0}
+        behavior="padding"
         enabled
       >
         <View style={styles.screen}>
@@ -430,7 +503,7 @@ export default function ChatScreen() {
 
                 <View>
                   <Text style={styles.headerTitle}>{workerName || 'Chat'}</Text>
-                  <Text style={styles.headerSubtitle}>online · auto-translate</Text>
+                  <Text style={styles.headerSubtitle}>{t('chat.onlineAutoTranslate')}</Text>
                 </View>
               </View>
 
@@ -438,8 +511,8 @@ export default function ChatScreen() {
             </View>
 
             <View style={styles.langSection}>
-              <LangPicker label="You speak" value={clientLang} onChange={setClientLang} />
-              <LangPicker label={`${workerName || otherLabel} speaks`} value={workerLang} onChange={setWorkerLang} />
+              <LangPicker label={t('chat.youSpeak')} value={myLang} onChange={handleMyLangChange} />
+              <LangPicker label={t('chat.otherSpeaks', { name: workerName || otherLabel })} value={otherLang} onChange={setOtherLang} />
             </View>
 
             <FlatList
@@ -449,7 +522,7 @@ export default function ChatScreen() {
               keyExtractor={(bubble) => bubble.id}
               renderItem={renderBubble}
               style={styles.list}
-              contentContainerStyle={{ paddingHorizontal: 8, paddingTop: 8, paddingBottom: keyboardVisible ? keyboardHeight + 140 : 120 }}
+              contentContainerStyle={{ paddingHorizontal: 8, paddingTop: 8, paddingBottom: 12 }}
               keyboardShouldPersistTaps="handled"
               keyboardDismissMode="interactive"
               onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: true })}
@@ -457,17 +530,12 @@ export default function ChatScreen() {
 
             {busy && <ActivityIndicator color="#6F42C1" style={{ marginVertical: 4 }} />}
 
-            {/* Keep the composer above the keyboard on both platforms. */}
-            <View
-              style={[
-                styles.inputRow,
-                Platform.OS === 'android' && keyboardVisible
-                  ? { position: 'absolute', left: 0, right: 0, bottom: composerBottomOffset, zIndex: 20, borderTopWidth: 1, borderTopColor: '#ece5dd' }
-                  : null,
-              ]}
-            >
+            {/* Composer stays in normal flow — KeyboardAvoidingView's padding
+                lifts the whole column above the keyboard on both platforms. */}
+            <View style={styles.inputRow}>
               <TouchableOpacity
                 testID="mic-button"
+                accessibilityLabel={listening ? 'Stop voice input' : 'Start voice input'}
                 style={[styles.micBtn, listening && { backgroundColor: '#FF6B6B' }]}
                 onPress={onMic}
               >
@@ -479,21 +547,21 @@ export default function ChatScreen() {
                 style={styles.input}
                 value={input}
                 onChangeText={setInput}
-                placeholder={`Type in ${myLang.split('-')[0].toUpperCase()} or any language...`}
+                placeholder={t('chat.typePlaceholder', { lang: myLang.split('-')[0].toUpperCase() })}
                 placeholderTextColor="#999"
                 returnKeyType="send"
                 blurOnSubmit={false}
                 onSubmitEditing={() => send(input)}
               />
 
-              <TouchableOpacity testID="send-button" style={styles.sendBtn} onPress={() => send(input)}>
+              <TouchableOpacity accessibilityLabel="Send message" testID="send-button" style={styles.sendBtn} onPress={() => send(input)}>
                 <Ionicons name="send" size={16} color="#fff" />
               </TouchableOpacity>
             </View>
           </View>
         </View>
       </KeyboardAvoidingView>
-    </SafeAreaView>
+    </View>
   );
 }
 

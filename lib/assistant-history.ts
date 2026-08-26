@@ -45,11 +45,23 @@ export async function loadHistory(): Promise<AssistantMsg[]> {
  * Persist one message. Mirrors to local storage immediately and syncs to the
  * server fire-and-forget when logged in — the UI never blocks on this.
  */
+// Local writes are serialized: appendHistory is a read-modify-write on the
+// stored array, so two concurrent appends would both read the same snapshot
+// and one message would be silently lost.
+let _localQueue: Promise<void> = Promise.resolve();
+
+function enqueueLocal(op: () => Promise<void>): Promise<void> {
+  _localQueue = _localQueue.then(op, op);
+  return _localQueue;
+}
+
 export async function appendHistory(m: AssistantMsg): Promise<void> {
-  try {
-    const local = await loadLocal();
-    await storage.set(SESSION_KEY, JSON.stringify([...local, m]));
-  } catch {}
+  await enqueueLocal(async () => {
+    try {
+      const local = await loadLocal();
+      await storage.set(SESSION_KEY, JSON.stringify([...local, m]));
+    } catch {}
+  });
 
   const auth = await getAuth();
   if (!auth?.token) return;
@@ -62,9 +74,11 @@ export async function appendHistory(m: AssistantMsg): Promise<void> {
 
 /** Clear the conversation locally and on the server (best-effort). */
 export async function clearHistory(): Promise<void> {
-  try {
-    await storage.remove(SESSION_KEY);
-  } catch {}
+  await enqueueLocal(async () => {
+    try {
+      await storage.remove(SESSION_KEY);
+    } catch {}
+  });
 
   const auth = await getAuth();
   if (!auth?.token) return;

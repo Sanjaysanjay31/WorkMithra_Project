@@ -1,15 +1,18 @@
 import Avatar from '@/components/avatar';
 import BottomNav from '@/components/bottom-nav';
-import { authFetch } from '@/lib/api';
+import { authFetch, readApiError } from '@/lib/api';
+import { useI18n } from '@/lib/i18n';
 import { pickImageNative, pickImageWeb } from '@/lib/image-picker';
+import { unregisterPush } from '@/lib/push';
 import { disconnectSocket } from '@/lib/socket';
-import { storage } from '@/lib/storage';
+import { clearAllWorkMitraStorage, storage } from '@/lib/storage';
 import { Ionicons } from '@expo/vector-icons';
 import { Stack, useRouter } from 'expo-router';
 import React, { useEffect, useState } from 'react';
 import {
     ActivityIndicator,
     Alert,
+    KeyboardAvoidingView,
     Platform,
     ScrollView,
     StyleSheet,
@@ -37,6 +40,7 @@ const EMPTY: ProfileForm = {
 
 export default function ProfilePage() {
   const router = useRouter();
+  const { t } = useI18n();
   const [profile, setProfile] = useState<ProfileForm>(EMPTY);
   const [saving, setSaving] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -155,8 +159,10 @@ export default function ProfilePage() {
       fd.append('user_id', currentUserId);
       fd.append('role', 'user');
       const res = await authFetch('/upload-profile-image', { method: 'POST', body: fd });
+      // Check status BEFORE parsing — a proxy 413/502 HTML body would throw
+      // a confusing JSON parse error and mask the real failure.
+      if (!res.ok) throw new Error(await readApiError(res, 'Upload failed'));
       const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || 'Upload failed');
       const next = { ...profile, profile_image: data.url };
       setProfile(next);
       await storage.set(PROFILE_KEY, JSON.stringify({ ...next, __uid: currentUserId }));
@@ -205,7 +211,8 @@ export default function ProfilePage() {
     <View style={styles.screen}>
       <Stack.Screen options={{ headerShown: false }} />
       <View style={styles.frame}>
-        <ScrollView contentContainerStyle={{ paddingBottom: 100 }} showsVerticalScrollIndicator={false}>
+        <KeyboardAvoidingView style={styles.kav} behavior="padding">
+        <ScrollView contentContainerStyle={{ paddingBottom: 100 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
 
           {/* Avatar header */}
           <View style={styles.headerBg}>
@@ -250,12 +257,23 @@ export default function ProfilePage() {
             <TouchableOpacity
               style={styles.pwdOption}
               onPress={async () => {
-                disconnectSocket();
-                await storage.remove('workmithra:auth');
-                await storage.remove(PROFILE_KEY).catch(() => {});
-                await storage.remove('workmithra:user_profile').catch(() => {});
-                await storage.remove('workmithra:worker_profile').catch(() => {});
-                router.replace('/login');
+                const doSwitch = async () => {
+                  disconnectSocket();
+                  await unregisterPush();
+                  await clearAllWorkMitraStorage();
+                  router.replace('/login');
+                };
+                const message = t('auth.switchRoleMessage');
+                if (Platform.OS === 'web') {
+                  if (typeof window !== 'undefined' && window.confirm(message)) {
+                    await doSwitch();
+                  }
+                } else {
+                  Alert.alert(t('auth.switchTitle'), message, [
+                    { text: t('common.cancel'), style: 'cancel' },
+                    { text: t('common.switch'), style: 'destructive', onPress: doSwitch },
+                  ]);
+                }
               }}
             >
               <View style={[styles.pwdIcon, { backgroundColor: '#e0f2fe' }]}>
@@ -273,20 +291,19 @@ export default function ProfilePage() {
               onPress={async () => {
                 const doLogout = async () => {
                   disconnectSocket();
-                  await storage.remove('workmithra:auth');
-                  await storage.remove(PROFILE_KEY).catch(() => {});
-                  await storage.remove('workmithra:user_profile').catch(() => {});
-                  await storage.remove('workmithra:worker_profile').catch(() => {});
+                  await unregisterPush();
+                  await clearAllWorkMitraStorage();
                   router.replace('/login');
                 };
+                const message = t('auth.logoutMessage');
                 if (Platform.OS === 'web') {
-                  if (typeof window !== 'undefined' && window.confirm('Are you sure you want to log out?')) {
+                  if (typeof window !== 'undefined' && window.confirm(message)) {
                     await doLogout();
                   }
                 } else {
-                  Alert.alert('Logout', 'Are you sure you want to log out?', [
-                    { text: 'Cancel', style: 'cancel' },
-                    { text: 'Logout', style: 'destructive', onPress: doLogout },
+                  Alert.alert(t('auth.logoutTitle'), message, [
+                    { text: t('common.cancel'), style: 'cancel' },
+                    { text: t('common.logout'), style: 'destructive', onPress: doLogout },
                   ]);
                 }
               }}
@@ -352,6 +369,7 @@ export default function ProfilePage() {
             )}
           </View>
         </ScrollView>
+        </KeyboardAvoidingView>
       </View>
       <BottomNav currentRoute="profile" />
     </View>
@@ -392,6 +410,7 @@ function Field({
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: '#fff' },
   frame: { flex: 1, width: '100%', backgroundColor: '#fff' },
+  kav: { flex: 1 },
 
   headerBg: { backgroundColor: '#6F42C1', paddingTop: 24, paddingBottom: 20, alignItems: 'center', borderBottomLeftRadius: 24, borderBottomRightRadius: 24 },
   avatarWrap: { width: 144, height: 144, marginBottom: 12 },

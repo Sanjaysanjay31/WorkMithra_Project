@@ -38,7 +38,9 @@ def test_trim_assistant_reply_keeps_short_answer():
 
     result = ai_svc._trim_assistant_reply(long_text)
 
-    assert result == "Sure"
+    # Sentence-boundary splitting keeps the terminal punctuation ("Sure!")
+    # while dropping everything after it.
+    assert result == "Sure!"
 
 
 def test_assistant_short_reply_is_not_static_for_generic_questions():

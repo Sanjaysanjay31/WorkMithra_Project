@@ -2,7 +2,7 @@ import { resetPassword, sendOtp, verifyOtp } from '@/lib/auth-api';
 import { storage } from '@/lib/storage';
 import { Ionicons } from '@expo/vector-icons';
 import { Stack, useRouter } from 'expo-router';
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
     ActivityIndicator,
     KeyboardAvoidingView,
@@ -28,6 +28,15 @@ export default function ForgotPasswordScreen() {
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<{ type: 'error' | 'success'; text: string } | null>(null);
+
+  // Post-success redirect is delayed so the success banner is visible; clear
+  // the timer if the user navigates away before it fires.
+  const redirectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    return () => {
+      if (redirectTimer.current) clearTimeout(redirectTimer.current);
+    };
+  }, []);
 
   const notify = (type: 'error' | 'success', text: string) => setMessage({ type, text });
 
@@ -87,7 +96,7 @@ export default function ForgotPasswordScreen() {
       } catch {}
 
       notify('success', 'Password reset successful!');
-      setTimeout(() => router.replace('/login'), 800);
+      redirectTimer.current = setTimeout(() => router.replace('/login'), 800);
     } catch (e: any) {
       notify('error', e.message || 'Reset failed');
     } finally {

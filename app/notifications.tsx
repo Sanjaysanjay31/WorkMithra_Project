@@ -1,9 +1,12 @@
 import BottomNav from '@/components/bottom-nav';
+import { getAuth } from '@/lib/api';
 import { clearAll, listNotifications, markAllRead, markRead, Notification, NotifAudience } from '@/lib/notifications';
+import { ensureSocket, onNotificationCreated } from '@/lib/socket';
 import { Ionicons } from '@expo/vector-icons';
-import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
+import { Stack, useRouter } from 'expo-router';
 import React, { useEffect, useState } from 'react';
 import {
+    ActivityIndicator,
     Alert,
     ScrollView,
     StyleSheet,
@@ -30,16 +33,83 @@ function timeAgo(iso: string) {
 
 export default function NotificationsPage() {
   const router = useRouter();
-  const { as, id } = useLocalSearchParams<{ as?: string; id?: string }>();
-  const audience: NotifAudience = (as === 'worker' ? 'worker' : 'user');
-  const recipientId = String(id || '');
 
   const [items, setItems] = useState<Notification[]>([]);
+  const [loading, setLoading] = useState(true);
+  // A failed load is NOT the same as an empty inbox — render it distinctly.
+  const [loadError, setLoadError] = useState('');
+  // Ticks every 30s so "just now"/"5m ago" labels stay truthful instead of
+  // freezing at whatever they read on the render that fetched the list.
+  const [, setTick] = useState(0);
+  // Identity comes from the session, never from URL params — a crafted
+  // ?as=...&id=... must not be able to point this screen at someone else's
+  // inbox (the backend enforces it too, but the UI shouldn't ask for it).
+  const [audience, setAudience] = useState<NotifAudience>('user');
+  const [recipientId, setRecipientId] = useState('');
+  const [ready, setReady] = useState(false);
 
-  useEffect(() => { reload(); }, [audience, recipientId]);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const auth = await getAuth();
+      if (cancelled) return;
+      setAudience(auth?.role === 'worker' ? 'worker' : 'user');
+      setRecipientId(auth?.id ? String(auth.id) : '');
+      setReady(true);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!ready) return;
+    reload();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready, audience, recipientId]);
+
+  // New notifications arrive over the socket while this screen is open —
+  // prepend them instead of making the user pull-to-refresh.
+  useEffect(() => {
+    if (!ready || !recipientId) return;
+    let alive = true;
+    let off: () => void = () => {};
+    (async () => {
+      await ensureSocket();
+      if (!alive) return;
+      off = onNotificationCreated((data) => {
+        if (data.audience !== audience || String(data.recipient_id) !== recipientId) return;
+        const item: Notification = {
+          id: String(data.id),
+          title: data.title || '',
+          body: data.body || '',
+          audience: data.audience,
+          recipient_id: String(data.recipient_id),
+          kind: (data.kind || 'info') as Notification['kind'],
+          created_at: data.created_at || new Date().toISOString(),
+          read: false,
+        };
+        setItems((prev) => (prev.some((p) => p.id === item.id) ? prev : [item, ...prev]));
+      });
+    })();
+    return () => { alive = false; off(); };
+  }, [ready, audience, recipientId]);
+
+  useEffect(() => {
+    const id = setInterval(() => setTick((t) => t + 1), 30_000);
+    return () => clearInterval(id);
+  }, []);
 
   async function reload() {
-    setItems(await listNotifications(audience, recipientId));
+    setLoading(true);
+    setLoadError('');
+    try {
+      setItems(await listNotifications(audience, recipientId));
+    } catch {
+      setLoadError('Could not load notifications. Check your connection and try again.');
+    } finally {
+      setLoading(false);
+    }
   }
 
   async function onItemPress(n: Notification) {
@@ -88,7 +158,21 @@ export default function NotificationsPage() {
         )}
 
         <ScrollView contentContainerStyle={{ paddingBottom: 100 }} showsVerticalScrollIndicator={false}>
-          {items.length === 0 ? (
+          {loading ? (
+            <ActivityIndicator color="#6F42C1" style={{ marginTop: 40 }} />
+          ) : loadError ? (
+            <View style={styles.empty}>
+              <Ionicons name="cloud-offline-outline" size={42} color="#ccc" />
+              <Text style={[styles.emptyText, { color: '#b91c1c' }]}>{loadError}</Text>
+              <TouchableOpacity
+                accessibilityLabel="Retry loading notifications"
+                onPress={() => void reload()}
+                style={{ marginTop: 12, paddingHorizontal: 16, paddingVertical: 8, borderRadius: 8, backgroundColor: '#6F42C1' }}
+              >
+                <Text style={{ color: '#fff', fontWeight: '700' }}>Retry</Text>
+              </TouchableOpacity>
+            </View>
+          ) : items.length === 0 ? (
             <View style={styles.empty}>
               <Ionicons name="notifications-outline" size={42} color="#ccc" />
               <Text style={styles.emptyText}>No notifications yet</Text>

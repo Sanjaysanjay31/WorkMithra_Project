@@ -1,4 +1,5 @@
 import { aiChat, aiExtract, aiTranslate, cleanTextForSpeech, LangCode, pauseAudio, resumeAudio, setMuted, speakLong, stopAudio, webSTT } from '@/lib/ai';
+import { authFetch, getAuth } from '@/lib/api';
 import { appendHistory, clearHistory, loadHistory } from '@/lib/assistant-history';
 import { assistantBus } from '@/lib/assistant-bus';
 import { getScreenContext, Step, WORKER_STEPS } from '@/lib/assistant-context';
@@ -12,7 +13,7 @@ import {
     Animated,
     Dimensions,
     FlatList,
-    Modal,
+    KeyboardAvoidingView,
     PanResponder,
     Platform,
     StyleSheet,
@@ -21,6 +22,7 @@ import {
     TouchableOpacity,
     View,
 } from 'react-native';
+import FrameModal from './frame-modal';
 import LanguagePicker from './language-picker';
 
 type Msg = { who: 'ai' | 'me'; text: string };
@@ -62,6 +64,9 @@ export function AIAssistant() {
 
   const listRef = useRef<FlatList<Msg>>(null);
   const greetTimerRef = useRef<any>(null);
+  // Ref-based mic guard: the `listening` state is stale inside the async
+  // handler, so a ref is needed to actually block a double-tap.
+  const listeningRef = useRef(false);
 
   // Translated suggestion labels for the current language
   const [translatedSuggestions, setTranslatedSuggestions] = useState<string[]>(ctx.suggestions);
@@ -166,7 +171,7 @@ export function AIAssistant() {
     }
   }
 
-  function closeModal() {
+  function stopMedia() {
     if (greetTimerRef.current) {
       clearTimeout(greetTimerRef.current);
       greetTimerRef.current = null;
@@ -176,8 +181,19 @@ export function AIAssistant() {
     setListening(false);
     setSpeaking(false);
     setPaused(false);
+  }
+
+  // Hide the assistant WITHOUT erasing the conversation — used for the Android
+  // back button / backdrop dismiss. Reopening resumes where the user left off.
+  function dismissModal() {
+    stopMedia();
     setVisible(false);
-    // Erase the conversation only on explicit quit (red cross).
+  }
+
+  // Explicit quit (red cross): hide AND erase the conversation.
+  function quitModal() {
+    stopMedia();
+    setVisible(false);
     setMsgs([]);
     setCollected({});
     setOnboardActive(false);
@@ -202,10 +218,31 @@ export function AIAssistant() {
 
   // --- Draggable FAB ---
   const FAB_SIZE = 52;
-  const frameW = Math.min(Dimensions.get('window').width, 360);
-  const frameH = Math.min(Dimensions.get('window').height, 803);
-  const fabPos = useRef(new Animated.ValueXY({ x: frameW - FAB_SIZE - 14, y: frameH - FAB_SIZE - 86 })).current;
+  // Best guess until the container measures itself via onLayout. On web,
+  // Dimensions reports the whole browser window, so cap it to the phone frame.
+  const frameSizeRef = useRef({
+    w: Math.min(Dimensions.get('window').width, 390),
+    h: Math.min(Dimensions.get('window').height, 803),
+  });
+  const fabPos = useRef(
+    new Animated.ValueXY({
+      x: frameSizeRef.current.w - FAB_SIZE - 14,
+      y: frameSizeRef.current.h - FAB_SIZE - 86,
+    }),
+  ).current;
   const movedRef = useRef(false);
+
+  // Keep the FAB inside the actual frame — the measured size is the source of
+  // truth on every platform (phones of any size, web frame, rotation). Also
+  // re-clamps positions restored from storage that no longer fit.
+  const onContainerLayout = (event: any) => {
+    const { width, height } = event.nativeEvent.layout;
+    if (!width || !height) return;
+    frameSizeRef.current = { w: width, h: height };
+    const x = Math.max(0, Math.min((fabPos.x as any)._value, width - FAB_SIZE));
+    const y = Math.max(0, Math.min((fabPos.y as any)._value, height - FAB_SIZE));
+    fabPos.setValue({ x, y });
+  };
 
   const fabPan = useRef(
     PanResponder.create({
@@ -229,8 +266,8 @@ export function AIAssistant() {
         fabPos.flattenOffset();
         let x = (fabPos.x as any)._value;
         let y = (fabPos.y as any)._value;
-        x = Math.max(0, Math.min(x, frameW - FAB_SIZE));
-        y = Math.max(0, Math.min(y, frameH - FAB_SIZE));
+        x = Math.max(0, Math.min(x, frameSizeRef.current.w - FAB_SIZE));
+        y = Math.max(0, Math.min(y, frameSizeRef.current.h - FAB_SIZE));
         fabPos.setValue({ x, y });
         storage.set('workmithra:assistant_pos', JSON.stringify({ x, y })).catch(() => {});
         // movedRef stays true briefly; reset after a tick so any pending tap is cancelled.
@@ -245,7 +282,13 @@ export function AIAssistant() {
         const raw = await storage.get('workmithra:assistant_pos');
         if (raw) {
           const p = JSON.parse(raw);
-          if (typeof p?.x === 'number' && typeof p?.y === 'number') fabPos.setValue(p);
+          if (typeof p?.x === 'number' && typeof p?.y === 'number') {
+            // Clamp to the current frame — a position saved on a bigger screen
+            // would park the FAB off-screen here.
+            const x = Math.max(0, Math.min(p.x, frameSizeRef.current.w - FAB_SIZE));
+            const y = Math.max(0, Math.min(p.y, frameSizeRef.current.h - FAB_SIZE));
+            fabPos.setValue({ x, y });
+          }
         }
       } catch {}
     })();
@@ -299,11 +342,10 @@ export function AIAssistant() {
   function resumeSpeaking() { resumeAudio(); setPaused(false); }
 
   function appendMsg(m: Msg) {
-    setMsgs((prev) => {
-      const next = [...prev, m];
-      setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 50);
-      return next;
-    });
+    // Keep the state updater pure (it can run twice under StrictMode) — the
+    // scroll side effect lives outside it.
+    setMsgs((prev) => [...prev, m]);
+    setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 50);
     // Persist per-message (local mirror + server sync when logged in).
     appendHistory(m).catch(() => {});
   }
@@ -316,6 +358,10 @@ export function AIAssistant() {
   async function handleAsk(rawText: string) {
     const value = rawText.trim();
     if (!value) return;
+    // One in-flight request at a time. Suggestion chips call this directly,
+    // so without this guard a few quick taps would fire parallel paid LLM
+    // calls and interleave their replies out of order.
+    if (busy) return;
     appendMsgPersist({ who: 'me', text: value });
     setInput('');
     setBusy(true);
@@ -385,6 +431,7 @@ export function AIAssistant() {
   }
 
   async function onMic() {
+    if (listeningRef.current) return; // already recording — ignore double-taps
     // Cut off whatever the assistant is saying so it can listen.
     if (greetTimerRef.current) { clearTimeout(greetTimerRef.current); greetTimerRef.current = null; }
     stopAudio();      // stop audio without flipping mute on
@@ -392,10 +439,10 @@ export function AIAssistant() {
     setPaused(false);
     setMuted(false);  // ensure mute is OFF before mic/answer
 
+    listeningRef.current = true;
+    setListening(true);
     try {
-      setListening(true);
       const text = await webSTT(lang);
-      setListening(false);
       if (text && text.trim()) {
         if (onboardActive) submitOnboard(text);
         else handleAsk(text);
@@ -403,9 +450,11 @@ export function AIAssistant() {
         appendMsgPersist({ who: 'ai', text: '🎤 I did not catch that. Please try again.' });
       }
     } catch (e: any) {
-      setListening(false);
       console.error('STT error:', e);
       appendMsgPersist({ who: 'ai', text: `🎤 Mic error: ${e?.message || e}` });
+    } finally {
+      listeningRef.current = false;
+      setListening(false);
     }
   }
 
@@ -494,6 +543,8 @@ export function AIAssistant() {
 
   async function finishOnboard(data: Record<string, any>) {
     appendMsgPersist({ who: 'ai', text: 'Saving your details…' });
+
+    // Always keep a local mirror so the profile form prefills even offline.
     try {
       await storage.set('workmithra:profile', JSON.stringify({
         full_name: data.full_name || '',
@@ -513,12 +564,51 @@ export function AIAssistant() {
           timings: data.timings || '',
         }));
       }
-      appendMsgPersist({ who: 'ai', text: '✓ Done! Your profile is saved.' });
-    } catch {
-      appendMsgPersist({ who: 'ai', text: 'Saved locally on this device.' });
-    } finally {
-      setOnboardActive(false);
+    } catch {}
+
+    // If a session exists, also persist to the backend so the details survive
+    // reinstalls/device changes — not just this browser's storage.
+    let synced = false;
+    try {
+      const auth = await getAuth();
+      if (auth?.token && auth.id) {
+        const isWorker = auth.role === 'worker';
+        if (isWorker) {
+          const res = await authFetch(`/workers/${auth.id}`, {
+            method: 'PUT',
+            json: {
+              full_name: data.full_name || undefined,
+              phone: data.phone || undefined,
+              skill: data.skill || undefined,
+              hourly_rate: typeof data.hourly_rate === 'number' ? data.hourly_rate : undefined,
+              experience_years: typeof data.experience_years === 'number' ? data.experience_years : undefined,
+              location: data.location || undefined,
+            },
+          });
+          synced = res.ok;
+        } else {
+          const res = await authFetch('/profiles/me', {
+            method: 'PUT',
+            json: {
+              full_name: data.full_name || undefined,
+              phone: data.phone || undefined,
+              address: data.location || undefined,
+            },
+          });
+          synced = res.ok;
+        }
+      }
+    } catch (e) {
+      console.warn('Onboarding: backend sync failed (kept locally)', e);
     }
+
+    appendMsgPersist({
+      who: 'ai',
+      text: synced
+        ? '✓ Done! Your profile is saved.'
+        : '✓ Saved on this device. Log in to sync it across devices.',
+    });
+    setOnboardActive(false);
   }
 
   function handleSend() {
@@ -527,7 +617,7 @@ export function AIAssistant() {
   }
 
   return (
-    <View style={styles.container}>
+    <View style={styles.container} onLayout={onContainerLayout}>
       {!hideFab && (
         <Animated.View
           style={[styles.fabDraggable, { transform: fabPos.getTranslateTransform() }]}
@@ -537,6 +627,7 @@ export function AIAssistant() {
             style={styles.fabInner}
             activeOpacity={0.8}
             onPress={openModal}
+            accessibilityLabel="Open AI assistant"
             hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
           >
             <Ionicons name="sparkles" size={22} color="white" />
@@ -544,9 +635,10 @@ export function AIAssistant() {
         </Animated.View>
       )}
 
-      <Modal animationType="slide" transparent visible={visible} onRequestClose={closeModal}>
+      <FrameModal animationType="slide" visible={visible} onRequestClose={dismissModal}>
         <View style={styles.overlay}>
-          <View style={styles.sheet}>
+          <KeyboardAvoidingView behavior="padding" style={styles.kav}>
+            <View style={styles.sheet}>
             <View style={styles.header}>
               <View style={{ flex: 1 }}>
                 <Text style={styles.title}>WorkMithra Assistant</Text>
@@ -555,7 +647,7 @@ export function AIAssistant() {
               <TouchableOpacity onPress={onSpeakLast} style={{ marginRight: 8 }}>
                 {speaking ? <ActivityIndicator color="#6f42c1" /> : <Ionicons name="volume-high" size={22} color="#6f42c1" />}
               </TouchableOpacity>
-              <TouchableOpacity onPress={closeModal}>
+              <TouchableOpacity onPress={quitModal}>
                 <Ionicons name="close-circle" size={26} color="#6f42c1" />
               </TouchableOpacity>
             </View>
@@ -629,9 +721,10 @@ export function AIAssistant() {
                 <Ionicons name="send" size={16} color="#fff" />
               </TouchableOpacity>
             </View>
-          </View>
+            </View>
+          </KeyboardAvoidingView>
         </View>
-      </Modal>
+      </FrameModal>
     </View>
   );
 }
@@ -650,7 +743,8 @@ const styles = StyleSheet.create({
     justifyContent: 'center', alignItems: 'center',
     ...platformShadow('0px 4px 12px rgba(111,66,193,0.35)', '#6f42c1', 0, 4, 0.35, 6, 6),
   },
-  overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' },
+  overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)' },
+  kav: { flex: 1, justifyContent: 'flex-end' },
   sheet: { width: '100%', height: '85%', backgroundColor: '#fff', borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: 12 },
   header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 },
   title: { fontSize: 15, fontWeight: '800', color: '#6f42c1' },

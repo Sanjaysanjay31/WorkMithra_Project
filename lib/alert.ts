@@ -37,7 +37,9 @@ if (Platform.OS === 'web') {
       return;
     }
 
-    const confirmed = win.confirm ? win.confirm(text) : true;
+    // If window.confirm is unavailable, default to the CANCEL path — silently
+    // running the (often destructive) action would be the unsafe choice.
+    const confirmed = win.confirm ? win.confirm(text) : false;
     if (confirmed) {
       const action = buttons.find((b) => b.style !== 'cancel') ?? buttons[buttons.length - 1];
       action.onPress?.();

@@ -9,11 +9,14 @@ export type JobHistoryEntry = {
   completed_at: string | null;
 };
 
-export async function listJobHistory(filters: { worker_id?: number; user_id?: number; booking_id?: number } = {}): Promise<JobHistoryEntry[]> {
+export async function listJobHistory(filters: { worker_id?: number; user_id?: number; booking_id?: number; with_worker?: number } = {}): Promise<JobHistoryEntry[]> {
   const params = new URLSearchParams();
   if (filters.worker_id != null) params.set('worker_id', String(filters.worker_id));
   if (filters.user_id != null) params.set('user_id', String(filters.user_id));
   if (filters.booking_id != null) params.set('booking_id', String(filters.booking_id));
+  // Client-side callers filtering their own history by worker must use
+  // with_worker — worker_id is rejected for user tokens by the backend.
+  if (filters.with_worker != null) params.set('with_worker', String(filters.with_worker));
   try {
     const res = await authFetch(`/job-history/?${params.toString()}`);
     if (!res.ok) return [];

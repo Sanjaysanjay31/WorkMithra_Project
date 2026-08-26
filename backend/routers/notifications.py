@@ -1,11 +1,18 @@
-from fastapi import APIRouter, Depends, HTTPException, Body, Query
+from fastapi import APIRouter, Depends, HTTPException, Body, Query, Request
 from typing import List, Optional, Dict, Any
 from sqlalchemy.orm import Session
+from sqlalchemy import or_
 from datetime import datetime
+import threading
+import requests
 import database, models
 from auth import get_current_user
+from rate_limit import limiter
+from socket_events import emit_to_user
 
 router = APIRouter()
+
+EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send"
 
 
 def _current_user_id(current: Dict[str, Any]) -> int:
@@ -52,6 +59,18 @@ def _decode_type(t: Optional[str]) -> Dict[str, str]:
     return {"audience": audience, "kind": kind}
 
 
+def _audience_filter(audience: str):
+    """SQL filter for an audience's notifications.
+
+    Legacy rows written before the "audience:kind" encoding have no prefix;
+    _decode_type treats those as user notifications, so the user inbox must
+    include them — otherwise they silently disappear forever."""
+    prefixed = models.Notification.type.like(f"{audience}:%")
+    if audience == "user":
+        return or_(prefixed, models.Notification.type.notlike("%:%"))
+    return prefixed
+
+
 def _to_dict(n: models.Notification) -> Dict[str, Any]:
     decoded = _decode_type(n.type)
     return {
@@ -66,8 +85,146 @@ def _to_dict(n: models.Notification) -> Dict[str, Any]:
     }
 
 
+def _unread_count(db: Session, uid: int, audience: str) -> int:
+    q = db.query(models.Notification).filter(
+        models.Notification.is_read == False,  # noqa: E712
+        models.Notification.user_id == uid,
+    )
+    q = q.filter(_audience_filter(audience))
+    return q.count()
+
+
+def build_notification(
+    db: Session,
+    recipient_id: int,
+    audience: str,
+    kind: str,
+    title: str,
+    body: str,
+) -> models.Notification:
+    """Add an unread notification row to the session — no commit, no emit.
+
+    Server-side writers (bookings price flow, the POST endpoint below) share
+    this so every row uses the 'audience:kind' type encoding. Call
+    publish_notification() AFTER committing so the socket event never points
+    at a row that gets rolled back."""
+    n = models.Notification(
+        user_id=recipient_id,
+        title=(title or "")[:255],
+        message=(body or "")[:1000],
+        type=_encode_type(audience, kind),
+        is_read=False,
+        created_at=datetime.utcnow(),
+    )
+    db.add(n)
+    return n
+
+
+def publish_notification(db: Session, n: models.Notification, audience: str) -> None:
+    """Push a committed notification to the recipient's private socket room.
+
+    The payload carries the fresh unread count so badge screens can update
+    without refetching. Best-effort: when the recipient is offline the emit
+    is skipped and the row simply appears on their next load."""
+    payload = _to_dict(n)
+    payload["unread_count"] = _unread_count(db, n.user_id, audience)
+    emit_to_user(n.user_id, "notification_created", payload, role=audience)
+    _push_to_device(db, n, audience)
+
+
+def _push_to_device(db: Session, n: models.Notification, audience: str) -> None:
+    """Send a system push via the Expo push API so the notification arrives
+    even when the app is closed or in the background.
+
+    Best-effort and off-thread: a slow/unreachable Expo endpoint must never
+    delay the request that created the notification. Tokens are looked up
+    synchronously (cheap local query); only the HTTP call is backgrounded."""
+    rows = (
+        db.query(models.PushToken.token)
+        .filter(
+            models.PushToken.user_id == n.user_id,
+            models.PushToken.role == audience,
+        )
+        .all()
+    )
+    tokens = [t for (t,) in rows if t]
+    if not tokens:
+        return
+    kind = _decode_type(n.type)["kind"]
+    threading.Thread(
+        target=_send_expo_push,
+        args=(tokens, n.title or "WorkMithra", (n.message or "")[:256], {"id": n.id, "kind": kind}),
+        daemon=True,
+    ).start()
+
+
+def _send_expo_push(tokens: List[str], title: str, body: str, data: Dict[str, Any]) -> None:
+    messages = [
+        {
+            "to": token,
+            "sound": "default",
+            "title": title,
+            "body": body,
+            "data": data,
+            "priority": "high",
+        }
+        for token in tokens
+    ]
+    try:
+        requests.post(EXPO_PUSH_URL, json=messages, timeout=5)
+    except Exception:
+        # Push is best-effort — the in-app inbox still has the row.
+        pass
+
+
+@router.post("/push-token")
+@limiter.limit("10/minute")
+def register_push_token(
+    request: Request,
+    payload: Dict[str, Any] = Body(...),
+    db: Session = Depends(database.get_db),
+    current: Dict[str, Any] = Depends(get_current_user),
+):
+    """Register the caller's Expo push token. The role is taken from the
+    authenticated token — never from the client — so a token can only be
+    bound to the caller's own (id, role) pair."""
+    token = str(payload.get("token") or "").strip()
+    if not token or len(token) > 255:
+        raise HTTPException(status_code=400, detail="token is required")
+    uid = _current_user_id(current)
+    role = current.get("role", "user")
+    if role not in ("user", "worker"):
+        role = "user"
+    # A device token belongs to exactly one account: re-registering from a
+    # different login reassigns it instead of leaving a stale row that would
+    # push the wrong person's alerts to this device.
+    db.query(models.PushToken).filter(models.PushToken.token == token).delete()
+    db.add(models.PushToken(user_id=uid, role=role, token=token))
+    db.commit()
+    return {"ok": True}
+
+
+@router.delete("/push-token")
+def unregister_push_token(
+    db: Session = Depends(database.get_db),
+    current: Dict[str, Any] = Depends(get_current_user),
+):
+    """Remove the caller's push tokens (logout / role switch)."""
+    uid = _current_user_id(current)
+    role = current.get("role", "user")
+    deleted = (
+        db.query(models.PushToken)
+        .filter(models.PushToken.user_id == uid, models.PushToken.role == role)
+        .delete()
+    )
+    db.commit()
+    return {"ok": True, "deleted": deleted}
+
+
 @router.post("/")
+@limiter.limit("30/minute")
 def create_notification(
+    request: Request,
     payload: Dict[str, Any] = Body(...),
     db: Session = Depends(database.get_db),
     current: Dict[str, Any] = Depends(get_current_user),
@@ -128,17 +285,10 @@ def create_notification(
             detail="You can only notify users you share a booking with",
         )
 
-    n = models.Notification(
-        title=title,
-        message=body,
-        type=_encode_type(audience, kind),
-        is_read=False,
-        user_id=recipient_id,
-        created_at=datetime.utcnow(),
-    )
-    db.add(n)
+    n = build_notification(db, recipient_id, audience, kind, title, body)
     db.commit()
     db.refresh(n)
+    publish_notification(db, n, audience)
     return _to_dict(n)
 
 
@@ -162,9 +312,10 @@ def list_notifications(
         except (ValueError, TypeError):
             return []
     q = db.query(models.Notification).filter(models.Notification.user_id == uid)
-    # Filter by audience prefix in the type column.
-    q = q.filter(models.Notification.type.like(f"{audience}:%"))
-    rows = q.order_by(models.Notification.created_at.desc()).offset(skip).limit(limit).all()
+    # Filter by audience prefix in the type column (legacy prefix-less rows
+    # are included for the user audience).
+    q = q.filter(_audience_filter(audience))
+    rows = q.order_by(models.Notification.created_at.desc(), models.Notification.id.desc()).offset(skip).limit(limit).all()
     return [_to_dict(r) for r in rows]
 
 
@@ -183,12 +334,7 @@ def unread_count(
                 raise HTTPException(status_code=403, detail="You can only read your own notifications")
         except (ValueError, TypeError):
             return {"count": 0}
-    q = db.query(models.Notification).filter(
-        models.Notification.is_read == False,  # noqa: E712
-        models.Notification.user_id == uid,
-    )
-    q = q.filter(models.Notification.type.like(f"{audience}:%"))
-    return {"count": q.count()}
+    return {"count": _unread_count(db, uid, audience)}
 
 
 @router.post("/{notification_id}/read")
@@ -213,21 +359,25 @@ def mark_read(
 
 @router.post("/mark-all-read")
 def mark_all_read(
-    payload: Dict[str, Any] = Body(...),
+    payload: Optional[Dict[str, Any]] = Body(default=None),
     db: Session = Depends(database.get_db),
     current: Dict[str, Any] = Depends(get_current_user),
 ):
-    audience = _own_audience(payload.get("audience") or "user", current)
+    """Mark all of the caller's notifications read. The body is optional —
+    audience defaults to the caller's role."""
+    audience = _own_audience((payload or {}).get("audience") or current.get("role", "user"), current)
     uid = _current_user_id(current)
-    q = db.query(models.Notification).filter(
-        models.Notification.type.like(f"{audience}:%"),
-        models.Notification.user_id == uid,
+    updated = (
+        db.query(models.Notification)
+        .filter(
+            _audience_filter(audience),
+            models.Notification.user_id == uid,
+            models.Notification.is_read == False,  # noqa: E712
+        )
+        .update({"is_read": True}, synchronize_session=False)
     )
-    rows = q.all()
-    for n in rows:
-        n.is_read = True
     db.commit()
-    return {"ok": True, "updated": len(rows)}
+    return {"ok": True, "updated": updated}
 
 
 @router.delete("/")
@@ -239,13 +389,13 @@ def clear_all(
 ):
     audience = _own_audience(audience, current)
     uid = _current_user_id(current)
-    q = db.query(models.Notification).filter(
-        models.Notification.type.like(f"{audience}:%"),
-        models.Notification.user_id == uid,
+    deleted = (
+        db.query(models.Notification)
+        .filter(
+            _audience_filter(audience),
+            models.Notification.user_id == uid,
+        )
+        .delete(synchronize_session=False)
     )
-    rows = q.all()
-    count = len(rows)
-    for n in rows:
-        db.delete(n)
     db.commit()
-    return {"ok": True, "deleted": count}
+    return {"ok": True, "deleted": deleted}

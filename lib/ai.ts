@@ -29,6 +29,71 @@ export const ALL_LANGS: { code: LangCode; label: string; english: string }[] = [
 // Default pinned set shown as quick chips
 export const LANGS = ALL_LANGS.slice(0, 6);
 
+const DEFAULT_LANG: LangCode = 'en-IN';
+
+/** Coerce an arbitrary backend value to a supported LangCode. */
+export function asLangCode(value: unknown, fallback: LangCode = DEFAULT_LANG): LangCode {
+  if (typeof value !== 'string') return fallback;
+  const v = value.trim();
+  if (!v) return fallback;
+  if (v === 'auto' || v === 'unknown') return fallback;
+  const match = ALL_LANGS.find((l) => l.code.toLowerCase() === v.toLowerCase());
+  return match ? match.code : fallback;
+}
+
+/**
+ * Look up the preferred language of the OTHER participant in a chat.
+ *
+ * Translation only works if each side knows what language the other side
+ * speaks. Both languages are persisted server-side (users.preferred_language
+ * and workers.preferred_language), so this reads them instead of each side
+ * guessing the other's.
+ *
+ * @param otherId    The other participant's id (worker id when I'm a user,
+ *                   user id when I'm a worker).
+ * @param otherRole  'user' | 'worker' — the OTHER side's role.
+ * @param myFallback What to use when the other side hasn't set a language.
+ */
+export async function getOtherLanguage(
+  otherId: string,
+  otherRole: 'user' | 'worker',
+  myFallback: LangCode = DEFAULT_LANG,
+): Promise<LangCode> {
+  if (!otherId) return myFallback;
+  try {
+    // Workers are looked up via /workers/{id} (returns WorkerResponse with
+    // preferred_language); users via /profiles/user/{id}. Both endpoints
+    // require authentication, which is fine — chat is only ever opened by an
+    // authenticated participant.
+    const path =
+      otherRole === 'worker'
+        ? `/workers/${encodeURIComponent(otherId)}`
+        : `/profiles/user/${encodeURIComponent(otherId)}`;
+    const res = await authFetch(path);
+    if (!res.ok) return myFallback;
+    const data = await res.json();
+    const lang = data?.preferred_language ?? data?.preferredLanguage;
+    return asLangCode(lang, myFallback);
+  } catch {
+    return myFallback;
+  }
+}
+
+/**
+ * Persist MY language choice so future chats start with it and the other
+ * participant's translation targets it automatically. Fire-and-forget: a
+ * failed save only means the pick isn't remembered next time — the current
+ * conversation still uses the locally selected value.
+ */
+export function saveMyLanguage(myId: string, myRole: 'user' | 'worker', lang: LangCode): void {
+  if (!myId || !lang || lang === 'auto') return;
+  const path =
+    myRole === 'worker'
+      ? `/workers/${encodeURIComponent(myId)}`
+      : `/profiles/user/${encodeURIComponent(myId)}`;
+  void authFetch(path, { method: 'PUT', json: { preferred_language: lang } }).catch(() => {});
+}
+
 export async function aiDetectLang(text: string): Promise<LangCode> {
   if (!text.trim()) return 'en-IN';
   // Fast local script checks (0ms latency, saves network call)
@@ -135,6 +200,17 @@ let _currentIsNative = false;
 let _muted = false;
 let _paused = false;
 let _pauseResolvers: (() => void)[] = [];
+// The URL currently being played. On web these are blob: object URLs that must
+// be revoked after use or they leak memory for the life of the page.
+let _currentUrl: string | null = null;
+
+function revokeCurrentUrl() {
+  const url = _currentUrl;
+  _currentUrl = null;
+  if (url && Platform.OS === 'web' && url.startsWith('blob:')) {
+    try { URL.revokeObjectURL(url); } catch {}
+  }
+}
 
 export function setMuted(v: boolean) {
   _muted = v;
@@ -154,6 +230,7 @@ export function stopAudio() {
       _currentAudio = null;
     }
   } catch {}
+  revokeCurrentUrl();
   _paused = false;
   const r = _pauseResolvers; _pauseResolvers = [];
   r.forEach((fn) => fn());
@@ -190,18 +267,19 @@ function waitWhileNotPaused(): Promise<void> {
 export async function playAudio(url: string): Promise<void> {
   if (_muted) return;
   stopAudio();
+  _currentUrl = url;
 
   if (Platform.OS === 'web') {
     const Ctor: any = (globalThis as any).Audio;
-    if (!Ctor) return;
+    if (!Ctor) { revokeCurrentUrl(); return; }
     return new Promise((resolve, reject) => {
-      if (_muted) return resolve();
+      if (_muted) { revokeCurrentUrl(); return resolve(); }
       const a = new Ctor(url);
       _currentAudio = a;
       _currentIsNative = false;
-      a.onended = () => { if (_currentAudio === a) _currentAudio = null; resolve(); };
-      a.onerror = (e: any) => { if (_currentAudio === a) _currentAudio = null; reject(e); };
-      a.play().then(() => {}).catch((e: any) => { if (_currentAudio === a) _currentAudio = null; reject(e); });
+      a.onended = () => { if (_currentAudio === a) _currentAudio = null; revokeCurrentUrl(); resolve(); };
+      a.onerror = (e: any) => { if (_currentAudio === a) _currentAudio = null; revokeCurrentUrl(); reject(e); };
+      a.play().then(() => {}).catch((e: any) => { if (_currentAudio === a) _currentAudio = null; revokeCurrentUrl(); reject(e); });
     });
   }
 
@@ -214,7 +292,7 @@ export async function playAudio(url: string): Promise<void> {
     });
   } catch {}
   const { sound } = await Audio.Sound.createAsync({ uri: url }, { shouldPlay: true });
-  if (_muted) { try { await sound.unloadAsync(); } catch {} return; }
+  if (_muted) { try { await sound.unloadAsync(); } catch {} revokeCurrentUrl(); return; }
   _currentAudio = sound;
   _currentIsNative = true;
   return new Promise((resolve) => {
@@ -223,6 +301,7 @@ export async function playAudio(url: string): Promise<void> {
       if (settled) return;
       settled = true;
       if (_currentAudio === sound) _currentAudio = null;
+      revokeCurrentUrl();
       resolve();
     };
     sound.setOnPlaybackStatusUpdate((status: any) => {
@@ -273,12 +352,23 @@ export async function speakLong(text: string, lang: LangCode = 'en-IN'): Promise
   }
 }
 
+function splitSentences(text: string): string[] {
+  const normalized = text.replace(/\s+/g, ' ');
+  // Split on sentence-ending punctuation, keeping the punctuation attached to the
+  // preceding sentence. A capture group is used instead of a lookbehind
+  // (?<=...) because lookbehinds are unsupported on older JS engines (Hermes/JSC).
+  const parts = normalized.split(/([.!?।॥。！？]+\s*)/);
+  const sentences: string[] = [];
+  for (let i = 0; i < parts.length; i += 2) {
+    const chunk = (parts[i] || '') + (parts[i + 1] || '');
+    const trimmed = chunk.trim();
+    if (trimmed) sentences.push(trimmed);
+  }
+  return sentences;
+}
+
 function splitForTTS(text: string, maxLen: number): string[] {
-  const sentences = text
-    .replace(/\s+/g, ' ')
-    .split(/(?<=[.!?。!?]|\n)\s+/)
-    .map((s) => s.trim())
-    .filter(Boolean);
+  const sentences = splitSentences(text);
   const out: string[] = [];
   let buf = '';
   for (const s of sentences) {
@@ -451,8 +541,16 @@ export function webSTTControlled(
   recog.onerror = (e: any) => {
     if (silenceTimer) clearTimeout(silenceTimer);
     if (settled) return;
+    const err = e?.error;
+    // 'no-speech' = nothing was heard, 'aborted' = we stopped it ourselves.
+    // Neither is a real failure — resolve with whatever was captured.
+    if (err === 'no-speech' || err === 'aborted') {
+      settled = true;
+      resolveFn(bestTranscript);
+      return;
+    }
     settled = true;
-    rejectFn(e?.error || new Error('stt error'));
+    rejectFn(err || new Error('stt error'));
   };
   recog.onend = () => {
     if (silenceTimer) clearTimeout(silenceTimer);
@@ -477,10 +575,10 @@ export function webSTTControlled(
 
 /**
  * Browser STT via Web Speech API. Hard-stops after `maxMs` so the mic never
- * stays on indefinitely (default 4s). Resolves with the transcript captured
- * up to that point (or '' if nothing).
+ * stays on indefinitely (default 8s — 4s was too short to say a full message).
+ * Resolves with the transcript captured up to that point (or '' if nothing).
  */
-export function webSTT(lang: LangCode = 'en-IN', maxMs: number = 4000): Promise<string> {
+export function webSTT(lang: LangCode = 'en-IN', maxMs: number = 8000): Promise<string> {
   return new Promise((resolve, reject) => {
     if (Platform.OS !== 'web') {
       const ctrl = nativeSTTControlled(lang);
@@ -522,9 +620,13 @@ export function webSTT(lang: LangCode = 'en-IN', maxMs: number = 4000): Promise<
     };
     recog.onerror = (e: any) => {
       if (settled) return;
+      const err = e?.error;
+      // 'no-speech' = nothing heard, 'aborted' = we stopped it. Resolve with
+      // whatever was captured instead of surfacing an error to the user.
+      if (err === 'no-speech' || err === 'aborted') { finish(bestTranscript); return; }
       settled = true;
       clearTimeout(timer);
-      reject(e?.error || new Error('stt error'));
+      reject(err || new Error('stt error'));
     };
     recog.onend = () => { if (!settled) finish(bestTranscript); };
 

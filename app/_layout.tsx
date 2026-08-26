@@ -1,7 +1,9 @@
 import '@/lib/alert'; // Patch RN Alert.alert for web — must load before any screen.
 import { AIAssistant } from '@/components/ai-assistant';
 import { getAuth, setOnUnauthorized } from '@/lib/api';
-import { ensureSocket } from '@/lib/socket';
+import { initI18n } from '@/lib/i18n';
+import { ensurePushSetup, onNotificationTap } from '@/lib/push';
+import { disconnectSocket, ensureSocket } from '@/lib/socket';
 import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native';
 import { Stack, usePathname, useRouter } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
@@ -26,7 +28,7 @@ if (Platform.OS === 'web' && typeof document !== 'undefined') {
 }
 
 export const unstable_settings = {
-  anchor: '(tabs)',
+  anchor: 'index',
 };
 
 const FRAME_WIDTH = 390;
@@ -40,6 +42,26 @@ const PUBLIC_ROUTES = new Set([
   '/forgot-password',
 ]);
 
+// Role-restricted routes. Users and workers are separate account types — a
+// logged-in user must not be able to open worker-only screens (and vice
+// versa), which would otherwise fire requests that 403/401 and show broken UI.
+//
+// Deliberately NOT restricted (shared cross-role screens):
+//   /worker_info  — the client-facing worker detail/booking page; users reach
+//                   it from homePage/bookings to hire a worker.
+//   /user_profile — the client profile page; workers reach it from
+//                   worker_bookings to inspect who sent a request.
+const WORKER_ROUTES = new Set([
+  '/worker_dashboard',
+  '/worker_bookings',
+  '/worker_availability',
+  '/worker_profile',
+]);
+const USER_ROUTES = new Set([
+  '/homePage',
+  '/bookings',
+]);
+
 export default function RootLayout() {
   const colorScheme = useColorScheme();
   const pathname = usePathname();
@@ -49,21 +71,30 @@ export default function RootLayout() {
   // logged out; screens receive booking/chat events without polling.
   useEffect(() => {
     ensureSocket();
+    // Restore the persisted UI language before first paint of child screens.
+    void initI18n();
   }, []);
+
+  // Tapping a system push opens the in-app inbox.
+  useEffect(() => onNotificationTap(() => router.push('/notifications')), [router]);
 
   // Stale-session recovery: if any authenticated request is rejected with 401,
   // lib/api clears the stored session and invokes this callback to return the
-  // user to the login screen instead of leaving them in a broken state.
+  // user to the login screen instead of leaving them in a broken state. The
+  // realtime socket is torn down too so it stops authenticating with the dead
+  // token; ensureSocket() rebuilds it after the next login.
   useEffect(() => {
     setOnUnauthorized(() => {
+      disconnectSocket();
       router.replace('/login');
     });
     return () => setOnUnauthorized(null);
   }, [router]);
 
   // Auth guard + session restore. Runs on every navigation:
-  //  - protected route with no session  -> redirect to /login
-  //  - landing page with a valid session -> jump straight to the right home
+  //  - protected route with no session        -> redirect to /login
+  //  - role-mismatched route for the session  -> redirect to that role's home
+  //  - landing page with a valid session      -> jump straight to the right home
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -74,8 +105,26 @@ export default function RootLayout() {
         router.replace('/login');
         return;
       }
-      if ((pathname === '/' || pathname === '') && auth?.token) {
-        router.replace(auth.role === 'worker' ? '/worker_dashboard' : '/homePage');
+      if (auth?.token) {
+        // System push: request permission + register the device token once a
+        // session exists (idempotent — safe on every navigation).
+        void ensurePushSetup();
+        const home = auth.role === 'worker' ? '/worker_dashboard' : '/homePage';
+        if ((pathname === '/' || pathname === '') ) {
+          router.replace(home);
+          return;
+        }
+        // Role guard: keep each account type on its own screens.
+        const onWorkerRoute = WORKER_ROUTES.has(pathname);
+        const onUserRoute = USER_ROUTES.has(pathname);
+        if (auth.role === 'worker' && onUserRoute) {
+          router.replace('/worker_dashboard');
+          return;
+        }
+        if (auth.role !== 'worker' && onWorkerRoute) {
+          router.replace('/homePage');
+          return;
+        }
       }
     })();
     return () => {
@@ -85,7 +134,7 @@ export default function RootLayout() {
 
   const stack = (
     <Stack>
-      <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+      <Stack.Screen name="index" options={{ headerShown: false }} />
       <Stack.Screen name="login" options={{ headerShown: false }} />
       <Stack.Screen name="register" options={{ headerShown: false }} />
       <Stack.Screen name="forgot-password" options={{ headerShown: false }} />

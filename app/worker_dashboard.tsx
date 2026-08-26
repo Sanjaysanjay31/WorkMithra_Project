@@ -1,23 +1,25 @@
 import Avatar from '@/components/avatar';
-import WorkerBottomNav from '@/components/worker-bottom-nav';
+import BottomNav from '@/components/bottom-nav';
 import { authFetch } from '@/lib/api';
 import { isCompletedStatus, normalizeBookingStatus } from '@/lib/booking-status';
 import { unreadCount } from '@/lib/notifications';
 import { platformShadow } from '@/lib/shadow';
+import { ensureSocket, onNotificationCreated } from '@/lib/socket';
 import { storage } from '@/lib/storage';
-import { BookingResponse, ReviewResponse } from '@/lib/types';
+import { BookingResponse, PastWorkItem, ReviewResponse } from '@/lib/types';
 import { Ionicons } from '@expo/vector-icons';
 import { Stack, useRouter } from 'expo-router';
 import React, { useEffect, useState } from 'react';
 import {
+    ActivityIndicator,
     Image,
+    RefreshControl,
     ScrollView,
     StyleSheet,
     Text,
     TouchableOpacity,
     View,
 } from 'react-native';
-import { PastWorkItem } from './mock_data';
 
 const WORKER_PROFILE_KEY = 'workmithra:worker_profile';
 
@@ -47,6 +49,10 @@ export default function WorkerDashboard() {
   const [profile, setProfile] = useState<WorkerProfile>({});
   const [pastWork, setPastWork] = useState<PastWorkItem[]>([]);
   const [unread, setUnread] = useState(0);
+  const [loadingWork, setLoadingWork] = useState(true);
+  const [loadError, setLoadError] = useState('');
+  // Bumped by pull-to-refresh to re-run the load effect below.
+  const [reloadTick, setReloadTick] = useState(0);
 
   const [userId, setUserId] = useState<string>('');
 
@@ -63,12 +69,25 @@ export default function WorkerDashboard() {
   }, []);
 
   useEffect(() => {
+    if (!userId) return;
     let alive = true;
-    const tick = () => unreadCount('worker', userId).then((n) => { if (alive) setUnread(n); }).catch(() => {});
-    tick();
-    const id = setInterval(tick, 4000);
-    return () => { alive = false; clearInterval(id); };
-  }, [userId]);
+    // One initial fetch for the badge; after that the backend pushes
+    // 'notification_created' (with the fresh unread count) over the socket,
+    // so no polling interval is needed.
+    unreadCount('worker', userId).then((n) => { if (alive) setUnread(n); }).catch(() => {});
+    let off: () => void = () => {};
+    (async () => {
+      // ensureSocket() is async — the listener must be registered only after
+      // the socket exists, otherwise onNotificationCreated no-ops.
+      await ensureSocket();
+      if (!alive) return;
+      off = onNotificationCreated((data) => {
+        if (data.audience !== 'worker' || String(data.recipient_id) !== userId) return;
+        setUnread((u) => (typeof data.unread_count === 'number' ? data.unread_count : u + 1));
+      });
+    })();
+    return () => { alive = false; off(); };
+  }, [userId, reloadTick]);
 
   useEffect(() => {
     (async () => {
@@ -78,6 +97,9 @@ export default function WorkerDashboard() {
 
       // Wait for the real user id from storage — never query with a guessed id.
       if (!userId) return;
+
+      setLoadingWork(true);
+      setLoadError('');
 
       // Live profile from backend
       try {
@@ -110,8 +132,13 @@ export default function WorkerDashboard() {
 
       try {
         // The worker's token scopes this list to their own bookings.
-        const res = await authFetch('/bookings');
-        if (!res.ok) return;
+        // limit=100 — the default 20 silently truncates the past-work history.
+        const res = await authFetch('/bookings?limit=100');
+        if (!res.ok) {
+          // An error must never masquerade as "no past work yet".
+          setLoadError('Could not load your work history. Pull down or reopen to retry.');
+          return;
+        }
         const data: BookingResponse[] = await res.json();
         const completed = data.filter((b) => isCompletedStatus(normalizeBookingStatus(b.status)));
 
@@ -139,6 +166,9 @@ export default function WorkerDashboard() {
             date: b.booking_date || 'Recent',
             description: b.problem_description || 'Completed service',
             payment: b.final_price || b.estimated_price || 0,
+            // Only an AGREED (final) price is real earnings — a proposal the
+            // client never accepted is not money in the bank.
+            earned: b.final_price || 0,
             rating: review ? Number(review.rating) || 0 : 0,
             review: review ? (review.review_text || '') : '',
           };
@@ -146,14 +176,20 @@ export default function WorkerDashboard() {
         setPastWork(past);
       } catch (e) {
         console.warn('Failed to fetch past work', e);
+        setLoadError('Could not load your work history. Pull down or reopen to retry.');
+      } finally {
+        setLoadingWork(false);
       }
     })();
   }, [userId]);
 
-  const avgRating = pastWork.length
-    ? (pastWork.reduce((s, w) => s + w.rating, 0) / pastWork.length).toFixed(1)
+  // Average over REVIEWED jobs only — counting unreviewed jobs as 0 stars
+  // would drag the rating down unfairly.
+  const reviewed = pastWork.filter((w) => w.rating > 0);
+  const avgRating = reviewed.length
+    ? (reviewed.reduce((s, w) => s + w.rating, 0) / reviewed.length).toFixed(1)
     : '0.0';
-  const totalEarn = pastWork.reduce((s, w) => s + w.payment, 0);
+  const totalEarn = pastWork.reduce((s, w) => s + w.earned, 0);
 
   return (
     <View style={styles.screen}>
@@ -164,7 +200,7 @@ export default function WorkerDashboard() {
         <View style={styles.hero}>
           <TouchableOpacity
             style={styles.bellBtn}
-            onPress={() => router.push({ pathname: '/notifications', params: { as: 'worker', id: userId } })}
+            onPress={() => router.push('/notifications')}
             activeOpacity={0.85}
           >
             <Ionicons name="notifications-outline" size={18} color="#fff" />
@@ -203,7 +239,13 @@ export default function WorkerDashboard() {
           </TouchableOpacity>
         </View>
 
-        <ScrollView contentContainerStyle={{ paddingBottom: 120 }} showsVerticalScrollIndicator={false}>
+        <ScrollView
+          contentContainerStyle={{ paddingBottom: 120 }}
+          showsVerticalScrollIndicator={false}
+          refreshControl={
+            <RefreshControl refreshing={loadingWork} onRefresh={() => setReloadTick((t) => t + 1)} tintColor="#6F42C1" />
+          }
+        >
           {tab === 'details' ? (
             <View style={styles.section}>
               {profile.bio ? (
@@ -244,7 +286,11 @@ export default function WorkerDashboard() {
             </View>
           ) : (
             <View style={styles.section}>
-              {pastWork.length === 0 ? (
+              {loadingWork ? (
+                <ActivityIndicator color="#6F42C1" style={{ marginTop: 30 }} />
+              ) : loadError ? (
+                <Text style={styles.empty}>{loadError}</Text>
+              ) : pastWork.length === 0 ? (
                 <Text style={styles.empty}>No past work yet</Text>
               ) : (
                 pastWork.map((w) => (
@@ -295,7 +341,7 @@ export default function WorkerDashboard() {
           )}
         </ScrollView>
       </View>
-      <WorkerBottomNav currentRoute="dashboard" />
+      <BottomNav currentRoute="dashboard" role="worker" />
     </View>
   );
 }

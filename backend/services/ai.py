@@ -1,6 +1,7 @@
 """Thin wrappers around Sarvam AI (STT/TTS/Translate) and HuggingFace (Llama 3.1)."""
 import os
 import json
+import re
 import base64
 import requests
 from typing import Optional, Dict, Any
@@ -18,6 +19,32 @@ HF_MODEL = os.getenv("MODEL_NAME", "meta-llama/Llama-3.1-8B-Instruct")
 SARVAM_CHAT_MODEL = os.getenv("SARVAM_CHAT_MODEL", "sarvam-105b")
 
 SARVAM_BASE = "https://api.sarvam.ai"
+
+# Language codes the app supports (Sarvam's Indian-language set). Validated
+# server-side so a bad client code becomes a clean 400 instead of a provider
+# error surfaced as a 502.
+SUPPORTED_LANG_CODES = {
+    "en-IN", "hi-IN", "te-IN", "ta-IN", "kn-IN", "ml-IN",
+    "mr-IN", "bn-IN", "gu-IN", "pa-IN", "or-IN", "as-IN",
+}
+
+
+def normalize_lang_code(code: Optional[str], default: str = "en-IN") -> str:
+    """Case-insensitive match against the supported set ('te-in' -> 'te-IN')."""
+    if not code:
+        return default
+    c = str(code).strip()
+    for known in SUPPORTED_LANG_CODES:
+        if known.lower() == c.lower():
+            return known
+    return default
+
+
+def is_supported_lang_code(code: Optional[str]) -> bool:
+    if not code:
+        return False
+    c = str(code).strip().lower()
+    return any(k.lower() == c for k in SUPPORTED_LANG_CODES)
 
 
 def _sarvam_headers():
@@ -81,10 +108,12 @@ def sarvam_translate(text: str, source_lang: str, target_lang: str) -> Dict[str,
         raise RuntimeError("SARVAM_API_KEY is not set")
 
     src = (source_lang or "").strip() or "auto"
-    if src in ("unknown", ""):
+    if src.lower() in ("unknown", ""):
         src = "auto"
     tgt = (target_lang or "").strip() or "en-IN"
-    if src == tgt:
+    # Compare case-insensitively so "en-IN" vs "en-in" doesn't burn a paid
+    # call to translate text into the same language.
+    if src.lower() == tgt.lower():
         return {"translated_text": text, "source_language_code": src}
 
     body = {
@@ -99,8 +128,9 @@ def sarvam_translate(text: str, source_lang: str, target_lang: str) -> Dict[str,
         timeout=30,
     )
     if r.status_code >= 400:
-        print(f"[Sarvam translate] {r.status_code} body={body} resp={r.text[:300]}")
-        raise RuntimeError(f"Sarvam translate {r.status_code}: {r.text[:200]}")
+        # Never log the user's text (PII) — status only.
+        print(f"[Sarvam translate] failed with status {r.status_code}")
+        raise RuntimeError(f"Sarvam translate failed with status {r.status_code}")
     return r.json()
 
 
@@ -119,9 +149,14 @@ def sarvam_detect_lang(text: str) -> Dict[str, Any]:
             timeout=20,
         )
         if not r.ok:
-            raise RuntimeError(f"Sarvam detect-lang {r.status_code}: {r.text[:300]}")
+            raise RuntimeError(f"Sarvam detect-lang status {r.status_code}")
         return r.json()
-    except Exception:
+    except Exception as e:
+        # The fallback keeps the UI usable, but the failure is logged —
+        # a silently mislabeled source language produces garbage
+        # translations downstream. The "fallback": True flag lets callers
+        # treat low-confidence detections differently.
+        print(f"[Sarvam detect-lang] failed, falling back to en-IN: {e}")
         return _fallback_lang_detection()
 
 
@@ -154,11 +189,13 @@ def _trim_assistant_reply(text: str) -> str:
     if first_line.lower().startswith(("answer:", "response:", "final response:")):
         first_line = first_line.split(":", 1)[1].strip()
 
-    # Keep only the first sentence if the answer is verbose.
-    punctuation_positions = [first_line.find(ch) for ch in [".", "!", "?"]]
-    valid_positions = [pos for pos in punctuation_positions if pos != -1]
-    if valid_positions:
-        first_line = first_line[:min(valid_positions)].strip()
+    # Keep only the first sentence if the answer is verbose. A sentence end
+    # requires whitespace after the punctuation, so decimals ("₹450.50 per
+    # hour") and abbreviations glued to text survive instead of being cut at
+    # the first period.
+    sentences = re.split(r"(?<=[.!?])\s+", first_line)
+    if len(sentences) > 1:
+        first_line = sentences[0].strip()
 
     # Cap length at a word boundary so we never slice a Telugu/other word mid-way.
     if len(first_line) > 160:
@@ -185,6 +222,9 @@ def _assistant_short_reply(user_text: str) -> Optional[str]:
 
 
 def _sarvam_chat(messages: list, max_tokens: int = 2048) -> str:
+    """Raw chat completion. Returns the model content UNMODIFIED — trimming
+    for display is the caller's job (applying it here AND in the caller used
+    to double-process replies, and it destroyed JSON extraction output)."""
     if not SARVAM_API_KEY:
         raise RuntimeError("SARVAM_API_KEY not set")
     r = requests.post(
@@ -199,7 +239,7 @@ def _sarvam_chat(messages: list, max_tokens: int = 2048) -> str:
         timeout=30,
     )
     if r.status_code >= 400:
-        raise RuntimeError(f"Sarvam chat {r.status_code}: {r.text[:300]}")
+        raise RuntimeError(f"Sarvam chat failed with status {r.status_code}")
     data = r.json()
     choices = data.get("choices") or []
     if not choices:
@@ -207,7 +247,7 @@ def _sarvam_chat(messages: list, max_tokens: int = 2048) -> str:
     msg = choices[0].get("message") or {}
     content = (msg.get("content") or "").strip()
     if content:
-        return _trim_assistant_reply(content)
+        return content
     # Never return reasoning_content as the answer — it is the model's internal
     # (usually English) analysis, not a user-facing reply. Fail instead so the
     # caller can fall back to another provider or a polite error message.
@@ -262,7 +302,8 @@ def llama_chat(prompt: str, system: Optional[str] = None, max_tokens: int = 512)
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
 
-    # Try Sarvam first (you already have a working key, multilingual native)
+    # Try Sarvam first (you already have a working key, multilingual native).
+    # Trimming happens exactly once, here — _sarvam_chat returns raw content.
     try:
         return _trim_assistant_reply(_sarvam_chat(messages, max_tokens=max_tokens))
     except Exception as e_sarvam:
@@ -278,22 +319,44 @@ def llama_chat(prompt: str, system: Optional[str] = None, max_tokens: int = 512)
             return fallback_msg
 
 
+def _raw_completion(user_text: str, system: str, max_tokens: int = 400) -> str:
+    """Raw LLM completion for structured extraction — NO reply trimming, NO
+    quick-reply heuristics. The chat formatter cuts text at the first period
+    and caps it at 160 chars, which destroys JSON (decimals, emails, any
+    object longer than one line)."""
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user_text},
+    ]
+    try:
+        return _sarvam_chat(messages, max_tokens=max_tokens)
+    except Exception as e_sarvam:
+        print(f"[extract] Sarvam failed: {e_sarvam}")
+        return _hf_chat(messages, max_tokens=max_tokens)
+
+
 def llama_extract_json(user_text: str, schema_hint: str) -> Dict[str, Any]:
-    """Asks Llama to extract structured JSON matching schema_hint."""
+    """Ask the LLM to extract structured JSON matching schema_hint.
+
+    Returns a dict or raises — callers get a clean 502 when the model output
+    can't be parsed into an object (never a list/scalar, never prose)."""
     system = (
         "You are a strict JSON extractor. Read the user's text and output ONLY a JSON object "
         "matching this schema. No prose, no code fences. Use null for missing fields.\n"
         f"Schema:\n{schema_hint}"
     )
-    raw = llama_chat(user_text, system=system, max_tokens=400)
+    raw = _raw_completion(user_text, system, max_tokens=400)
     raw = raw.strip().strip("`")
     if raw.lower().startswith("json"):
         raw = raw[4:].strip()
+    parsed = None
     try:
-        return json.loads(raw)
+        parsed = json.loads(raw)
     except Exception:
         # last-ditch: find first '{' and last '}'
         i, j = raw.find("{"), raw.rfind("}")
         if i >= 0 and j > i:
-            return json.loads(raw[i : j + 1])
-        raise
+            parsed = json.loads(raw[i : j + 1])
+    if not isinstance(parsed, dict):
+        raise RuntimeError("Extraction did not produce a JSON object")
+    return parsed

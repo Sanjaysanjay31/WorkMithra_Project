@@ -82,6 +82,7 @@ export default function UserProfilePage() {
   const [client, setClient] = useState<ClientProfile | null>(null);
   const [requests, setRequests] = useState<RequestItem[]>([]);
   const [workerLoc, setWorkerLoc] = useState<{ lat: number; lng: number } | null>(null);
+  const [locUnavailable, setLocUnavailable] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -119,8 +120,9 @@ export default function UserProfilePage() {
 
       // 2. Fetch real requests this client made. The worker's token scopes the
       // list to their own bookings; we then narrow to this client locally.
+      // limit=100 — the default 20 silently truncates a busy worker's list.
       try {
-        const res = await authFetch('/bookings');
+        const res = await authFetch('/bookings?limit=100');
         if (res.ok) {
           const list: BookingResponse[] = await res.json();
           const mapped: RequestItem[] = list
@@ -153,25 +155,28 @@ export default function UserProfilePage() {
   }, [tab]);
 
   async function tryGetLocation() {
+    // On failure we leave workerLoc null and flag locUnavailable — the UI
+    // then says "Location unavailable" instead of silently substituting a
+    // hardcoded point (which produced wildly wrong distances).
     if (Platform.OS === 'web') {
       if (typeof navigator === 'undefined' || !navigator.geolocation) {
-        setWorkerLoc({ lat: 17.385, lng: 78.4867 });
+        setLocUnavailable(true);
         return;
       }
       navigator.geolocation.getCurrentPosition(
         (pos) => setWorkerLoc({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
-        () => setWorkerLoc({ lat: 17.385, lng: 78.4867 }),
+        () => setLocUnavailable(true),
         { enableHighAccuracy: false, timeout: 5000 },
       );
       return;
     }
     try {
       const { status } = await Location.requestForegroundPermissionsAsync();
-      if (status !== 'granted') { setWorkerLoc({ lat: 17.385, lng: 78.4867 }); return; }
+      if (status !== 'granted') { setLocUnavailable(true); return; }
       const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
       setWorkerLoc({ lat: pos.coords.latitude, lng: pos.coords.longitude });
     } catch {
-      setWorkerLoc({ lat: 17.385, lng: 78.4867 });
+      setLocUnavailable(true);
     }
   }
 
@@ -181,16 +186,30 @@ export default function UserProfilePage() {
   }, [workerLoc, client]);
 
   async function updateRequest(id: string, status: RequestItem['status']) {
+    // Optimistic update, rolled back if the server rejects the change.
+    const prevStatus = requests.find((r) => r.id === id)?.status;
     setRequests((rs) => rs.map((r) => (r.id === id ? { ...r, status } : r)));
     // Map the UI label to the canonical backend status enum.
     const backendStatus = status === 'accepted' ? 'upcoming' : status === 'declined' ? 'rejected' : status;
     try {
-      await authFetch(`/bookings/${id}`, {
+      const res = await authFetch(`/bookings/${id}`, {
         method: 'PUT',
         json: { status: backendStatus },
       });
-    } catch (e) {
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        const msg = typeof data?.detail === 'string' ? data.detail : `Server responded with ${res.status}`;
+        if (prevStatus) {
+          setRequests((rs) => rs.map((r) => (r.id === id ? { ...r, status: prevStatus } : r)));
+        }
+        Alert.alert('Update failed', msg);
+      }
+    } catch (e: any) {
       console.warn('Failed to update booking status', e);
+      if (prevStatus) {
+        setRequests((rs) => rs.map((r) => (r.id === id ? { ...r, status: prevStatus } : r)));
+      }
+      Alert.alert('Update failed', e?.message || 'Could not reach the server. Please try again.');
     }
   }
 
@@ -273,12 +292,19 @@ export default function UserProfilePage() {
               <Text style={styles.sectionTitle}>Contact this client</Text>
               <View style={styles.contactInfo}>
                 <Ionicons name="call-outline" size={22} color="#6F42C1" />
-                <Text style={styles.phoneText}>{client.phone || '+91 XXXX XXX XXX'}</Text>
+                {/* No fabricated placeholder numbers — say what's true. */}
+                <Text style={styles.phoneText}>{client.phone || 'No phone number shared'}</Text>
               </View>
-              <TouchableOpacity style={styles.callBtn} onPress={() => client.phone && Linking.openURL(`tel:${client.phone}`)}>
-                <Ionicons name="call" size={18} color="#fff" />
-                <Text style={styles.callBtnText}>  Call Client</Text>
-              </TouchableOpacity>
+              {client.phone ? (
+                <TouchableOpacity
+                  style={styles.callBtn}
+                  accessibilityLabel="Call client"
+                  onPress={() => Linking.openURL(`tel:${client.phone}`)}
+                >
+                  <Ionicons name="call" size={18} color="#fff" />
+                  <Text style={styles.callBtnText}>  Call Client</Text>
+                </TouchableOpacity>
+              ) : null}
               <TouchableOpacity
                 style={styles.chatBtn}
                 onPress={() => router.push({ pathname: '/chat', params: { workerId: client.id, workerName: client.full_name } })}
@@ -296,7 +322,7 @@ export default function UserProfilePage() {
                 <View style={styles.mapRow}>
                   <Ionicons name="navigate" size={16} color="#6F42C1" />
                   <Text style={styles.mapLabel}>You</Text>
-                  <Text style={styles.mapValue}>{workerLoc ? `${workerLoc.lat.toFixed(3)}, ${workerLoc.lng.toFixed(3)}` : 'Locating…'}</Text>
+                  <Text style={styles.mapValue}>{workerLoc ? `${workerLoc.lat.toFixed(3)}, ${workerLoc.lng.toFixed(3)}` : locUnavailable ? 'Location unavailable' : 'Locating…'}</Text>
                 </View>
                 <View style={styles.mapRow}>
                   <Ionicons name="location" size={16} color="#FF6B6B" />
@@ -309,7 +335,7 @@ export default function UserProfilePage() {
                 </View>
                 <View style={styles.distanceRow}>
                   <Text style={styles.distanceLabel}>Distance</Text>
-                  <Text style={styles.distanceValue}>{distanceKm != null ? `${distanceKm.toFixed(1)} km` : '—'}</Text>
+                  <Text style={styles.distanceValue}>{distanceKm != null ? `${distanceKm.toFixed(1)} km` : locUnavailable ? 'Location unavailable' : '—'}</Text>
                 </View>
               </View>
 

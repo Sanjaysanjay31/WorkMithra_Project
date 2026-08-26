@@ -21,11 +21,16 @@ export interface WorkerBrief {
 export interface WorkerResponse extends WorkerBrief {
   phone?: string | null;
   email?: string | null;
+  age?: number | null;
+  alternate_phone?: string | null;
   experience_years?: number | null;
   bio?: string | null;
+  /** Free-text working hours, e.g. "Mon-Sat 9am-6pm". */
+  timings?: string | null;
   availability?: boolean | null;
   current_status?: string | null;
   city?: string | null;
+  pincode?: string | null;
   location?: string | null;
   latitude?: number | null;
   longitude?: number | null;
@@ -33,10 +38,8 @@ export interface WorkerResponse extends WorkerBrief {
   completed_jobs?: number | null;
   aadhaar_verified?: boolean | null;
   created_at?: string | null;
-  // Not in the current schema — screens read these defensively for forward
-  // compatibility and must not rely on them being present.
-  age?: number | null;
-  alternate_phone?: string | null;
+  // Not returned by the backend — screens read these defensively as legacy
+  // aliases and must not rely on them being present.
   alt_phone?: string | null;
   address?: string | null;
 }
@@ -53,6 +56,13 @@ export interface BookingResponse {
   problem_description?: string | null;
   estimated_price?: number | null;
   final_price?: number | null;
+  /**
+   * Whose number is currently on the table while the booking is in price
+   * negotiation: 'user' (the client's budget/counter) or 'worker' (the
+   * worker's quote). final_price != null means the price is agreed & locked.
+   * Null on legacy rows — treat as 'worker' (historically only workers quoted).
+   */
+  price_proposed_by?: 'user' | 'worker' | null;
   customer_address?: string | null;
   latitude?: number | null;
   longitude?: number | null;
@@ -94,11 +104,7 @@ export interface ChatMessageResponse {
   sent_at?: string | null;
 }
 
-/**
- * Mirrors UserResponse. The optional `age` / `alternate_phone` / `location`
- * fields are not in the current schema — screens read them defensively for
- * forward compatibility and must not rely on them being present.
- */
+/** Mirrors UserResponse. */
 export interface UserProfileResponse {
   id: number;
   full_name?: string | null;
@@ -107,7 +113,11 @@ export interface UserProfileResponse {
   profile_image?: string | null;
   role?: string | null;
   gender?: string | null;
+  age?: number | null;
   address?: string | null;
+  /** Free-form locality label shown on profiles. */
+  location?: string | null;
+  alternate_phone?: string | null;
   city?: string | null;
   state?: string | null;
   pincode?: string | null;
@@ -115,7 +125,24 @@ export interface UserProfileResponse {
   longitude?: number | null;
   created_at?: string | null;
   updated_at?: string | null;
-  age?: number | null;
-  alternate_phone?: string | null;
-  location?: string | null;
+  // Not returned by the backend — screens read this defensively as a legacy
+  // alias and must not rely on it being present.
+  alt_phone?: string | null;
 }
+
+/** Completed job as shown on the worker dashboard (derived from bookings + reviews). */
+export type PastWorkItem = {
+  id: string;
+  place: string;
+  description: string;
+  date: string;
+  rating: number;
+  review: string;
+  client_name: string;
+  client_avatar?: string;
+  payment: number;
+  /** Agreed (final) price only — proposals the client never accepted are
+   * not earnings, so the dashboard's total badge sums THIS field. */
+  earned: number;
+  photo?: string;
+};

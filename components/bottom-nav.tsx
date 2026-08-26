@@ -1,11 +1,15 @@
 import { Ionicons } from '@expo/vector-icons';
 import { Href, useRouter } from 'expo-router';
 import React from 'react';
-import { Platform, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { Alert, Platform, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { clearAllWorkMitraStorage } from '@/lib/storage';
+import { unregisterPush } from '@/lib/push';
+import { disconnectSocket } from '@/lib/socket';
+import { useI18n } from '@/lib/i18n';
 
 export type NavRoute =
   | 'home' | 'bookings' | 'switch_role' | 'profile'
-  | 'dashboard' | 'requests';
+  | 'dashboard' | 'requests' | 'hours';
 
 interface NavItem {
   id: NavRoute;
@@ -29,6 +33,7 @@ const CLIENT_ITEMS: NavItem[] = [
 const WORKER_ITEMS: NavItem[] = [
   { id: 'dashboard', label: 'Dashboard', icon: 'grid', route: '/worker_dashboard' },
   { id: 'requests', label: 'Requests', icon: 'mail', route: '/worker_bookings' },
+  { id: 'hours', label: 'Hours', icon: 'time', route: '/worker_availability' },
   { id: 'switch_role', label: 'Switch', icon: 'repeat', route: '/login' },
   { id: 'profile', label: 'Profile', icon: 'person', route: '/worker_profile' },
 ];
@@ -40,7 +45,34 @@ interface BottomNavProps {
 
 export default function BottomNav({ currentRoute, role = 'user' }: BottomNavProps) {
   const router = useRouter();
+  const { t } = useI18n();
   const items = role === 'worker' ? WORKER_ITEMS : CLIENT_ITEMS;
+
+  // Switching role IS a logout: wipe the session, caches, and realtime
+  // socket before heading to login — matching profile.tsx's switch flow.
+  // A stray tap shouldn't do it instantly, so confirm first. (Web uses
+  // window.confirm to match the profile screens' logout idiom.)
+  const handlePress = async (item: NavItem) => {
+    if (item.id !== 'switch_role') {
+      router.push(item.route);
+      return;
+    }
+    const doSwitch = async () => {
+      disconnectSocket();
+      await unregisterPush();
+      await clearAllWorkMitraStorage();
+      router.replace('/login');
+    };
+    const message = t('auth.switchMessage');
+    if (Platform.OS === 'web') {
+      if (typeof window !== 'undefined' && window.confirm(message)) await doSwitch();
+      return;
+    }
+    Alert.alert(t('auth.switchTitle'), message, [
+      { text: t('common.cancel'), style: 'cancel' },
+      { text: t('common.switch'), style: 'destructive', onPress: doSwitch },
+    ]);
+  };
 
   return (
     <View style={styles.wrap}>
@@ -52,7 +84,7 @@ export default function BottomNav({ currentRoute, role = 'user' }: BottomNavProp
               key={item.id}
               style={styles.navItem}
               activeOpacity={0.7}
-              onPress={() => router.push(item.route)}
+              onPress={() => handlePress(item)}
             >
               <View style={[styles.iconWrap, active && styles.iconWrapActive]}>
                 <Ionicons
@@ -62,7 +94,7 @@ export default function BottomNav({ currentRoute, role = 'user' }: BottomNavProp
                 />
               </View>
               <Text style={[styles.navLabel, { color: active ? ACTIVE : INACTIVE, fontWeight: active ? '800' : '600' }]}>
-                {item.label}
+                {t(`nav.${item.id}`, undefined, item.label)}
               </Text>
             </TouchableOpacity>
           );

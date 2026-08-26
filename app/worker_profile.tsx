@@ -1,15 +1,17 @@
 import Avatar from '@/components/avatar';
-import WorkerBottomNav from '@/components/worker-bottom-nav';
-import { authFetch } from '@/lib/api';
+import BottomNav from '@/components/bottom-nav';
+import { authFetch, readApiError } from '@/lib/api';
+import { useI18n } from '@/lib/i18n';
 import { pickImageNative, pickImageWeb } from '@/lib/image-picker';
 import { disconnectSocket } from '@/lib/socket';
-import { storage } from '@/lib/storage';
+import { clearAllWorkMitraStorage, storage } from '@/lib/storage';
 import { Ionicons } from '@expo/vector-icons';
 import { Stack, useRouter } from 'expo-router';
 import React, { useEffect, useState } from 'react';
 import {
     ActivityIndicator,
     Alert,
+    KeyboardAvoidingView,
     Platform,
     ScrollView,
     StyleSheet,
@@ -47,6 +49,7 @@ const EMPTY: WorkerForm = {
 
 export default function WorkerProfilePage() {
   const router = useRouter();
+  const { t } = useI18n();
   const [profile, setProfile] = useState<WorkerForm>(EMPTY);
   const [saving, setSaving] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -108,7 +111,10 @@ export default function WorkerProfilePage() {
         profile_image: w.profile_image || '',
       };
       setProfile(fromServer);
-      await storage.set(WORKER_KEY, JSON.stringify(fromServer));
+      // Persist WITH the owning account's id — the cache-read guard refuses
+      // entries whose __uid doesn't match, so an untagged write here would
+      // leak account A's profile onto account B's next load.
+      await storage.set(WORKER_KEY, JSON.stringify({ ...fromServer, __uid: wid }));
     } catch (e) {
       console.warn('Failed to load worker from backend', e);
     }
@@ -129,14 +135,42 @@ export default function WorkerProfilePage() {
     }
     setSaving(true);
     try {
-      await storage.set(WORKER_KEY, JSON.stringify({ ...profile, __uid: currentWorkerId }));
-      await authFetch(`/workers/${currentWorkerId}`, {
+      // aadhaar_verified is server-owned (set by admin verification only) —
+      // never send it from the client. Numeric fields travel as numbers; an
+      // empty input is omitted (undefined) rather than sent as "" — the
+      // backend would reject "" for an int/float field with a 422.
+      const { aadhaar_verified, age, experience_years, hourly_rate, ...rest } = profile;
+      const toNumber = (v: string): number | undefined => {
+        const t = v.trim();
+        if (!t) return undefined;
+        const n = Number(t);
+        return Number.isFinite(n) ? n : undefined;
+      };
+      const payload = {
+        ...rest,
+        age: toNumber(age),
+        experience_years: toNumber(experience_years),
+        hourly_rate: toNumber(hourly_rate),
+      };
+      const res = await authFetch(`/workers/${currentWorkerId}`, {
         method: 'PUT',
-        json: profile,
+        json: payload,
       });
-    } catch {}
-    setSaving(false);
-    Alert.alert('Saved', 'Your worker profile has been saved.');
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        const msg = typeof data?.detail === 'string' ? data.detail : `Server responded with ${res.status}`;
+        Alert.alert('Save failed', msg);
+        return;
+      }
+      // Cache only after the server accepted the change, so the local copy
+      // never diverges from what's actually stored.
+      await storage.set(WORKER_KEY, JSON.stringify({ ...profile, __uid: currentWorkerId }));
+      Alert.alert('Saved', 'Your worker profile has been saved.');
+    } catch (e: any) {
+      Alert.alert('Save failed', e?.message || 'Could not reach the server. Please try again.');
+    } finally {
+      setSaving(false);
+    }
   }
 
   async function pickAndUploadImage() {
@@ -163,8 +197,10 @@ export default function WorkerProfilePage() {
       fd.append('user_id', currentWorkerId);
       fd.append('role', 'worker');
       const res = await authFetch('/upload-profile-image', { method: 'POST', body: fd });
+      // Check status BEFORE parsing — a proxy 413/502 HTML body would throw
+      // a confusing JSON parse error and mask the real failure.
+      if (!res.ok) throw new Error(await readApiError(res, 'Upload failed'));
       const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || 'Upload failed');
       const next = { ...profile, profile_image: data.url };
       setProfile(next);
       await storage.set(WORKER_KEY, JSON.stringify({ ...next, __uid: currentWorkerId }));
@@ -178,7 +214,8 @@ export default function WorkerProfilePage() {
   async function changePasswordWithCurrent() {
     if (!profile.email.trim()) return Alert.alert('Email needed', 'Please enter your email in the form first.');
     if (!currentPwd || !newPwd) return Alert.alert('Missing fields', 'Enter current and new password.');
-    if (newPwd.length < 6) return Alert.alert('Weak password', 'Use at least 6 characters.');
+    // Same 8-character minimum as register/forgot-password/profile.
+    if (newPwd.length < 8) return Alert.alert('Weak password', 'Use at least 8 characters.');
     if (newPwd !== confirmPwd) return Alert.alert('Mismatch', 'New passwords do not match.');
     setPwdLoading(true);
     try {
@@ -201,7 +238,8 @@ export default function WorkerProfilePage() {
     <View style={styles.screen}>
       <Stack.Screen options={{ headerShown: false }} />
       <View style={styles.frame}>
-        <ScrollView contentContainerStyle={{ paddingBottom: 110 }} showsVerticalScrollIndicator={false}>
+        <KeyboardAvoidingView style={styles.kav} behavior="padding">
+        <ScrollView contentContainerStyle={{ paddingBottom: 110 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
 
           {/* Hero header */}
           <View style={styles.hero}>
@@ -284,14 +322,11 @@ export default function WorkerProfilePage() {
             </View>
           </View>
 
-          {/* Verification toggle */}
+          {/* Verification status — read-only. Verification is granted by
+              WorkMitra after document checks; workers cannot self-verify. */}
           <View style={styles.section}>
             <SectionTitle>Verification</SectionTitle>
-            <TouchableOpacity
-              style={styles.verifyRow}
-              onPress={() => update('aadhaar_verified', !profile.aadhaar_verified)}
-              activeOpacity={0.8}
-            >
+            <View style={styles.verifyRow}>
               <View style={[styles.verifyIcon, { backgroundColor: profile.aadhaar_verified ? '#dcfce7' : '#f0f0f0' }]}>
                 <Ionicons
                   name={profile.aadhaar_verified ? 'shield-checkmark' : 'shield-outline'}
@@ -301,12 +336,13 @@ export default function WorkerProfilePage() {
               </View>
               <View style={{ flex: 1 }}>
                 <Text style={styles.verifyTitle}>Aadhaar Verification</Text>
-                <Text style={styles.verifySub}>{profile.aadhaar_verified ? 'You are verified' : 'Tap to mark as verified (demo)'}</Text>
+                <Text style={styles.verifySub}>
+                  {profile.aadhaar_verified
+                    ? 'You are verified'
+                    : 'Pending — WorkMithra verifies your documents before marking your profile as verified'}
+                </Text>
               </View>
-              <View style={[styles.toggle, profile.aadhaar_verified && styles.toggleOn]}>
-                <View style={[styles.toggleDot, profile.aadhaar_verified && styles.toggleDotOn]} />
-              </View>
-            </TouchableOpacity>
+            </View>
           </View>
 
           {/* Save */}
@@ -327,11 +363,22 @@ export default function WorkerProfilePage() {
             <TouchableOpacity
               style={styles.pwdOption}
               onPress={async () => {
-                disconnectSocket();
-                await storage.remove('workmithra:auth');
-                await storage.remove('workmithra:worker_profile').catch(() => {});
-                await storage.remove('workmithra:user_profile').catch(() => {});
-                router.replace('/login');
+                const doSwitch = async () => {
+                  disconnectSocket();
+                  await clearAllWorkMitraStorage();
+                  router.replace('/login');
+                };
+                const message = t('auth.switchRoleMessage');
+                if (Platform.OS === 'web') {
+                  if (typeof window !== 'undefined' && window.confirm(message)) {
+                    await doSwitch();
+                  }
+                } else {
+                  Alert.alert(t('auth.switchTitle'), message, [
+                    { text: t('common.cancel'), style: 'cancel' },
+                    { text: t('common.switch'), style: 'destructive', onPress: doSwitch },
+                  ]);
+                }
               }}
             >
               <View style={[styles.pwdIcon, { backgroundColor: '#e0f2fe' }]}>
@@ -349,19 +396,18 @@ export default function WorkerProfilePage() {
               onPress={async () => {
                 const doLogout = async () => {
                   disconnectSocket();
-                  await storage.remove('workmithra:auth');
-                  await storage.remove('workmithra:worker_profile').catch(() => {});
-                  await storage.remove('workmithra:user_profile').catch(() => {});
+                  await clearAllWorkMitraStorage();
                   router.replace('/login');
                 };
+                const message = t('auth.logoutMessage');
                 if (Platform.OS === 'web') {
-                  if (typeof window !== 'undefined' && window.confirm('Are you sure you want to log out?')) {
+                  if (typeof window !== 'undefined' && window.confirm(message)) {
                     await doLogout();
                   }
                 } else {
-                  Alert.alert('Logout', 'Are you sure you want to log out?', [
-                    { text: 'Cancel', style: 'cancel' },
-                    { text: 'Logout', style: 'destructive', onPress: doLogout },
+                  Alert.alert(t('auth.logoutTitle'), message, [
+                    { text: t('common.cancel'), style: 'cancel' },
+                    { text: t('common.logout'), style: 'destructive', onPress: doLogout },
                   ]);
                 }
               }}
@@ -426,8 +472,9 @@ export default function WorkerProfilePage() {
             )}
           </View>
         </ScrollView>
+        </KeyboardAvoidingView>
       </View>
-      <WorkerBottomNav currentRoute="profile" />
+      <BottomNav currentRoute="profile" role="worker" />
     </View>
   );
 }
@@ -473,6 +520,7 @@ function Field({
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: '#f8f5ff' },
   frame: { flex: 1, width: '100%', backgroundColor: '#f8f5ff' },
+  kav: { flex: 1 },
 
   hero: { alignItems: 'center', paddingTop: 22, paddingBottom: 18, backgroundColor: '#6F42C1', borderBottomLeftRadius: 26, borderBottomRightRadius: 26 },
   avatarWrap: { width: 130, height: 130, marginBottom: 10 },
@@ -501,10 +549,6 @@ const styles = StyleSheet.create({
   verifyIcon: { width: 38, height: 38, borderRadius: 19, alignItems: 'center', justifyContent: 'center' },
   verifyTitle: { fontSize: 13, fontWeight: '800', color: '#333' },
   verifySub: { fontSize: 11, color: '#666', marginTop: 2 },
-  toggle: { width: 36, height: 20, borderRadius: 10, backgroundColor: '#e0e0e0', padding: 2, justifyContent: 'center' },
-  toggleOn: { backgroundColor: '#10b981' },
-  toggleDot: { width: 16, height: 16, borderRadius: 8, backgroundColor: '#fff', transform: [{ translateX: 0 }] },
-  toggleDotOn: { transform: [{ translateX: 16 }] },
 
   saveBtn: { flexDirection: 'row', backgroundColor: '#6F42C1', paddingVertical: 13, borderRadius: 12, alignItems: 'center', justifyContent: 'center', marginTop: 10 },
   saveBtnText: { color: '#fff', fontWeight: '800', fontSize: 14 },

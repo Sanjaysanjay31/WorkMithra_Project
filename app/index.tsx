@@ -9,8 +9,10 @@ export default function LandingScreen() {
   const imageAnim = useRef(new Animated.Value(1)).current;
 
   useEffect(() => {
-    // Subtle 3D-like scale animation for the hero image
-    Animated.loop(
+    // Subtle 3D-like scale animation for the hero image. Keep a handle and
+    // stop it on unmount — an untracked loop animates forever in the
+    // background, burning battery on the root landing screen.
+    const loop = Animated.loop(
       Animated.sequence([
         Animated.timing(imageAnim, {
           toValue: 1.05,
@@ -25,8 +27,10 @@ export default function LandingScreen() {
           useNativeDriver: true,
         }),
       ])
-    ).start();
-  }, []);
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [imageAnim]);
 
   return (
     <View style={styles.container}>

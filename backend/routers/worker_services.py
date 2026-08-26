@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from typing import List, Optional, Dict, Any
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy.orm import joinedload
 import database, models, schemas
@@ -63,7 +64,27 @@ def attach_service(
         service_price=payload.service_price,
     )
     db.add(ws)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # Lost the upsert race — the unique pair index rejected a duplicate.
+        # Fall back to updating whichever row won.
+        db.rollback()
+        winner = (
+            db.query(models.WorkerService)
+            .filter(
+                models.WorkerService.worker_id == payload.worker_id,
+                models.WorkerService.service_id == payload.service_id,
+            )
+            .first()
+        )
+        if winner is None:
+            raise HTTPException(status_code=409, detail="Could not link this service — try again")
+        winner.experience_level = payload.experience_level
+        winner.service_price = payload.service_price
+        db.commit()
+        db.refresh(winner)
+        return _to_dict(winner)
     db.refresh(ws)
     return _to_dict(ws)
 

@@ -1,6 +1,7 @@
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { loginRequest } from '@/lib/auth-api';
+import { ensurePushSetup } from '@/lib/push';
 import { platformNoShadow, platformShadow } from '@/lib/shadow';
 import { ensureSocket } from '@/lib/socket';
 import { storage } from '@/lib/storage';
@@ -54,19 +55,26 @@ export default function LoginScreen() {
         return;
       }
       setLoading(false);
+      // Trust the role the server returns for this account, not the toggle
+      // the user picked — picking "Worker" with a client account must not
+      // store a worker session.
+      const serverRole = data.user.role === 'worker' ? 'worker' : 'user';
       try {
         const authData = {
            id: data.user.id,
            phone: identifier,
            token: data.access_token,
-           role: role,
+           role: serverRole,
         };
         await storage.set('workmithra:auth', JSON.stringify(authData));
       } catch {}
       // Connect the realtime socket for the session now that the token is
       // persisted. ensureSocket() no-ops if anything is missing.
       ensureSocket();
-      if (role === 'user') {
+      // Ask for notification permission + register the push token while the
+      // login success is fresh — the OS prompt makes sense in this moment.
+      void ensurePushSetup();
+      if (serverRole === 'user') {
         router.replace('/homePage');
       } else {
         router.replace('/worker_dashboard');

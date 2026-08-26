@@ -4,6 +4,7 @@
  */
 
 import { io, Socket } from 'socket.io-client';
+import { AppState } from 'react-native';
 import { BASE_URL, getAuth, getToken } from '@/lib/api';
 
 // Socket.IO connects to the same backend as the REST API.
@@ -11,12 +12,27 @@ const API_URL = BASE_URL;
 
 let socket: Socket | null = null;
 
+// Reconnect automatically when the app returns to the foreground. Registered
+// once at module load; ensureSocket() no-ops when logged out or already
+// connected, so this is safe to leave installed for the app's lifetime.
+let appStateRegistered = false;
+function registerAppStateResume(): void {
+  if (appStateRegistered) return;
+  appStateRegistered = true;
+  AppState.addEventListener('change', (state) => {
+    if (state === 'active') {
+      void ensureSocket();
+    }
+  });
+}
+
 /**
  * Connect + authenticate the socket for the currently logged-in user, if any.
  * Safe to call repeatedly (e.g. on app mount): it no-ops when logged out or
  * when a socket already exists.
  */
 export async function ensureSocket(): Promise<Socket | null> {
+  registerAppStateResume();
   if (socket) return socket;
   try {
     const auth = await getAuth();
@@ -37,13 +53,20 @@ export function initializeSocket(userId: number): Socket {
   if (socket && socket.connected) {
     return socket;
   }
+  // A socket already exists but is disconnected/reconnecting — reuse it rather
+  // than stacking a second connection with duplicate event handlers.
+  if (socket) {
+    return socket;
+  }
 
   try {
     socket = io(API_URL, {
       reconnection: true,
       reconnectionDelay: 1000,
       reconnectionDelayMax: 5000,
-      reconnectionAttempts: 5,
+      // Keep trying indefinitely — mobile connections drop constantly, and a
+      // hard cap of 5 left the realtime channel dead until the app restarted.
+      reconnectionAttempts: Infinity,
       transports: ['websocket', 'polling'], // Support both WebSocket and polling
       autoConnect: true,
       forceNew: false,
@@ -89,11 +112,21 @@ export function getSocket(): Socket | null {
 }
 
 /**
- * Disconnect from Socket.IO server
+ * Disconnect from Socket.IO server.
+ *
+ * Removes all event handlers before disconnecting so a later ensureSocket()
+ * starts from a clean slate — otherwise stale listeners from unmounted screens
+ * would accumulate on the reused manager and fire against dead state.
  */
 export function disconnectSocket(): void {
   if (socket) {
-    socket.disconnect();
+    try {
+      socket.removeAllListeners();
+      socket.disconnect();
+      socket.close();
+    } catch {
+      // already closed — nothing to clean up
+    }
     socket = null;
   }
 }
@@ -250,9 +283,13 @@ export function onBookingRequest(
 export function onBookingStatusChanged(
   callback: (data: {
     booking_id: number;
-    status: string;
+    status?: string;
     updated_by: number;
     message?: string;
+    /** Price fields ride along when the change was a quote/acceptance. */
+    estimated_price?: number | null;
+    final_price?: number | null;
+    price_proposed_by?: 'user' | 'worker' | null;
     timestamp: string;
   }) => void
 ): () => void {
@@ -265,6 +302,43 @@ export function onBookingStatusChanged(
 
   return () => {
     socket?.off('booking_status_changed', callback);
+  };
+}
+
+// ============================================
+// NOTIFICATION FUNCTIONS
+// ============================================
+//
+// Notifications are persisted server-side (POST /notifications/ and the
+// booking price flow), and the backend emits 'notification_created' to the
+// recipient's private room with the fresh unread count — badge screens
+// listen for it instead of polling /notifications/unread-count.
+
+/**
+ * Listen for newly created notifications
+ */
+export function onNotificationCreated(
+  callback: (data: {
+    id: string;
+    title: string;
+    body: string;
+    audience: 'user' | 'worker';
+    recipient_id: string;
+    kind: string;
+    created_at: string;
+    read: boolean;
+    unread_count: number;
+  }) => void
+): () => void {
+  if (!socket) {
+    console.error('Socket not initialized');
+    return () => {};
+  }
+
+  socket.on('notification_created', callback);
+
+  return () => {
+    socket?.off('notification_created', callback);
   };
 }
 

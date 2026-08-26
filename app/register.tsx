@@ -5,7 +5,7 @@ import { platformNoShadow, platformShadow } from '@/lib/shadow';
 import { storage } from '@/lib/storage';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { Stack, useRouter } from 'expo-router';
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
     ActivityIndicator,
     KeyboardAvoidingView,
@@ -50,9 +50,21 @@ export default function RegisterScreen() {
   const [role, setRole] = useState<'user' | 'worker'>('user');
   const [isOtpSent, setIsOtpSent] = useState(false);
   const [isOtpVerified, setIsOtpVerified] = useState(false);
+  // Short-lived proof (from /verify-otp) that this email passed the OTP
+  // challenge. Sent with /register; the backend refuses signups without it.
+  const [verifyToken, setVerifyToken] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState({ type: '', text: '' });
   const [showPassword, setShowPassword] = useState(false);
+
+  // Post-success redirect is delayed so the success message is visible; clear
+  // the timer if the user navigates away before it fires.
+  const redirectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    return () => {
+      if (redirectTimer.current) clearTimeout(redirectTimer.current);
+    };
+  }, []);
 
   const handleSendOtp = async () => {
     if (!formData.email) {
@@ -84,6 +96,7 @@ export default function RegisterScreen() {
     try {
       const data = await verifyOtp(formData.email, formData.otp);
       setIsOtpVerified(true);
+      setVerifyToken(data.verify_token || null);
       setMessage({ type: 'success', text: data.message || 'OTP verified successfully' });
       setErrors(prev => ({ ...prev, otp: '' }));
     } catch (error: any) {
@@ -97,6 +110,21 @@ export default function RegisterScreen() {
   const handleRegister = async () => {
     if (!isOtpVerified) {
       setMessage({ type: 'error', text: 'Please verify your email first' });
+      return;
+    }
+    if (!verifyToken) {
+      // Verified flag is set but the proof token is missing/expired — make
+      // them redo the OTP step rather than sending a doomed request.
+      setIsOtpVerified(false);
+      setIsOtpSent(false);
+      setFormData({ ...formData, otp: '' });
+      setMessage({ type: 'error', text: 'Verification expired — please request a new OTP' });
+      return;
+    }
+    // Same 8-character minimum the backend enforces (PASSWORD_MIN_LENGTH) —
+    // catching it here gives an instant, readable error instead of a 422.
+    if (formData.password.length < 8) {
+      setMessage({ type: 'error', text: 'Password must be at least 8 characters' });
       return;
     }
     if (formData.password !== formData.confirmPassword) {
@@ -113,10 +141,11 @@ export default function RegisterScreen() {
         email: formData.email,
         password: formData.password,
         role: role,
+        verify_token: verifyToken,
       });
       await persistRegistration();
       setMessage({ type: 'success', text: 'Registration successful!' });
-      setTimeout(() => {
+      redirectTimer.current = setTimeout(() => {
         router.replace('/login');
       }, 1500);
     } catch (error: any) {
@@ -261,6 +290,7 @@ export default function RegisterScreen() {
                         // the previous address — force the user to request a new one.
                         setFormData({ ...formData, email: text, otp: '' });
                         if (isOtpSent) setIsOtpSent(false);
+                        setVerifyToken(null);
                       }}
                     />
                   </View>

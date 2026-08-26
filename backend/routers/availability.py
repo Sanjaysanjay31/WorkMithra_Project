@@ -1,10 +1,38 @@
 from fastapi import APIRouter, Depends, HTTPException
 from typing import List, Optional, Dict, Any
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 import database, models, schemas
 from auth import get_current_user
 
 router = APIRouter()
+
+# Canonical day names — free-text days ("funday") previously persisted as
+# dead rows that never matched any booking check.
+_VALID_DAYS = {"monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"}
+_DAY_ALIASES = {
+    "mon": "monday", "tue": "tuesday", "tues": "tuesday", "wed": "wednesday",
+    "thu": "thursday", "thur": "thursday", "thurs": "thursday",
+    "fri": "friday", "sat": "saturday", "sun": "sunday",
+}
+
+
+def _normalize_day(day: Optional[str]) -> Optional[str]:
+    if day is None:
+        return None
+    d = str(day).strip().lower()
+    d = _DAY_ALIASES.get(d, d)
+    if d not in _VALID_DAYS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"available_day must be one of: {', '.join(sorted(_VALID_DAYS))}",
+        )
+    return d
+
+
+def _validate_window(start_time, end_time) -> None:
+    if start_time is not None and end_time is not None and start_time >= end_time:
+        raise HTTPException(status_code=400, detail="start_time must be before end_time")
 
 
 def _assert_own_worker(worker_id: int, current: Dict[str, Any]) -> None:
@@ -38,11 +66,14 @@ def create_availability(
     if not worker:
         raise HTTPException(status_code=404, detail="Worker not found")
 
+    day = _normalize_day(payload.available_day)
+    _validate_window(payload.start_time, payload.end_time)
+
     existing = (
         db.query(models.WorkerAvailability)
         .filter(
             models.WorkerAvailability.worker_id == payload.worker_id,
-            models.WorkerAvailability.available_day == payload.available_day,
+            models.WorkerAvailability.available_day == day,
         )
         .first()
     )
@@ -56,13 +87,34 @@ def create_availability(
 
     a = models.WorkerAvailability(
         worker_id=payload.worker_id,
-        available_day=payload.available_day,
+        available_day=day,
         start_time=payload.start_time,
         end_time=payload.end_time,
         is_available=payload.is_available if payload.is_available is not None else True,
     )
     db.add(a)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # Lost the upsert race on the unique (worker_id, available_day)
+        # index — update whichever row won instead of failing.
+        db.rollback()
+        winner = (
+            db.query(models.WorkerAvailability)
+            .filter(
+                models.WorkerAvailability.worker_id == payload.worker_id,
+                models.WorkerAvailability.available_day == day,
+            )
+            .first()
+        )
+        if winner is None:
+            raise HTTPException(status_code=409, detail="Could not save this slot — try again")
+        winner.start_time = payload.start_time
+        winner.end_time = payload.end_time
+        winner.is_available = payload.is_available if payload.is_available is not None else True
+        db.commit()
+        db.refresh(winner)
+        return _to_dict(winner)
     db.refresh(a)
     return _to_dict(a)
 
@@ -73,9 +125,20 @@ def list_availability(
     db: Session = Depends(database.get_db),
     current: Dict[str, Any] = Depends(get_current_user),
 ):
-    q = db.query(models.WorkerAvailability)
-    if worker_id is not None:
-        q = q.filter(models.WorkerAvailability.worker_id == worker_id)
+    """List availability slots. Workers default to their own slots; other
+    callers must name a worker (clients checking slots before booking).
+    Without this, an unscoped call dumped the entire table."""
+    if worker_id is None:
+        if current.get("role") == "worker":
+            try:
+                worker_id = int(current["sub"])
+            except (KeyError, ValueError, TypeError):
+                raise HTTPException(status_code=401, detail="Invalid token payload")
+        else:
+            raise HTTPException(status_code=400, detail="worker_id is required")
+    q = db.query(models.WorkerAvailability).filter(
+        models.WorkerAvailability.worker_id == worker_id
+    )
     return [_to_dict(r) for r in q.all()]
 
 
@@ -90,8 +153,27 @@ def update_availability(
     if not a:
         raise HTTPException(status_code=404, detail="Availability slot not found")
     _assert_own_worker(a.worker_id, current)
-    if payload.available_day is not None:
-        a.available_day = payload.available_day
+
+    new_day = _normalize_day(payload.available_day) if payload.available_day is not None else a.available_day
+    new_start = payload.start_time if payload.start_time is not None else a.start_time
+    new_end = payload.end_time if payload.end_time is not None else a.end_time
+    _validate_window(new_start, new_end)
+
+    # Moving a slot onto a day that already has a slot would create two
+    # conflicting rows for the same (worker, day) — reject instead.
+    if new_day != a.available_day:
+        clash = (
+            db.query(models.WorkerAvailability)
+            .filter(
+                models.WorkerAvailability.worker_id == a.worker_id,
+                models.WorkerAvailability.available_day == new_day,
+                models.WorkerAvailability.id != slot_id,
+            )
+            .first()
+        )
+        if clash:
+            raise HTTPException(status_code=409, detail="A slot for that day already exists")
+        a.available_day = new_day
     if payload.start_time is not None:
         a.start_time = payload.start_time
     if payload.end_time is not None:

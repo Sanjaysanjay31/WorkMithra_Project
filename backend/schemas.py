@@ -8,6 +8,10 @@ PASSWORD_MIN_LENGTH = 8
 # bcrypt silently truncates beyond 72 bytes; reject instead (see auth.py).
 PASSWORD_MAX_BYTES = 72
 
+# The only presence values a worker may set — the SAME whitelist the socket
+# layer enforces, so REST and realtime writes can't diverge.
+ALLOWED_WORKER_STATUSES = {"online", "available", "busy", "offline"}
+
 
 def _check_password_bytes(v: str) -> str:
     if len(v.encode("utf-8")) > PASSWORD_MAX_BYTES:
@@ -22,12 +26,17 @@ class UserBase(BaseModel):
     profile_image: Optional[str] = None
     role: Optional[str] = None
     gender: Optional[str] = None
+    age: Optional[int] = Field(default=None, ge=0, le=120)
     address: Optional[str] = None
+    # Free-form locality label ("Madhapur, Hyderabad") shown on profiles.
+    location: Optional[str] = Field(default=None, max_length=500)
+    alternate_phone: Optional[str] = Field(default=None, max_length=50)
     city: Optional[str] = None
     state: Optional[str] = None
     pincode: Optional[str] = None
     latitude: Optional[float] = None
     longitude: Optional[float] = None
+    preferred_language: Optional[str] = Field(default=None, max_length=20)
 
 
 class UserCreate(UserBase):
@@ -89,17 +98,23 @@ class WorkerBase(BaseModel):
     full_name: Optional[str] = None
     phone: Optional[str] = None
     email: Optional[EmailStr] = None
+    age: Optional[int] = Field(default=None, ge=0, le=120)
+    alternate_phone: Optional[str] = Field(default=None, max_length=50)
     skill: Optional[str] = None
-    experience_years: Optional[int] = None
+    experience_years: Optional[int] = Field(default=None, ge=0)
     bio: Optional[str] = None
-    hourly_rate: Optional[float] = None
+    # Free-text working hours as entered by the worker, e.g. "Mon-Sat 9am-6pm".
+    timings: Optional[str] = Field(default=None, max_length=255)
+    hourly_rate: Optional[float] = Field(default=None, ge=0)
     availability: Optional[bool] = None
     current_status: Optional[str] = None
     profile_image: Optional[str] = None
     city: Optional[str] = None
+    pincode: Optional[str] = Field(default=None, max_length=20)
     location: Optional[str] = None
     latitude: Optional[float] = None
     longitude: Optional[float] = None
+    preferred_language: Optional[str] = Field(default=None, max_length=20)
 
 
 class WorkerCreate(WorkerBase):
@@ -114,6 +129,7 @@ class WorkerResponse(WorkerBase):
     completed_jobs: Optional[int] = None
     aadhaar_verified: Optional[bool] = None
     created_at: Optional[datetime] = None
+    preferred_language: Optional[str] = None
     class Config:
         from_attributes = True
 
@@ -123,28 +139,56 @@ class WorkerUpdate(BaseModel):
     full_name: Optional[str] = None
     phone: Optional[str] = None
     email: Optional[EmailStr] = None
+    age: Optional[int] = Field(default=None, ge=0, le=120)
+    alternate_phone: Optional[str] = Field(default=None, max_length=50)
     skill: Optional[str] = None
-    experience_years: Optional[int] = None
+    experience_years: Optional[int] = Field(default=None, ge=0)
     bio: Optional[str] = None
-    hourly_rate: Optional[float] = None
+    timings: Optional[str] = Field(default=None, max_length=255)
+    hourly_rate: Optional[float] = Field(default=None, ge=0)
     availability: Optional[bool] = None
     current_status: Optional[str] = None
     profile_image: Optional[str] = None
     city: Optional[str] = None
+    pincode: Optional[str] = Field(default=None, max_length=20)
     location: Optional[str] = None
     latitude: Optional[float] = None
     longitude: Optional[float] = None
+    preferred_language: Optional[str] = Field(default=None, max_length=20)
+
+    @field_validator("current_status")
+    @classmethod
+    def _status_whitelist(cls, v):
+        """Presence is broadcast to every client — keep it on the same closed
+        vocabulary the socket layer enforces (schemas.ALLOWED_WORKER_STATUSES),
+        so a REST write can't smuggle arbitrary text into status events."""
+        if v is None:
+            return v
+        normalized = str(v).strip().lower()
+        if normalized not in ALLOWED_WORKER_STATUSES:
+            raise ValueError(f"current_status must be one of: {', '.join(sorted(ALLOWED_WORKER_STATUSES))}")
+        return normalized
 
 
 class ServiceBase(BaseModel):
     service_name: str
     description: Optional[str] = None
     icon: Optional[str] = None
-    base_price: Optional[float] = None
+    base_price: Optional[float] = Field(default=None, ge=0)
 
 
 class ServiceCreate(ServiceBase):
     pass
+
+
+class ServiceUpdate(BaseModel):
+    """Partial update — only the fields present in the request are written.
+    Using ServiceBase here previously wiped description/icon/base_price on
+    every edit that omitted them."""
+    service_name: Optional[str] = None
+    description: Optional[str] = None
+    icon: Optional[str] = None
+    base_price: Optional[float] = Field(default=None, ge=0)
 
 
 class ServiceResponse(ServiceBase):
@@ -158,7 +202,7 @@ class WorkerServiceBase(BaseModel):
     worker_id: int
     service_id: int
     experience_level: Optional[str] = None
-    service_price: Optional[float] = None
+    service_price: Optional[float] = Field(default=None, ge=0)
 
 
 class BookingBase(BaseModel):
@@ -213,10 +257,19 @@ class BookingResponse(BookingBase):
     id: int
     user_id: int
     created_at: Optional[datetime] = None
+    # Whose price is currently on the table ('user' | 'worker') while the
+    # booking is in negotiation. Server-managed — never client-writable.
+    price_proposed_by: Optional[str] = None
     user: Optional[UserBrief] = None
     worker: Optional[WorkerBrief] = None
     class Config:
         from_attributes = True
+
+
+class PriceProposal(BaseModel):
+    """A quote or counter-offer on a booking. Must be a positive amount —
+    zero/negative proposals are rejected at the schema level."""
+    amount: float = Field(gt=0)
 
 
 class PaymentBase(BaseModel):
@@ -290,6 +343,11 @@ class ChatMessageBase(BaseModel):
 
 class ChatMessageResponse(ChatMessageBase):
     id: int
+    # Roles ride along because users and workers have OVERLAPPING id spaces —
+    # without them a client rendering history cannot tell worker #5 from
+    # user #5.
+    sender_role: Optional[str] = None
+    receiver_role: Optional[str] = None
     class Config:
         from_attributes = True
 
@@ -312,7 +370,26 @@ class JobHistoryBase(BaseModel):
 
 class AssistantMessageCreate(BaseModel):
     role: str  # 'ai' | 'me'
-    text: str
+    text: str = Field(max_length=4000)
+
+
+class ProfileUpdate(BaseModel):
+    """Typed editable extended-profile fields. Replaces the previous raw
+    Dict[str, Any] body — unknown keys are ignored and wrong types get a 422
+    instead of corrupting typed columns at commit time (unhandled 500)."""
+    full_name: Optional[str] = Field(default=None, max_length=255)
+    phone: Optional[str] = Field(default=None, max_length=50)
+    email: Optional[EmailStr] = None
+    preferred_language: Optional[str] = Field(default=None, max_length=20)
+    notification_enabled: Optional[bool] = None
+    bio: Optional[str] = Field(default=None, max_length=2000)
+    address: Optional[str] = Field(default=None, max_length=500)
+    city: Optional[str] = Field(default=None, max_length=120)
+    state: Optional[str] = Field(default=None, max_length=120)
+    pincode: Optional[str] = Field(default=None, max_length=20)
+    latitude: Optional[float] = Field(default=None, ge=-90, le=90)
+    longitude: Optional[float] = Field(default=None, ge=-180, le=180)
+    profile_image: Optional[str] = Field(default=None, max_length=2000)
 
 
 class AssistantMessageResponse(BaseModel):

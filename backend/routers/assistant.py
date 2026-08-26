@@ -1,9 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from typing import List, Dict, Any
 from sqlalchemy.orm import Session
 from datetime import datetime
 import database, models, schemas
 from auth import get_current_user
+from rate_limit import limiter
 
 router = APIRouter()
 
@@ -19,11 +20,13 @@ def _current_user(current: Dict[str, Any]) -> tuple:
 
 @router.get("/", response_model=List[schemas.AssistantMessageResponse])
 def list_history(
+    skip: int = Query(0, ge=0),
     limit: int = Query(200, ge=1, le=500),
     db: Session = Depends(database.get_db),
     current: Dict[str, Any] = Depends(get_current_user),
 ):
-    """The logged-in user's assistant conversation, oldest first."""
+    """The logged-in user's assistant conversation, oldest first. Page with
+    skip/limit — without skip, history beyond row 500 was unreachable."""
     uid, role = _current_user(current)
     rows = (
         db.query(models.AssistantMessage)
@@ -32,6 +35,7 @@ def list_history(
             models.AssistantMessage.user_role == role,
         )
         .order_by(models.AssistantMessage.created_at.asc(), models.AssistantMessage.id.asc())
+        .offset(skip)
         .limit(limit)
         .all()
     )
@@ -39,7 +43,9 @@ def list_history(
 
 
 @router.post("/", response_model=schemas.AssistantMessageResponse)
+@limiter.limit("30/minute")
 def append_message(
+    request: Request,
     payload: schemas.AssistantMessageCreate,
     db: Session = Depends(database.get_db),
     current: Dict[str, Any] = Depends(get_current_user),

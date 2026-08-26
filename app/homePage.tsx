@@ -1,18 +1,21 @@
 import Avatar from '@/components/avatar';
 import BottomNav from '@/components/bottom-nav';
+import FrameModal from '@/components/frame-modal';
 import { aiExtract, webSTTControlled } from '@/lib/ai';
 import { authFetch, expectJson } from '@/lib/api';
+import { useI18n } from '@/lib/i18n';
 import { unreadCount } from '@/lib/notifications';
+import { ensureSocket, onNotificationCreated } from '@/lib/socket';
 import { storage } from '@/lib/storage';
 import { WorkerResponse } from '@/lib/types';
 import { Ionicons } from '@expo/vector-icons';
+import * as Location from 'expo-location';
 import { Stack, useRouter } from 'expo-router';
 import React, { useEffect, useRef, useState } from 'react';
 import {
     ActivityIndicator,
     Alert,
     FlatList,
-    Modal,
     Platform,
     ScrollView,
     StyleSheet,
@@ -28,10 +31,14 @@ type AvailNow = 'now' | 'today' | null;
 
 export default function HomePage() {
   const router = useRouter();
+  const { t } = useI18n();
   const insets = useSafeAreaInsets();
   const [searchQuery, setSearchQuery] = useState('');
   const [workers, setWorkers] = useState<WorkerResponse[]>([]);
   const [loading, setLoading] = useState(false);
+  // A failed search must NOT look like "no results" — this drives a distinct
+  // error banner with a retry button.
+  const [loadError, setLoadError] = useState('');
   const [listening, setListening] = useState(false);
   const [unread, setUnread] = useState(0);
 
@@ -50,11 +57,24 @@ export default function HomePage() {
   }, []);
 
   useEffect(() => {
+    if (!userId) return;
     let alive = true;
-    const tick = () => unreadCount('user', userId).then((n) => { if (alive) setUnread(n); }).catch(() => {});
-    tick();
-    const id = setInterval(tick, 4000);
-    return () => { alive = false; clearInterval(id); };
+    // One initial fetch for the badge; after that the backend pushes
+    // 'notification_created' (with the fresh unread count) over the socket,
+    // so no polling interval is needed.
+    unreadCount('user', userId).then((n) => { if (alive) setUnread(n); }).catch(() => {});
+    let off: () => void = () => {};
+    (async () => {
+      // ensureSocket() is async — the listener must be registered only after
+      // the socket exists, otherwise onNotificationCreated no-ops.
+      await ensureSocket();
+      if (!alive) return;
+      off = onNotificationCreated((data) => {
+        if (data.audience !== 'user' || String(data.recipient_id) !== userId) return;
+        setUnread((u) => (typeof data.unread_count === 'number' ? data.unread_count : u + 1));
+      });
+    })();
+    return () => { alive = false; off(); };
   }, [userId]);
 
   // Filter state
@@ -76,10 +96,53 @@ export default function HomePage() {
     }, searchQuery ? 350 : 0);
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchQuery, minWage, maxWage, minExperience, minRating, minJobs, verifiedOnly, availability, sortBy]);
+  }, [searchQuery, minWage, maxWage, maxDistance, minExperience, minRating, minJobs, verifiedOnly, availability, sortBy]);
+
+  // Aborts the previous in-flight search so a slow stale response can't land
+  // after (and clobber) a newer one.
+  const fetchController = useRef<AbortController | null>(null);
+  // Cached device location, fetched lazily only when a distance filter is
+  // set. Entries expire after 5 minutes — a user who moves and re-searches
+  // should not keep getting distances for their old position forever.
+  const LOCATION_TTL_MS = 5 * 60 * 1000;
+  const cachedLoc = useRef<{ lat: number; lng: number; fetchedAt: number } | null>(null);
+
+  async function getDeviceLocation(): Promise<{ lat: number; lng: number } | null> {
+    if (cachedLoc.current && Date.now() - cachedLoc.current.fetchedAt < LOCATION_TTL_MS) {
+      return cachedLoc.current;
+    }
+    try {
+      let fresh: { lat: number; lng: number } | null = null;
+      if (Platform.OS === 'web') {
+        if (typeof navigator === 'undefined' || !navigator.geolocation) return null;
+        fresh = await new Promise((resolve) => {
+          navigator.geolocation.getCurrentPosition(
+            (pos) => resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
+            () => resolve(null),
+            { enableHighAccuracy: false, timeout: 5000 },
+          );
+        });
+      } else {
+        const { status } = await Location.requestForegroundPermissionsAsync();
+        if (status !== 'granted') return null;
+        const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+        fresh = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+      }
+      if (fresh) cachedLoc.current = { ...fresh, fetchedAt: Date.now() };
+      return fresh;
+    } catch {
+      return null;
+    }
+  }
 
   async function fetchWorkers() {
+    // Cancel any previous request before starting a new one.
+    fetchController.current?.abort();
+    const controller = new AbortController();
+    fetchController.current = controller;
+
     setLoading(true);
+    setLoadError('');
     try {
       const params = new URLSearchParams();
       if (searchQuery.trim()) params.append('q', searchQuery);
@@ -92,15 +155,33 @@ export default function HomePage() {
       if (availability) params.append('availability', availability);
       if (sortBy.length > 0) params.append('sort_by', sortBy.join(','));
 
+      // Distance filter needs the device location; fetch it lazily and only
+      // when the user actually set a radius.
+      if (maxDistance && !isNaN(Number(maxDistance)) && Number(maxDistance) > 0) {
+        const loc = await getDeviceLocation();
+        if (controller.signal.aborted) return;
+        if (loc) {
+          params.append('lat', String(loc.lat));
+          params.append('lng', String(loc.lng));
+          params.append('radius', maxDistance);
+        }
+      }
+
       const data = await expectJson<WorkerResponse[]>(
-        await authFetch(`/workers/smart-match?${params.toString()}`),
+        await authFetch(`/workers/smart-match?${params.toString()}`, { signal: controller.signal }),
         'Could not load workers',
       );
+      if (controller.signal.aborted) return;
       setWorkers(Array.isArray(data) ? data : []);
-    } catch (e) {
+    } catch (e: any) {
+      if (controller.signal.aborted) return;
       console.warn('Failed to fetch workers', e);
+      // Distinguish a backend/network failure from genuinely zero results —
+      // an empty list and a dead server must not render the same UI.
+      setLoadError('Could not load workers. Check your connection and try again.');
     } finally {
-      setLoading(false);
+      // Only clear loading if this is still the active request.
+      if (fetchController.current === controller) setLoading(false);
     }
   }
 
@@ -120,7 +201,17 @@ export default function HomePage() {
   }
 
   /** Run AI intent extraction in the background to map free-form text to a domain. */
+  //
+  // Debounced + capped: the LLM call is paid and slow, so we only fire it once
+  // per query after a quiet window, and never more than a few times per
+  // session. A failed or empty result leaves the cleaned text in place.
+  const aiExtractTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const aiExtractCount = useRef(0);
+  const MAX_AI_EXTRACT_CALLS = 6;
+
   async function refineQueryWithAI(text: string) {
+    if (aiExtractCount.current >= MAX_AI_EXTRACT_CALLS) return;
+    aiExtractCount.current += 1;
     try {
       const result = await aiExtract(
         text,
@@ -133,7 +224,26 @@ export default function HomePage() {
     }
   }
 
+  /** Schedule a debounced AI refinement. Safe to call from every keystroke. */
+  function scheduleAiRefine(text: string) {
+    if (aiExtractTimer.current) clearTimeout(aiExtractTimer.current);
+    aiExtractTimer.current = setTimeout(() => {
+      aiExtractTimer.current = null;
+      void refineQueryWithAI(text);
+    }, 600);
+  }
+
   const sttRef = useRef<{ stop: () => void; result: Promise<string> } | null>(null);
+
+  // Stop any in-progress voice capture and abort pending searches if the
+  // screen unmounts, so the mic doesn't stay open in the background.
+  useEffect(() => {
+    return () => {
+      try { sttRef.current?.stop(); } catch {}
+      fetchController.current?.abort();
+      if (aiExtractTimer.current) clearTimeout(aiExtractTimer.current);
+    };
+  }, []);
 
   async function startVoiceSearch() {
     // Toggle: if already listening, stop and process.
@@ -157,7 +267,7 @@ export default function HomePage() {
       }
       const cleaned = cleanQuery(raw);
       setSearchQuery(cleaned);
-      refineQueryWithAI(raw);
+      scheduleAiRefine(raw);
     } catch (e: any) {
       sttRef.current = null;
       setListening(false);
@@ -217,7 +327,7 @@ export default function HomePage() {
             <Ionicons name="search" size={16} color="#999" style={styles.searchIcon} />
             <TextInput
               style={styles.searchInput}
-              placeholder="Say or type what you need — AI will find it"
+              placeholder={t('home.searchPlaceholder')}
               placeholderTextColor="#999"
               value={searchQuery}
               onChangeText={setSearchQuery}
@@ -225,11 +335,11 @@ export default function HomePage() {
                 const raw = searchQuery;
                 if (!raw.trim()) return;
                 setSearchQuery(cleanQuery(raw));
-                refineQueryWithAI(raw);
+                scheduleAiRefine(raw);
               }}
               returnKeyType="search"
             />
-            <TouchableOpacity onPress={startVoiceSearch} style={styles.micBtn}>
+            <TouchableOpacity onPress={startVoiceSearch} style={styles.micBtn} accessibilityLabel="Search by voice">
               <Ionicons
                 name={listening ? 'mic' : 'mic-outline'}
                 size={18}
@@ -237,12 +347,12 @@ export default function HomePage() {
               />
             </TouchableOpacity>
           </View>
-          <TouchableOpacity style={styles.filterBtn} onPress={() => setFilterVisible(true)} activeOpacity={0.85}>
+          <TouchableOpacity style={styles.filterBtn} onPress={() => setFilterVisible(true)} activeOpacity={0.85} accessibilityLabel="Open filters">
             <Ionicons name="options" size={18} color="#fff" />
           </TouchableOpacity>
-          <TouchableOpacity
+          <TouchableOpacity accessibilityLabel="Open notifications"
             style={styles.bellBtn}
-            onPress={() => router.push({ pathname: '/notifications', params: { as: 'user', id: userId } })}
+            onPress={() => router.push('/notifications')}
             activeOpacity={0.85}
           >
             <Ionicons name="notifications-outline" size={18} color="#fff" />
@@ -262,6 +372,20 @@ export default function HomePage() {
 
         {loading ? (
           <ActivityIndicator size="large" color="#6F42C1" style={{ marginTop: 20 }} />
+        ) : loadError ? (
+          <View style={{ alignItems: 'center', marginTop: 20 }}>
+            <Text style={[styles.noResults, { color: '#b91c1c' }]}>{loadError}</Text>
+            <TouchableOpacity
+              accessibilityLabel="Retry loading workers"
+              onPress={() => {
+                setLoadError('');
+                void fetchWorkers();
+              }}
+              style={{ marginTop: 10, paddingHorizontal: 16, paddingVertical: 8, borderRadius: 8, backgroundColor: '#6F42C1' }}
+            >
+              <Text style={{ color: '#fff', fontWeight: '700' }}>Retry</Text>
+            </TouchableOpacity>
+          </View>
         ) : filteredWorkers.length === 0 ? (
           <Text style={styles.noResults}>No workers found</Text>
         ) : (
@@ -274,7 +398,7 @@ export default function HomePage() {
         )}
       </View>
 
-      <Modal visible={filterVisible} animationType="slide" transparent onRequestClose={() => setFilterVisible(false)}>
+      <FrameModal visible={filterVisible} animationType="slide" onRequestClose={() => setFilterVisible(false)}>
         <View style={styles.modalOverlay}>
           <View style={[styles.modalCard, { paddingBottom: 16 + insets.bottom, height: '85%' }]}>
             <View style={styles.modalHeader}>
@@ -389,7 +513,7 @@ export default function HomePage() {
             </View>
           </View>
         </View>
-      </Modal>
+      </FrameModal>
 
       <BottomNav currentRoute="home" />
     </View>

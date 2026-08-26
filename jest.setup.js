@@ -75,6 +75,16 @@ jest.mock('@/lib/socket', () => ({
   setTypingIndicator: jest.fn(),
 }));
 
+// expo-notifications — lib/push.ts is imported from the root layout; push is
+// a native-only concern, so tests get a silent granted-permission stub.
+jest.mock('expo-notifications', () => ({
+  setNotificationHandler: jest.fn(),
+  getPermissionsAsync: jest.fn(async () => ({ status: 'granted' })),
+  requestPermissionsAsync: jest.fn(async () => ({ status: 'granted' })),
+  getExpoPushTokenAsync: jest.fn(async () => ({ data: 'ExpoPushToken[test]' })),
+  addNotificationResponseReceivedListener: jest.fn(() => ({ remove: jest.fn() })),
+}));
+
 // Global fetch — screens fire authFetch/fetch on mount. Return a benign empty
 // JSON response by default so tests never hit the network; individual tests can
 // override via global.fetch.mockResolvedValueOnce(...).

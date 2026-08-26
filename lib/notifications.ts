@@ -30,14 +30,13 @@ function normalize(raw: any): Notification {
 
 export async function listNotifications(audience: NotifAudience, recipientId: string): Promise<Notification[]> {
   if (!recipientId) return [];
-  try {
-    const res = await authFetch(`/notifications/?audience=${audience}&recipient_id=${encodeURIComponent(recipientId)}`);
-    if (!res.ok) return [];
-    const data = await res.json();
-    return Array.isArray(data) ? data.map(normalize) : [];
-  } catch {
-    return [];
-  }
+  // Errors PROPAGATE to the caller — a failed load must be distinguishable
+  // in the UI from an empty inbox, not silently shown as "No notifications
+  // yet". (HTTP failures still resolve to []; network/parse errors throw.)
+  const res = await authFetch(`/notifications/?audience=${audience}&recipient_id=${encodeURIComponent(recipientId)}`);
+  if (!res.ok) return [];
+  const data = await res.json();
+  return Array.isArray(data) ? data.map(normalize) : [];
 }
 
 export async function addNotification(n: Omit<Notification, 'id' | 'created_at' | 'read'>): Promise<Notification | null> {

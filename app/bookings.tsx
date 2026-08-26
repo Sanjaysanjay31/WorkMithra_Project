@@ -1,17 +1,21 @@
 import Avatar from '@/components/avatar';
 import BottomNav from '@/components/bottom-nav';
+import FrameModal from '@/components/frame-modal';
 import { authFetch, expectJson } from '@/lib/api';
 import { BookingStatus, isActiveStatus, normalizeBookingStatus } from '@/lib/booking-status';
 import { formatBookingDateTime, isBookingDateTimePast } from '@/lib/format';
 import { platformShadow } from '@/lib/shadow';
 import { storage } from '@/lib/storage';
+import { ensureSocket, onBookingStatusChanged } from '@/lib/socket';
 import { BookingResponse, WorkerBrief } from '@/lib/types';
+import { Ionicons } from '@expo/vector-icons';
 import { Stack, useRouter } from 'expo-router';
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
     ActivityIndicator,
+    RefreshControl,
     Alert,
-    Modal,
+    KeyboardAvoidingView,
     ScrollView,
     StyleSheet,
     Text,
@@ -27,7 +31,11 @@ type Booking = {
   user_id: number;
   worker: WorkerBrief;
   status: BookingStatus;
+  /** Display amount: the agreed price once locked, else the current proposal. */
   amount: number;
+  estimated_price: number;
+  final_price: number;
+  price_proposed_by: 'user' | 'worker' | null;
   date: string;
 };
 
@@ -46,7 +54,27 @@ function statusColor(s: BookingStatus, isPast: boolean) {
   return { bg: '#dbeafe', fg: '#1e40af', label: '⏳ Upcoming' };
 }
 
-
+/** Map an API booking onto the card model (shared by load and live updates). */
+function toBookingItem(b: BookingResponse, uid: number): Booking | null {
+  // This is the client's bookings screen — match on user_id only.
+  // Users and workers have overlapping numeric id spaces, so also
+  // matching worker_id would pull in a stranger's booking whenever a
+  // worker happens to share this user's number.
+  if (b.user_id !== uid) return null;
+  const estimated = Number(b.estimated_price ?? 0);
+  const final = Number(b.final_price ?? 0);
+  return {
+    id: String(b.id),
+    user_id: b.user_id,
+    worker: b.worker || { id: b.worker_id || 0 },
+    status: normalizeBookingStatus(b.status),
+    estimated_price: estimated,
+    final_price: final,
+    price_proposed_by: b.price_proposed_by ?? null,
+    amount: final || estimated,
+    date: formatBookingDateTime(b.booking_date, b.booking_time) || 'Date not set',
+  };
+}
 
 export default function BookingsPage() {
   const router = useRouter();
@@ -57,29 +85,67 @@ export default function BookingsPage() {
   const [past, setPast] = useState<Booking[]>([]);
   const [priceFor, setPriceFor] = useState<Booking | null>(null);
   const [priceAmount, setPriceAmount] = useState('');
+  // Session id kept in a ref so the realtime handler below can scope
+  // incoming bookings without re-subscribing.
+  const uidRef = useRef(0);
+  // Bumped by pull-to-refresh to re-run the load effect.
+  const [reloadTick, setReloadTick] = useState(0);
+  // Ref-based double-submit guard: state updates lag a re-render, so rapid
+  // taps could fire duplicate POST/PUTs before `busy` ever renders.
+  const actionRef = useRef(false);
 
-  async function savePrice() {
-    if (!priceFor) return;
+  /** Merge a server response into whichever tab holds the booking. */
+  function applyUpdate(b: BookingResponse) {
+    const item = toBookingItem(b, Number(b.user_id))!;
+    setPresent((rs) => rs.map((x) => (x.id === item.id ? item : x)));
+    setPast((rs) => rs.map((x) => (x.id === item.id ? item : x)));
+  }
+
+  async function acceptPrice(b: Booking) {
+    if (actionRef.current) return;
+    actionRef.current = true;
+    try {
+      const updated: BookingResponse = await expectJson(
+        await authFetch(`/bookings/${b.id}/accept-price`, { method: 'POST' }),
+        'Could not accept the price',
+      );
+      applyUpdate(updated);
+      Alert.alert('Price agreed ✓', `Both sides agreed on ₹${Number(updated.final_price)}.`);
+    } catch (e: any) {
+      Alert.alert('Could not accept', e?.message || 'Please try again.');
+    } finally {
+      actionRef.current = false;
+    }
+  }
+
+  async function proposePrice() {
+    if (!priceFor || actionRef.current) return;
     const amt = Number(priceAmount);
     if (!amt || amt <= 0) {
       Alert.alert('Price', 'Please enter a valid amount in ₹');
       return;
     }
     const b = priceFor;
+    actionRef.current = true;
     try {
-      await expectJson(
-        await authFetch(`/bookings/${b.id}`, {
-          method: 'PUT',
-          json: { estimated_price: amt },
+      const updated: BookingResponse = await expectJson(
+        await authFetch(`/bookings/${b.id}/propose-price`, {
+          method: 'POST',
+          json: { amount: amt },
         }),
-        'Could not save the agreed price',
+        'Could not send the offer',
       );
-      setPresent((rs) => rs.map((x) => (x.id === b.id ? { ...x, amount: amt } : x)));
+      applyUpdate(updated);
       setPriceFor(null);
       setPriceAmount('');
-      Alert.alert('Saved', `Agreed price set to ₹${amt}.`);
+      Alert.alert(
+        'Offer sent',
+        `₹${amt} sent to ${b.worker.full_name || 'the worker'} — you'll be notified when they respond.`,
+      );
     } catch (e: any) {
-      Alert.alert('Price not saved', e?.message || 'Could not save the agreed price. Please try again.');
+      Alert.alert('Offer not sent', e?.message || 'Could not send the offer. Please try again.');
+    } finally {
+      actionRef.current = false;
     }
   }
 
@@ -93,10 +159,12 @@ export default function BookingsPage() {
           if (auth.id) uid = Number(auth.id);
         }
       } catch {}
+      uidRef.current = uid;
       try {
         // The backend embeds worker details on each booking, so one request is enough.
+        // limit=100 — the default 20 silently truncates long histories.
         const bookingsList: BookingResponse[] = await expectJson(
-          await authFetch('/bookings'),
+          await authFetch('/bookings?limit=100'),
           'Could not load your bookings',
         );
 
@@ -104,27 +172,17 @@ export default function BookingsPage() {
         const realPast: Booking[] = [];
 
         bookingsList.forEach((b) => {
-          if (b.user_id === uid || b.worker_id === uid) {
-             const w: WorkerBrief = b.worker || { id: b.worker_id || 0 };
-             const status = normalizeBookingStatus(b.status);
-             const bookingItem: Booking = {
-               id: String(b.id),
-               user_id: b.user_id,
-               worker: w,
-               status,
-               amount: b.estimated_price || b.final_price || 0,
-               date: formatBookingDateTime(b.booking_date, b.booking_time) || 'Date not set',
-             };
-             // Present = an upcoming slot that hasn't happened yet.
-             // Past = the scheduled time has passed OR it reached a terminal
-             // state. We keep the real status label (pending/upcoming/rejected/
-             // completed) so a never-accepted booking still shows as Pending.
-             const isPast = isBookingDateTimePast(b.booking_date, b.booking_time) || !isActiveStatus(status);
-             if (isPast) {
-               realPast.push(bookingItem);
-             } else {
-               realPresent.push(bookingItem);
-             }
+          const bookingItem = toBookingItem(b, uid);
+          if (!bookingItem) return;
+          // Present = an upcoming slot that hasn't happened yet.
+          // Past = the scheduled time has passed OR it reached a terminal
+          // state. We keep the real status label (pending/upcoming/rejected/
+          // completed) so a never-accepted booking still shows as Pending.
+          const isPast = isBookingDateTimePast(b.booking_date, b.booking_time) || !isActiveStatus(bookingItem.status);
+          if (isPast) {
+            realPast.push(bookingItem);
+          } else {
+            realPresent.push(bookingItem);
           }
         });
 
@@ -137,9 +195,128 @@ export default function BookingsPage() {
         setLoading(false);
       }
     })();
+  }, [reloadTick]);
+
+  // Realtime: when the worker accepts/completes/rejects or the price moves,
+  // the server pushes 'booking_status_changed'. Refetch that one booking
+  // (participant-scoped) and merge it, so the list updates live instead of
+  // sitting stale until the screen is reopened.
+  useEffect(() => {
+    let cancelled = false;
+    let offStatus: (() => void) | undefined;
+    (async () => {
+      // ensureSocket() is async — register listeners only once it exists.
+      await ensureSocket();
+      if (cancelled) return;
+      offStatus = onBookingStatusChanged((data) => {
+        void (async () => {
+          try {
+            const updated: BookingResponse = await expectJson(
+              await authFetch(`/bookings/${data.booking_id}`),
+              'Could not refresh the booking',
+            );
+            const item = toBookingItem(updated, uidRef.current);
+            if (!item) return;
+            const active = isActiveStatus(item.status);
+            // Present holds active bookings; terminal ones move to Past.
+            setPresent((rs) =>
+              !rs.some((x) => x.id === item.id)
+                ? rs
+                : active
+                  ? rs.map((x) => (x.id === item.id ? item : x))
+                  : rs.filter((x) => x.id !== item.id),
+            );
+            setPast((rs) => {
+              if (!rs.some((x) => x.id === item.id)) return active ? [...rs, item] : rs;
+              return active
+                ? rs.filter((x) => x.id !== item.id)
+                : rs.map((x) => (x.id === item.id ? item : x));
+            });
+          } catch {}
+        })();
+      });
+    })();
+    return () => {
+      cancelled = true;
+      offStatus?.();
+    };
   }, []);
 
   const data = tab === 'present' ? present : past;
+
+  /** Title of the offer modal depends on where the negotiation stands. */
+  const priceModalTitle = !priceFor
+    ? ''
+    : priceFor.estimated_price > 0 && priceFor.price_proposed_by === 'worker'
+      ? 'Counter-offer'
+      : priceFor.estimated_price > 0
+        ? 'Change your offer'
+        : 'Propose your price';
+
+  /** The price-negotiation panel under each active booking card. */
+  function renderPricePanel(b: Booking) {
+    // Agreed & locked — nothing more to do here.
+    if (b.final_price > 0) {
+      return (
+        <View style={styles.agreedRow}>
+          <Ionicons name="checkmark-circle" size={14} color="#10b981" />
+          <Text style={styles.agreedText}>Agreed · ₹{b.final_price}</Text>
+        </View>
+      );
+    }
+    // The worker quoted — accept it or counter.
+    if (b.estimated_price > 0 && b.price_proposed_by === 'worker') {
+      return (
+        <View style={styles.quoteCard}>
+          <View style={styles.quoteHead}>
+            <Ionicons name="pricetag" size={13} color="#6F42C1" />
+            <Text style={styles.quoteText} numberOfLines={1}>
+              {b.worker.full_name || 'Worker'} quoted ₹{b.estimated_price}
+            </Text>
+          </View>
+          <View style={styles.quoteActions}>
+            <TouchableOpacity
+              style={styles.acceptQuoteBtn}
+              onPress={(e) => { e.stopPropagation?.(); acceptPrice(b); }}
+            >
+              <Ionicons name="checkmark" size={13} color="#fff" />
+              <Text style={styles.acceptQuoteText}>Accept ₹{b.estimated_price}</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.counterBtn}
+              onPress={(e) => { e.stopPropagation?.(); setPriceAmount(''); setPriceFor(b); }}
+            >
+              <Text style={styles.counterText}>Counter</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      );
+    }
+    // Our own offer is on the table — waiting for the worker.
+    if (b.estimated_price > 0) {
+      return (
+        <TouchableOpacity
+          style={styles.waitingRow}
+          onPress={(e) => { e.stopPropagation?.(); setPriceAmount(String(b.estimated_price)); setPriceFor(b); }}
+        >
+          <Ionicons name="time" size={13} color="#f59e0b" />
+          <Text style={styles.waitingText} numberOfLines={1}>
+            You offered ₹{b.estimated_price} · waiting for reply
+          </Text>
+        </TouchableOpacity>
+      );
+    }
+    // No price yet — open with a budget.
+    return (
+      <TouchableOpacity
+        style={styles.priceBtn}
+        onPress={(e) => { e.stopPropagation?.(); setPriceAmount(''); setPriceFor(b); }}
+      >
+        <Ionicons name="pricetag-outline" size={13} color="#6F42C1" />
+        <Text style={styles.priceBtnText}>Propose your price</Text>
+      </TouchableOpacity>
+    );
+  }
 
   const renderCard = (b: Booking) => {
     const sc = statusColor(b.status, tab === 'past');
@@ -168,14 +345,7 @@ export default function BookingsPage() {
               {b.status === 'rejected' ? '—' : b.amount > 0 ? `₹${b.amount}` : tab === 'past' ? '—' : 'Quote pending'}
             </Text>
           </View>
-          {tab === 'present' && b.status !== 'rejected' && (
-            <TouchableOpacity
-              style={styles.priceBtn}
-              onPress={(e) => { (e as any).stopPropagation?.(); setPriceAmount(b.amount > 0 ? String(b.amount) : ''); setPriceFor(b); }}
-            >
-              <Text style={styles.priceBtnText}>{b.amount > 0 ? 'Update agreed price' : 'Enter agreed price'}</Text>
-            </TouchableOpacity>
-          )}
+          {tab === 'present' && b.status !== 'rejected' && renderPricePanel(b)}
         </View>
       </TouchableOpacity>
     );
@@ -199,7 +369,13 @@ export default function BookingsPage() {
         {loading ? (
           <ActivityIndicator color="#6F42C1" style={{ marginTop: 30 }} />
         ) : (
-          <ScrollView contentContainerStyle={{ paddingBottom: 100 }} showsVerticalScrollIndicator={false}>
+          <ScrollView
+            contentContainerStyle={{ paddingBottom: 100 }}
+            showsVerticalScrollIndicator={false}
+            refreshControl={
+              <RefreshControl refreshing={loading} onRefresh={() => setReloadTick((t) => t + 1)} tintColor="#6F42C1" />
+            }
+          >
             {data.length === 0 ? (
               <Text style={styles.placeholder}>No bookings here yet</Text>
             ) : (
@@ -208,12 +384,19 @@ export default function BookingsPage() {
           </ScrollView>
         )}
       </View>
-      <Modal visible={!!priceFor} transparent animationType="fade" onRequestClose={() => setPriceFor(null)}>
+      <FrameModal visible={!!priceFor} animationType="fade" onRequestClose={() => setPriceFor(null)}>
         <View style={styles.modalBackdrop}>
-          <View style={styles.modalCard}>
-            <Text style={styles.modalTitle}>Set agreed price</Text>
+          <KeyboardAvoidingView behavior="padding" style={styles.priceKav}>
+            <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>{priceModalTitle}</Text>
             {priceFor && (
               <Text style={styles.modalSub}>With {priceFor.worker.full_name || 'worker'} · {priceFor.date}</Text>
+            )}
+            {priceFor && priceFor.estimated_price > 0 && (
+              <Text style={styles.modalHint}>
+                Currently on the table: ₹{priceFor.estimated_price}
+                {priceFor.price_proposed_by === 'worker' ? ' (worker’s quote)' : ' (your offer)'}
+              </Text>
             )}
             <View style={styles.amountRow}>
               <Text style={styles.rupee}>₹</Text>
@@ -231,13 +414,14 @@ export default function BookingsPage() {
               <TouchableOpacity style={[styles.modalBtn, styles.modalCancel]} onPress={() => setPriceFor(null)}>
                 <Text style={styles.modalCancelText}>Cancel</Text>
               </TouchableOpacity>
-              <TouchableOpacity style={[styles.modalBtn, styles.modalSave]} onPress={savePrice}>
-                <Text style={styles.modalSaveText}>Save</Text>
+              <TouchableOpacity style={[styles.modalBtn, styles.modalSave]} onPress={proposePrice}>
+                <Text style={styles.modalSaveText}>Send Offer</Text>
               </TouchableOpacity>
             </View>
-          </View>
+            </View>
+          </KeyboardAvoidingView>
         </View>
-      </Modal>
+      </FrameModal>
 
       <BottomNav currentRoute="bookings" />
     </View>
@@ -277,13 +461,28 @@ const styles = StyleSheet.create({
   date: { fontSize: 11, color: '#888' },
   amount: { fontSize: 13, fontWeight: '800', color: '#10b981' },
 
-  priceBtn: { marginTop: 8, paddingVertical: 7, borderRadius: 8, borderWidth: 1, borderColor: '#6F42C1', backgroundColor: '#f5f0fb', alignItems: 'center' },
+  // --- price negotiation panel ---
+  agreedRow: { flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 8 },
+  agreedText: { color: '#10b981', fontWeight: '800', fontSize: 12 },
+  quoteCard: { marginTop: 8, backgroundColor: '#f5f0fb', borderRadius: 10, padding: 8, borderWidth: 1, borderColor: '#e6dbf5' },
+  quoteHead: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  quoteText: { fontSize: 12, fontWeight: '700', color: '#4c1d95', flex: 1 },
+  quoteActions: { flexDirection: 'row', gap: 8, marginTop: 8 },
+  acceptQuoteBtn: { flex: 1.6, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4, paddingVertical: 7, borderRadius: 8, backgroundColor: '#10b981' },
+  acceptQuoteText: { color: '#fff', fontWeight: '800', fontSize: 11 },
+  counterBtn: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingVertical: 7, borderRadius: 8, borderWidth: 1, borderColor: '#6F42C1', backgroundColor: '#fff' },
+  counterText: { color: '#6F42C1', fontWeight: '800', fontSize: 11 },
+  waitingRow: { flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 8, backgroundColor: '#fffbeb', borderRadius: 8, paddingVertical: 6, paddingHorizontal: 8, borderWidth: 1, borderColor: '#fde68a' },
+  waitingText: { color: '#b45309', fontWeight: '700', fontSize: 11, flex: 1 },
+  priceBtn: { marginTop: 8, flexDirection: 'row', paddingVertical: 7, borderRadius: 8, borderWidth: 1, borderColor: '#6F42C1', backgroundColor: '#f5f0fb', alignItems: 'center', justifyContent: 'center', gap: 4 },
   priceBtnText: { color: '#6F42C1', fontWeight: '800', fontSize: 11 },
 
   modalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'center', alignItems: 'center', padding: 24 },
+  priceKav: { width: '100%', maxWidth: 320, justifyContent: 'center' },
   modalCard: { width: '100%', maxWidth: 320, backgroundColor: '#fff', borderRadius: 14, padding: 16 },
   modalTitle: { fontSize: 16, fontWeight: '800', color: '#333', textAlign: 'center' },
   modalSub: { fontSize: 12, color: '#666', textAlign: 'center', marginTop: 4 },
+  modalHint: { fontSize: 11, color: '#6F42C1', textAlign: 'center', marginTop: 6, fontWeight: '600' },
   amountRow: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#f8f8f8', borderRadius: 10, paddingHorizontal: 12, marginTop: 14, borderWidth: 1, borderColor: '#eee' },
   rupee: { fontSize: 22, fontWeight: '800', color: '#10b981', marginRight: 6 },
   amountInput: { flex: 1, fontSize: 22, fontWeight: '800', color: '#333', paddingVertical: 10 },

@@ -1,10 +1,12 @@
-from fastapi import APIRouter, Depends, HTTPException, Body
+from fastapi import APIRouter, Depends, HTTPException, Query
 from typing import List, Optional, Dict, Any
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
+from sqlalchemy.exc import IntegrityError
 from datetime import datetime
 import database, models, schemas
 from auth import get_current_user
+from booking_status import normalize_status
 
 router = APIRouter()
 
@@ -18,7 +20,8 @@ def _current_user_id(current: Dict[str, Any]) -> int:
 
 # Whitelist of profile fields a client may write. Anything else (id, user_id,
 # role, created_at, ...) is ignored — prevents mass-assignment of server-owned
-# columns via an arbitrary JSON body.
+# columns. The typed ProfileUpdate schema already rejects unknown keys, this
+# keeps the two layers consistent.
 _EDITABLE_PROFILE_FIELDS = {
     "full_name", "phone", "email", "preferred_language", "notification_enabled",
     "bio", "address", "city", "state", "pincode", "latitude", "longitude",
@@ -26,14 +29,18 @@ _EDITABLE_PROFILE_FIELDS = {
 }
 
 
-def _apply_profile_payload(profile: models.UserProfile, payload: Dict[str, Any]) -> None:
-    for key, value in payload.items():
+def _apply_profile_payload(profile: models.UserProfile, payload: schemas.ProfileUpdate) -> None:
+    for key, value in payload.model_dump(exclude_unset=True).items():
         if key in _EDITABLE_PROFILE_FIELDS:
             setattr(profile, key, value)
 
 
 def _get_or_create_profile(db: Session, user_id: int, role: str) -> models.UserProfile:
-    """Get an existing extended profile or create a blank one."""
+    """Get an existing extended profile or create a blank one.
+
+    Two concurrent first calls (e.g. the app opening two screens at once)
+    used to create two rows; the unique (user_id, role) constraint now makes
+    the loser re-fetch the winner's row instead."""
     profile = (
         db.query(models.UserProfile)
         .filter(
@@ -45,8 +52,21 @@ def _get_or_create_profile(db: Session, user_id: int, role: str) -> models.UserP
     if profile is None:
         profile = models.UserProfile(user_id=user_id, role=role)
         db.add(profile)
-        db.commit()
-        db.refresh(profile)
+        try:
+            db.commit()
+        except IntegrityError:
+            # Lost the race — another request created the row first.
+            db.rollback()
+            profile = (
+                db.query(models.UserProfile)
+                .filter(
+                    models.UserProfile.user_id == user_id,
+                    models.UserProfile.role == role,
+                )
+                .first()
+            )
+        if profile is not None:
+            db.refresh(profile)
     return profile
 
 
@@ -81,7 +101,7 @@ def get_my_profile(db: Session = Depends(database.get_db),
 
 @router.post("/me")
 def create_my_profile(
-    payload: Dict[str, Any] = Body(...),
+    payload: schemas.ProfileUpdate,
     db: Session = Depends(database.get_db),
     current: Dict[str, Any] = Depends(get_current_user),
 ):
@@ -98,7 +118,7 @@ def create_my_profile(
 
 @router.put("/me")
 def update_my_profile(
-    payload: Dict[str, Any] = Body(...),
+    payload: schemas.ProfileUpdate,
     db: Session = Depends(database.get_db),
     current: Dict[str, Any] = Depends(get_current_user),
 ):
@@ -134,14 +154,21 @@ def get_user_profile(
     is_self = caller_role == "user" and caller_id == user_id
     shares_booking = False
     if caller_role == "worker":
-        shares_booking = (
-            db.query(models.Booking.id)
+        # Full contact/address details are only justified while a job is
+        # actually happening (or happened). A worker who was merely assigned
+        # — even on a booking either side rejected — must not keep permanent
+        # access to the client's address and contact details.
+        rows = (
+            db.query(models.Booking.status)
             .filter(
                 models.Booking.user_id == user_id,
                 models.Booking.worker_id == caller_id,
             )
-            .first()
-            is not None
+            .all()
+        )
+        shares_booking = any(
+            normalize_status(s) in ("pending", "upcoming", "completed")
+            for (s,) in rows
         )
 
     if not (is_self or shares_booking):
@@ -172,6 +199,25 @@ def update_user_profile(
         raise HTTPException(status_code=404, detail="User not found")
 
     data = user_update.model_dump(exclude_unset=True)
+
+    # Login identity cannot be rewritten from an authenticated session: email
+    # gates the OTP password-reset flow, so a hijacked session that could
+    # silently swap it would own the account forever. Changing it requires
+    # re-verification of the new value (not built yet), so it is rejected.
+    # Unchanged echoes from profile forms are allowed through.
+    for field in ("email", "phone"):
+        new_value = data.get(field)
+        if new_value:
+            current_value = getattr(user, field, None)
+            changed = (
+                str(current_value or "").strip().lower() != str(new_value).strip().lower()
+            )
+            if changed:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{field.capitalize()} cannot be changed here — it requires verifying the new value first",
+                )
+
     for field, value in data.items():
         if value is None:
             continue
@@ -180,15 +226,32 @@ def update_user_profile(
         if hasattr(user, field):
             setattr(user, field, value)
 
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # email/phone unique constraint — surface a clean 409 instead of an
+        # unhandled 500.
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Email or phone is already in use by another account")
     db.refresh(user)
     return user
 
 
 @router.get("/worker/{worker_id}/reviews", response_model=List[schemas.RatingReviewResponse])
-def get_worker_reviews(worker_id: int, skip: int = 0, limit: int = 10, db: Session = Depends(database.get_db)):
-    """Get reviews for a worker (public read)."""
-    reviews = db.query(models.RatingReview).filter(
-        models.RatingReview.worker_id == worker_id
-    ).offset(skip).limit(limit).all()
+def get_worker_reviews(
+    worker_id: int,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(10, ge=1, le=100),
+    db: Session = Depends(database.get_db),
+    current: Dict[str, Any] = Depends(get_current_user),
+):
+    """Get reviews for a worker (authenticated read), latest first."""
+    reviews = (
+        db.query(models.RatingReview)
+        .filter(models.RatingReview.worker_id == worker_id)
+        .order_by(models.RatingReview.created_at.desc(), models.RatingReview.id.desc())
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
     return reviews
