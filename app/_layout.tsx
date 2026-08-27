@@ -60,6 +60,10 @@ const WORKER_ROUTES = new Set([
 const USER_ROUTES = new Set([
   '/homePage',
   '/bookings',
+  // /profile is the CLIENT profile screen (its backend PUT is user-role-only,
+  // and User/Worker ids overlap, so a worker opening it would load/save the
+  // wrong person's data). Workers use /worker_profile instead.
+  '/profile',
 ]);
 
 export default function RootLayout() {

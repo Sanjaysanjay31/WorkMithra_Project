@@ -44,6 +44,10 @@ interface Bubble {
 interface ServerChatMessage {
   id: string | number;
   sender_id: string | number;
+  /** Role of the sender ('user' | 'worker'). The backend includes it because
+   * users and workers live in overlapping id spaces — sender_id alone cannot
+   * identify who sent a message whenever the two ids happen to match. */
+  sender_role?: 'user' | 'worker';
   message: string;
 }
 
@@ -63,11 +67,21 @@ const mapServerMessageToBubble = (
   currentUserId: string,
   myRole: 'user' | 'worker' = 'user',
 ): Bubble => {
-  const mine = String(message.sender_id) === currentUserId;
   const mySide: Side = myRole === 'worker' ? 'worker' : 'client';
+  // Attribute the message to a SIDE via sender_role. Users and workers have
+  // overlapping ids, so keying off sender_id alone misattributes every message
+  // whenever the client's and worker's ids are equal (e.g. user #5 ↔ worker #5).
+  // Fall back to the id comparison only when the role is absent.
+  let side: Side;
+  if (message.sender_role === 'worker' || message.sender_role === 'user') {
+    side = message.sender_role === 'worker' ? 'worker' : 'client';
+  } else {
+    const mine = String(message.sender_id) === currentUserId;
+    side = mine ? mySide : mySide === 'client' ? 'worker' : 'client';
+  }
   return {
     id: String(message.id),
-    side: mine ? mySide : mySide === 'client' ? 'worker' : 'client',
+    side,
     original: message.message ?? '',
     // Unknown until detection runs — 'en-IN' is the safe no-translate default.
     srcLang: 'en-IN',
@@ -218,8 +232,13 @@ export default function ChatScreen() {
       if (cancelled) return;
       offMessage = onMessageReceived((data) => {
         // Only messages from the other participant; my own come back via the
-        // REST response. (workerId param = the other side's id for either role.)
-        if (String(data.sender_id) !== String(workerId)) return;
+        // REST response. Match on sender_role rather than sender_id — users and
+        // workers have overlapping ids, so an id comparison misattributes (and
+        // can duplicate my own echo) whenever the two ids are equal.
+        const fromOther = data?.sender_role
+          ? data.sender_role !== myRole
+          : String(data.sender_id) === String(workerId);
+        if (!fromOther) return;
         const bubbleId = String(data.id);
         const text = data.message ?? '';
         setMsgs((prev) => {

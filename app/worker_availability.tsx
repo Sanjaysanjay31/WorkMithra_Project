@@ -10,6 +10,7 @@ import {
   ActivityIndicator,
   Alert,
   Platform,
+  RefreshControl,
   ScrollView,
   StyleSheet,
   Switch,
@@ -89,11 +90,15 @@ export default function WorkerAvailabilityPage() {
   const [workerId, setWorkerId] = useState(0);
   const [days, setDays] = useState<Record<string, DayState>>(emptyWeek);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
+  const [reloadTick, setReloadTick] = useState(0);
   const [busyDay, setBusyDay] = useState<string | null>(null);
   const [picker, setPicker] = useState<{ day: string; field: 'start_time' | 'end_time' } | null>(null);
 
   useEffect(() => {
     (async () => {
+      setLoading(true);
+      setLoadError('');
       let wid = 0;
       try {
         const raw = await storage.get('workmithra:auth');
@@ -108,11 +113,17 @@ export default function WorkerAvailabilityPage() {
         return;
       }
       setWorkerId(wid);
-      const slots = await listAvailability(wid);
-      setDays((prev) => mergeSlots(prev, slots));
+      try {
+        const slots = await listAvailability(wid);
+        setDays((prev) => mergeSlots(emptyWeek(), slots));
+      } catch (e: any) {
+        // A failed load must not look like "all days switched off".
+        console.warn('Failed to load availability', e);
+        setLoadError(e?.message || 'Could not reach the server. Please try again.');
+      }
       setLoading(false);
     })();
-  }, []);
+  }, [reloadTick]);
 
   /** Upsert one day. Optimistic update; on failure revert from the server. */
   async function saveDay(dayKey: string, patch: Partial<DayState>) {
@@ -132,8 +143,13 @@ export default function WorkerAvailabilityPage() {
       setDays((d) => ({ ...d, [dayKey]: { ...merged, slot_id: saved.id } }));
     } else {
       Alert.alert('Not saved', 'Could not update your availability. Please try again.');
-      const slots = await listAvailability(workerId);
-      setDays((prev) => mergeSlots(emptyWeek(), slots));
+      try {
+        const slots = await listAvailability(workerId);
+        setDays(() => mergeSlots(emptyWeek(), slots));
+      } catch {
+        // Re-fetch failed too — keep the optimistic value rather than
+        // blanking the week; the next save attempt will re-sync.
+      }
     }
   }
 
@@ -238,12 +254,26 @@ export default function WorkerAvailabilityPage() {
 
         {loading ? (
           <ActivityIndicator color="#6F42C1" style={{ marginTop: 30 }} />
+        ) : loadError ? (
+          <View style={styles.errorBox}>
+            <Ionicons name="cloud-offline-outline" size={28} color="#b91c1c" />
+            <Text style={styles.errorText}>{loadError}</Text>
+            <TouchableOpacity style={styles.retryBtn} onPress={() => setReloadTick((t) => t + 1)}>
+              <Text style={styles.retryText}>Retry</Text>
+            </TouchableOpacity>
+          </View>
         ) : (
           <>
             <Text style={styles.summary}>
               Available {availableCount} of 7 days
             </Text>
-            <ScrollView contentContainerStyle={{ paddingBottom: 100 }} showsVerticalScrollIndicator={false}>
+            <ScrollView
+              contentContainerStyle={{ paddingBottom: 100 }}
+              showsVerticalScrollIndicator={false}
+              refreshControl={
+                <RefreshControl refreshing={loading} onRefresh={() => setReloadTick((t) => t + 1)} tintColor="#6F42C1" />
+              }
+            >
               {DAYS.map(renderDay)}
             </ScrollView>
           </>
@@ -289,6 +319,11 @@ const styles = StyleSheet.create({
   },
   infoText: { flex: 1, fontSize: 12, color: '#4c1d95', lineHeight: 17 },
   summary: { fontSize: 12, fontWeight: '700', color: '#6F42C1', marginBottom: 10 },
+
+  errorBox: { alignItems: 'center', paddingVertical: 40 },
+  errorText: { marginTop: 10, fontSize: 13, fontWeight: '700', color: '#b91c1c', textAlign: 'center', paddingHorizontal: 24 },
+  retryBtn: { marginTop: 12, paddingHorizontal: 18, paddingVertical: 8, borderRadius: 8, backgroundColor: '#6F42C1' },
+  retryText: { color: '#fff', fontWeight: '700', fontSize: 12 },
 
   dayCard: {
     backgroundColor: '#fff',

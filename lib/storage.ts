@@ -24,6 +24,15 @@ const hasSessionStorage = isWeb && !!window.sessionStorage;
 // sessionStorage on web.
 const SECURE_KEYS = new Set(['workmithra:auth']);
 
+// SecureStore rejects keys containing anything outside /^[\w.-]+$/ — the
+// colon in 'workmithra:auth' made every native read/write throw, so login
+// "succeeded" but the token was never persisted and the auth guard bounced
+// users straight back to /login. Map namespaced keys to a SecureStore-safe
+// form; web storage accepts any key, so it keeps the original name.
+function secureKey(key: string): string {
+  return key.replace(/[^A-Za-z0-9._-]/g, '_');
+}
+
 function webGet(key: string): string | null {
   try {
     if (SECURE_KEYS.has(key)) {
@@ -68,7 +77,7 @@ export const storage = {
     }
     try {
       if (SECURE_KEYS.has(key)) {
-        return await SecureStore.getItemAsync(key);
+        return await SecureStore.getItemAsync(secureKey(key));
       }
       return await AsyncStorage.getItem(key);
     } catch {
@@ -82,7 +91,7 @@ export const storage = {
       return;
     }
     if (SECURE_KEYS.has(key)) {
-      await SecureStore.setItemAsync(key, value);
+      await SecureStore.setItemAsync(secureKey(key), value);
       return;
     }
     await AsyncStorage.setItem(key, value);
@@ -95,7 +104,7 @@ export const storage = {
     }
     try {
       if (SECURE_KEYS.has(key)) {
-        await SecureStore.deleteItemAsync(key);
+        await SecureStore.deleteItemAsync(secureKey(key));
         return;
       }
       await AsyncStorage.removeItem(key);
@@ -137,7 +146,7 @@ export async function clearAllWorkMitraStorage(): Promise<void> {
     // ignore
   }
   try {
-    await SecureStore.deleteItemAsync('workmithra:auth');
+    await SecureStore.deleteItemAsync(secureKey('workmithra:auth'));
   } catch {
     // ignore — SecureStore key may not exist
   }

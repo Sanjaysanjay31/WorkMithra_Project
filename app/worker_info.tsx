@@ -2,6 +2,7 @@ import Avatar from '@/components/avatar';
 import BottomNav from '@/components/bottom-nav';
 import { authFetch, readApiError } from '@/lib/api';
 import { AvailabilitySlot, listAvailability } from '@/lib/availability';
+import { pickImageNative, pickImageWeb } from '@/lib/image-picker';
 import { ensureSocket } from '@/lib/socket';
 import { storage } from '@/lib/storage';
 import { JobHistoryResponse, ReviewResponse, WorkerResponse } from '@/lib/types';
@@ -13,8 +14,10 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
     ActivityIndicator,
     Alert,
+    Image,
     KeyboardAvoidingView,
     Linking,
+    Modal,
     Platform,
     ScrollView,
     StyleSheet,
@@ -75,11 +78,19 @@ function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number) {
   return 2 * R * Math.asin(Math.sqrt(a));
 }
 
+// Maximum photos attachable to one review (enforced by the backend too).
+const MAX_REVIEW_PHOTOS = 5;
+
 export default function WorkerInfoPage() {
   const router = useRouter();
-  const { id } = useLocalSearchParams();
+  const { id, tab: tabParam } = useLocalSearchParams();
   const workerId = String(id || '');
-  const [activeTab, setActiveTab] = useState<Tab>('profile');
+  // Callers can deep-link to a tab (e.g. bookings' "Rate worker" opens
+  // straight onto the review form): /worker_info?id=5&tab=reviews
+  const initialTab: Tab = (['profile', 'reviews', 'chat', 'booking', 'map'] as Tab[]).includes(tabParam as Tab)
+    ? (tabParam as Tab)
+    : 'profile';
+  const [activeTab, setActiveTab] = useState<Tab>(initialTab);
   const [worker, setWorker] = useState<WorkerResponse | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -104,10 +115,15 @@ export default function WorkerInfoPage() {
   const [locUnavailable, setLocUnavailable] = useState(false);
 
   // Feedback state — reviews loaded from backend
-  type ReviewItem = { id: string | number; name: string; rating: number; date: string; text: string };
+  type ReviewItem = { id: string | number; name: string; rating: number; date: string; text: string; images?: string[] };
   const [reviews, setReviews] = useState<ReviewItem[]>([]);
   const [feedbackText, setFeedbackText] = useState('');
   const [feedbackRating, setFeedbackRating] = useState(5);
+  // Review photos: uploaded URL + local preview URI, up to MAX_REVIEW_PHOTOS.
+  const [feedbackImages, setFeedbackImages] = useState<{ url: string; preview: string }[]>([]);
+  const [uploadingImage, setUploadingImage] = useState(false);
+  // Full-screen viewer for review photos.
+  const [viewImage, setViewImage] = useState<string | null>(null);
 
   async function loadReviews() {
     const wid = Number(id);
@@ -123,14 +139,68 @@ export default function WorkerInfoPage() {
           rating: Number(r.rating) || 0,
           date: r.created_at ? String(r.created_at).split('T')[0] : '',
           text: r.review_text || '',
+          // Prefer the multi-image array; older rows/reviews only carry the
+          // single legacy review_image.
+          images:
+            r.review_images && r.review_images.length > 0
+              ? r.review_images
+              : r.review_image
+                ? [r.review_image]
+                : undefined,
         })),
       );
     } catch {}
   }
 
+  /** Pick a photo and upload it; the returned URL joins the attached set. */
+  async function attachReviewImage() {
+    if (uploadingImage) return;
+    if (feedbackImages.length >= MAX_REVIEW_PHOTOS) {
+      Alert.alert('Photo limit', `You can attach up to ${MAX_REVIEW_PHOTOS} photos per review.`);
+      return;
+    }
+    setUploadingImage(true);
+    try {
+      const fd = new FormData();
+      let preview = '';
+      if (Platform.OS === 'web') {
+        const file = await pickImageWeb();
+        if (!file) { setUploadingImage(false); return; }
+        fd.append('file', file);
+        preview = URL.createObjectURL(file);
+      } else {
+        const asset = await pickImageNative();
+        if (!asset) { setUploadingImage(false); return; }
+        const name = asset.fileName || asset.uri.split('/').pop() || 'photo.jpg';
+        const ext = (name.split('.').pop() || 'jpg').toLowerCase();
+        const mime = asset.mimeType || (ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg');
+        // @ts-ignore RN FormData file shape
+        fd.append('file', { uri: asset.uri, name, type: mime });
+        preview = asset.uri;
+      }
+      const res = await authFetch('/upload-review-image', { method: 'POST', body: fd });
+      if (!res.ok) throw new Error(await readApiError(res, 'Upload failed'));
+      const data = await res.json();
+      setFeedbackImages((imgs) => [...imgs, { url: data.url, preview }]);
+    } catch (e: any) {
+      // Nothing was added to the list, so there's no preview to roll back.
+      Alert.alert('Upload failed', e?.message || 'Could not upload the photo');
+    } finally {
+      setUploadingImage(false);
+    }
+  }
+
+  function removeReviewImage(index: number) {
+    setFeedbackImages((imgs) => imgs.filter((_, i) => i !== index));
+  }
+
   async function handleSubmitFeedback() {
     if (!feedbackText.trim()) {
       Alert.alert('Feedback', 'Please write something before submitting.');
+      return;
+    }
+    if (uploadingImage) {
+      Alert.alert('Photo still uploading', 'Wait for the photo upload to finish, or remove it.');
       return;
     }
     const wid = Number(id);
@@ -139,18 +209,29 @@ export default function WorkerInfoPage() {
       return;
     }
     const url = `/reviews/`;
-    const body = { worker_id: wid, rating: feedbackRating, review_text: feedbackText };
+    const urls = feedbackImages.map((p) => p.url);
+    const body = {
+      worker_id: wid,
+      rating: feedbackRating,
+      review_text: feedbackText,
+      // Single legacy field (old backends ignore the array) + full set.
+      review_image: urls[0],
+      review_images: urls.length > 0 ? urls : undefined,
+    };
     try {
       const res = await authFetch(url, {
         method: 'POST',
         json: body,
       });
-      const text = await res.text();
       if (!res.ok) {
-        Alert.alert('Submit failed', `HTTP ${res.status}\n${text.slice(0, 200)}`);
+        // Surface the backend's reason cleanly (e.g. "You can only review a
+        // worker after a completed booking with them") instead of a raw dump.
+        const detail = await readApiError(res, 'Could not submit your review');
+        Alert.alert('Submit failed', detail);
         return;
       }
       setFeedbackText('');
+      setFeedbackImages([]);
       await loadReviews();
       Alert.alert('Success', 'Thank you for your feedback!');
     } catch (e: any) {
@@ -163,7 +244,8 @@ export default function WorkerInfoPage() {
     loadHistory();
     loadReviews();
     // Any authenticated caller may read a worker's slots (pre-booking check).
-    if (Number(id)) listAvailability(Number(id)).then(setSlots);
+    // Slots are optional here — on failure show none rather than crash.
+    if (Number(id)) listAvailability(Number(id)).then(setSlots).catch(() => setSlots([]));
   }, [id]);
 
   useEffect(() => {
@@ -283,6 +365,12 @@ export default function WorkerInfoPage() {
       Alert.alert('Booking', 'Please enter both date and time.');
       return;
     }
+    // A ₹0 agreed price is rejected by the backend — catch it client-side. An
+    // EMPTY price is fine (means "discuss later", sent as null).
+    if (bookPrice.trim() && (!Number(bookPrice) || Number(bookPrice) <= 0)) {
+      Alert.alert('Booking', 'Agreed price must be more than ₹0, or leave it blank to discuss later.');
+      return;
+    }
 
     // Client-side mirror of the backend's availability check — instant,
     // friendly guidance instead of a 400 round-trip. Only enforced when the
@@ -326,8 +414,12 @@ export default function WorkerInfoPage() {
         }
       } catch {}
 
-      // 1. Create booking in DB (user_id comes from the auth token server-side)
-      const res = await authFetch('/bookings', {
+      // 1. Create booking in DB (user_id comes from the auth token server-side).
+      //    POST to '/bookings/' WITH the trailing slash — the backend route is
+      //    '/bookings/'. Omitting it makes Starlette answer a 307 redirect on a
+      //    POST, which only works if every network layer re-sends the JSON body;
+      //    hitting the exact route avoids that fragility entirely.
+      const res = await authFetch('/bookings/', {
         method: 'POST',
         json: {
           worker_id: Number(workerId),
@@ -498,6 +590,44 @@ export default function WorkerInfoPage() {
                   value={feedbackText}
                   onChangeText={setFeedbackText}
                 />
+                {feedbackImages.length > 0 && (
+                  <View style={styles.photoPreviewRow}>
+                    {feedbackImages.map((p, idx) => (
+                      <View key={`${p.preview}-${idx}`} style={styles.photoThumbWrap}>
+                        <Image source={{ uri: p.preview }} style={styles.photoThumb} />
+                        <TouchableOpacity
+                          onPress={() => removeReviewImage(idx)}
+                          style={styles.photoRemove}
+                          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                        >
+                          <Ionicons name="close-circle" size={20} color="#991b1b" />
+                        </TouchableOpacity>
+                      </View>
+                    ))}
+                    {uploadingImage && (
+                      <View style={[styles.photoThumbWrap, styles.photoThumbUploading]}>
+                        <ActivityIndicator size="small" color="#6F42C1" />
+                      </View>
+                    )}
+                  </View>
+                )}
+                <TouchableOpacity
+                  style={[styles.attachPhotoBtn, feedbackImages.length >= MAX_REVIEW_PHOTOS && { opacity: 0.5 }]}
+                  onPress={attachReviewImage}
+                  disabled={uploadingImage || feedbackImages.length >= MAX_REVIEW_PHOTOS}
+                  activeOpacity={0.8}
+                >
+                  {uploadingImage
+                    ? <ActivityIndicator size="small" color="#6F42C1" />
+                    : <Ionicons name="camera-outline" size={16} color="#6F42C1" />}
+                  <Text style={styles.attachPhotoText}>
+                    {feedbackImages.length >= MAX_REVIEW_PHOTOS
+                      ? `${MAX_REVIEW_PHOTOS}/${MAX_REVIEW_PHOTOS} photos — limit reached`
+                      : uploadingImage
+                        ? 'Uploading…'
+                        : `Add photos (${feedbackImages.length}/${MAX_REVIEW_PHOTOS})`}
+                  </Text>
+                </TouchableOpacity>
                 <TouchableOpacity style={styles.submitFeedbackBtn} onPress={handleSubmitFeedback} activeOpacity={0.85}>
                   <Ionicons name="send" size={16} color="#fff" />
                   <Text style={styles.submitFeedbackText}>Submit Review</Text>
@@ -513,6 +643,15 @@ export default function WorkerInfoPage() {
                   </View>
                   <Text style={styles.reviewDate}>{r.date}</Text>
                   <Text style={styles.reviewText}>&quot;{r.text}&quot;</Text>
+                  {r.images && r.images.length > 0 && (
+                    <View style={styles.photoPreviewRow}>
+                      {r.images.map((img, i) => (
+                        <TouchableOpacity key={`${img}-${i}`} activeOpacity={0.8} onPress={() => setViewImage(img)}>
+                          <Image source={{ uri: img }} style={styles.photoThumb} resizeMode="cover" />
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  )}
                 </View>
               ))}
             </View>
@@ -779,6 +918,20 @@ export default function WorkerInfoPage() {
         />
       )}
 
+      {/* Full-screen viewer for review photos. */}
+      <Modal visible={!!viewImage} transparent animationType="fade" onRequestClose={() => setViewImage(null)}>
+        <TouchableOpacity style={styles.imageModalBackdrop} activeOpacity={1} onPress={() => setViewImage(null)}>
+          {viewImage ? (
+            <Image source={{ uri: viewImage }} style={styles.imageModalImg} resizeMode="contain" />
+          ) : null}
+          <View style={styles.imageModalCloseRow}>
+            <TouchableOpacity style={styles.imageModalClose} onPress={() => setViewImage(null)}>
+              <Ionicons name="close" size={22} color="#fff" />
+            </TouchableOpacity>
+          </View>
+        </TouchableOpacity>
+      </Modal>
+
       <BottomNav currentRoute="home" />
     </View>
   );
@@ -831,8 +984,20 @@ const styles = StyleSheet.create({
   starsRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 12, gap: 4 },
   ratingLabel: { marginLeft: 8, fontSize: 14, fontWeight: '800', color: '#6F42C1' },
   feedbackInput: { backgroundColor: '#fff', borderRadius: 10, borderWidth: 1, borderColor: '#e0e0e0', padding: 12, fontSize: 13, minHeight: 80, textAlignVertical: 'top', color: '#333' },
+  attachPhotoBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, marginTop: 10, paddingVertical: 9, borderRadius: 10, borderWidth: 1, borderColor: '#d4c3f2', backgroundColor: '#f5f0fb' },
+  attachPhotoText: { fontSize: 12, fontWeight: '700', color: '#6F42C1' },
+  photoPreviewRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 10 },
+  photoThumbWrap: { width: 60, height: 60 },
+  photoThumb: { width: 60, height: 60, borderRadius: 8, backgroundColor: '#eee' },
+  photoRemove: { position: 'absolute', top: -7, right: -7, backgroundColor: '#fff', borderRadius: 10 },
+  photoThumbUploading: { alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#d4c3f2', borderStyle: 'dashed', borderRadius: 8 },
   submitFeedbackBtn: { flexDirection: 'row', backgroundColor: '#6F42C1', paddingVertical: 12, borderRadius: 10, alignItems: 'center', justifyContent: 'center', marginTop: 12, gap: 6 },
   submitFeedbackText: { color: '#fff', fontWeight: '800', fontSize: 14 },
+
+  imageModalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.9)', justifyContent: 'center', alignItems: 'center' },
+  imageModalImg: { width: '92%', height: '75%' },
+  imageModalCloseRow: { position: 'absolute', top: 0, left: 0, right: 0, alignItems: 'flex-end', padding: 16 },
+  imageModalClose: { backgroundColor: 'rgba(255,255,255,0.2)', borderRadius: 20, padding: 8 },
 
   contactInfo: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#f8f8f8', padding: 14, borderRadius: 12, marginBottom: 12 },
   phoneText: { fontSize: 14, fontWeight: '600', color: '#333', marginLeft: 10 },

@@ -1,22 +1,34 @@
-"""Thin wrappers around Sarvam AI (STT/TTS/Translate) and HuggingFace (Llama 3.1)."""
+"""AI service facade: multilingual provider fallback for STT / LLM / TTS.
+
+The heavy lifting lives in services/providers/ (sarvam, gemini, groq clients
+plus the orchestrator). This module keeps the historical function names the
+routers and tests rely on, and adds the legacy HuggingFace router as a final
+LLM last-resort after the Gemini -> Groq -> Sarvam chain.
+
+Fallback order (sequential, never parallel):
+    STT: Sarvam -> Gemini -> Groq Whisper
+    LLM: Gemini -> Groq -> Sarvam (-> HuggingFace router if HF_TOKEN is set)
+    TTS: Sarvam -> Gemini
+"""
 import os
 import json
 import re
-import base64
 import requests
 from typing import Optional, Dict, Any
 
 from dotenv import load_dotenv
 from pathlib import Path
 
+from services.providers import orchestrator
+from services.providers import sarvam as sarvam_provider
+from services.providers.orchestrator import AllProvidersFailedError  # noqa: F401 (re-exported for routers/tests)
+
 backend_env = Path(__file__).resolve().parents[1] / ".env"
 load_dotenv(backend_env)
 load_dotenv()
 
-SARVAM_API_KEY = os.getenv("SARVAM_API_KEY", "")
 HF_TOKEN = os.getenv("HF_TOKEN", "")
 HF_MODEL = os.getenv("MODEL_NAME", "meta-llama/Llama-3.1-8B-Instruct")
-SARVAM_CHAT_MODEL = os.getenv("SARVAM_CHAT_MODEL", "sarvam-105b")
 
 SARVAM_BASE = "https://api.sarvam.ai"
 
@@ -47,64 +59,26 @@ def is_supported_lang_code(code: Optional[str]) -> bool:
     return any(k.lower() == c for k in SUPPORTED_LANG_CODES)
 
 
-def _sarvam_headers():
-    key = os.getenv("SARVAM_API_KEY", SARVAM_API_KEY)
-    return {"api-subscription-key": key}
-
-
-def sarvam_tts(text: str, target_lang: str = "en-IN", speaker: str = "anushka") -> bytes:
-    """Returns WAV audio bytes."""
-    if not SARVAM_API_KEY:
-        raise RuntimeError("SARVAM_API_KEY is not set")
-    r = requests.post(
-        f"{SARVAM_BASE}/text-to-speech",
-        headers={**_sarvam_headers(), "Content-Type": "application/json"},
-        json={
-            "text": text,
-            "target_language_code": target_lang,
-            "speaker": speaker,
-            "model": "bulbul:v2",
-        },
-        timeout=30,
-    )
-    r.raise_for_status()
-    data = r.json()
-    audios = data.get("audios") or []
-    if not audios:
-        raise RuntimeError("Sarvam TTS returned no audio")
-    return base64.b64decode(audios[0])
+def sarvam_tts(text: str, target_lang: str = "en-IN", speaker: Optional[str] = None) -> bytes:
+    """Returns WAV audio bytes. Tries Sarvam first (preferred for Indian
+    languages, especially Telugu), then Gemini. `speaker=None` lets the
+    provider use its configured default voice."""
+    audio, provider = orchestrator.synthesize(text, lang=normalize_lang_code(target_lang))
+    print(f"[/ai/tts] synthesized via {provider}")
+    return audio
 
 
 def sarvam_stt(audio_bytes: bytes, filename: str = "audio.wav", lang: str = "unknown") -> Dict[str, Any]:
-    if not SARVAM_API_KEY:
-        raise RuntimeError("SARVAM_API_KEY is not set")
-    ext = (filename.rsplit(".", 1)[-1] or "wav").lower()
-    mime = {
-        "wav": "audio/wav",
-        "m4a": "audio/mp4",
-        "mp4": "audio/mp4",
-        "mp3": "audio/mpeg",
-        "webm": "audio/webm",
-        "flac": "audio/flac",
-    }.get(ext, "audio/wav")
-    files = {"file": (filename, audio_bytes, mime)}
-    # Sarvam expects language_code like "en-IN" or "unknown". Normalize "auto" → "unknown".
-    lang_norm = "unknown" if (not lang or lang.lower() in ("auto", "")) else lang
-    data = {"model": "saarika:v2.5", "language_code": lang_norm}
-    r = requests.post(
-        f"{SARVAM_BASE}/speech-to-text",
-        headers=_sarvam_headers(),
-        files=files,
-        data=data,
-        timeout=60,
-    )
-    if not r.ok:
-        raise RuntimeError(f"Sarvam {r.status_code}: {r.text[:300]}")
-    return r.json()
+    """Transcribe audio. Sarvam first (best for Indian languages / Telugu),
+    then Gemini, then Groq Whisper. Returns
+    {"transcript", "language_code", "provider"}."""
+    result = orchestrator.transcribe(audio_bytes, filename=filename, lang=lang)
+    print(f"[/ai/stt] transcribed via {result.get('provider')}")
+    return result
 
 
 def sarvam_translate(text: str, source_lang: str, target_lang: str) -> Dict[str, Any]:
-    if not SARVAM_API_KEY:
+    if not os.getenv("SARVAM_API_KEY", ""):
         raise RuntimeError("SARVAM_API_KEY is not set")
 
     src = (source_lang or "").strip() or "auto"
@@ -123,7 +97,10 @@ def sarvam_translate(text: str, source_lang: str, target_lang: str) -> Dict[str,
     }
     r = requests.post(
         f"{SARVAM_BASE}/translate",
-        headers={**_sarvam_headers(), "Content-Type": "application/json"},
+        headers={
+            "api-subscription-key": os.getenv("SARVAM_API_KEY", ""),
+            "Content-Type": "application/json",
+        },
         json=body,
         timeout=30,
     )
@@ -139,12 +116,15 @@ def _fallback_lang_detection() -> Dict[str, Any]:
 
 
 def sarvam_detect_lang(text: str) -> Dict[str, Any]:
-    if not SARVAM_API_KEY:
+    if not os.getenv("SARVAM_API_KEY", ""):
         return _fallback_lang_detection()
     try:
         r = requests.post(
             f"{SARVAM_BASE}/text-lang-detection",
-            headers={**_sarvam_headers(), "Content-Type": "application/json"},
+            headers={
+                "api-subscription-key": os.getenv("SARVAM_API_KEY", ""),
+                "Content-Type": "application/json",
+            },
             json={"input": text},
             timeout=20,
         )
@@ -210,55 +190,34 @@ def _trim_assistant_reply(text: str) -> str:
 def _assistant_short_reply(user_text: str) -> Optional[str]:
     text = (user_text or "").strip()
     if not text:
-        return "నమస్కారం! నేను మీకు సహాయం చేయగలను."
+        return "నమసకారం! నేను మీకు సహాయం చేయగలను."
 
     normalized = text.lower()
     otp_keywords = ["otp", "one time password", "verification code", "verify otp"]
     missing_keywords = ["not get", "didn't get", "did not get", "not received", "not arrive", "not came", "not come", "రాలేదు", "రాలేద", "రాదు"]
     if any(k in normalized for k in otp_keywords) and any(k in normalized for k in missing_keywords):
-        return "Please check your inbox and spam folder, confirm the email is correct, and tap resend OTP. If it still does not arrive, wait a minute and try again."
+        return "Please check your inbox and spam folder, confirm the email is correct, and tap resend OTP. If it still doesn't arrive, wait a minute and try again."
 
     return None
 
 
 def _sarvam_chat(messages: list, max_tokens: int = 2048) -> str:
-    """Raw chat completion. Returns the model content UNMODIFIED — trimming
-    for display is the caller's job (applying it here AND in the caller used
-    to double-process replies, and it destroyed JSON extraction output)."""
-    if not SARVAM_API_KEY:
-        raise RuntimeError("SARVAM_API_KEY not set")
-    r = requests.post(
-        f"{SARVAM_BASE}/v1/chat/completions",
-        headers={**_sarvam_headers(), "Content-Type": "application/json"},
-        json={
-            "model": SARVAM_CHAT_MODEL,
-            "messages": messages,
-            "max_tokens": max_tokens,
-            "temperature": 0.3,
-        },
-        timeout=30,
-    )
-    if r.status_code >= 400:
-        raise RuntimeError(f"Sarvam chat failed with status {r.status_code}")
-    data = r.json()
-    choices = data.get("choices") or []
-    if not choices:
-        raise RuntimeError("Sarvam chat returned no choices")
-    msg = choices[0].get("message") or {}
-    content = (msg.get("content") or "").strip()
-    if content:
-        return content
-    # Never return reasoning_content as the answer — it is the model's internal
-    # (usually English) analysis, not a user-facing reply. Fail instead so the
-    # caller can fall back to another provider or a polite error message.
-    raise RuntimeError("Sarvam chat returned empty content")
+    """Raw Sarvam chat completion (kept for direct use / tests). Returns the
+    model content UNMODIFIED — trimming for display is the caller's job."""
+    return sarvam_provider.chat(messages, max_tokens=max_tokens)
+
+
+def _llm_chain(messages: list, max_tokens: int = 512) -> tuple:
+    """The main LLM path: Gemini -> Groq -> Sarvam, sequential fallback.
+    Returns (content, provider). Module-level attribute so tests can
+    monkeypatch the whole chain."""
+    return orchestrator.generate(messages, max_tokens=max_tokens)
 
 
 def _hf_chat(messages: list, max_tokens: int = 512) -> str:
-    """Fallback: HF Inference Providers router, a couple of provider attempts.
-
-    Bounded tightly (2 candidates x 1 attempt x 30s) so a degraded provider
-    can't hold a worker thread for minutes."""
+    """Legacy last resort: HF Inference Providers router, a couple of provider
+    attempts. Bounded tightly (2 candidates x 1 attempt x 30s) so a degraded
+    provider can't hold a worker thread for minutes."""
     if not HF_TOKEN:
         raise RuntimeError("HF_TOKEN not set")
     headers = {"Authorization": f"Bearer {HF_TOKEN}", "Content-Type": "application/json"}
@@ -292,7 +251,9 @@ def _hf_chat(messages: list, max_tokens: int = 512) -> str:
 
 
 def llama_chat(prompt: str, system: Optional[str] = None, max_tokens: int = 512) -> str:
-    """Chat with the user. Primary: Sarvam chat (sarvam-m, multilingual). Fallback: HF router."""
+    """Chat with the user. Chain: Gemini -> Groq -> Sarvam (-> legacy HF).
+    Replies in the language the user speaks; the system prompt carries the
+    target-language instruction from the client."""
     quick_reply = _assistant_short_reply(prompt)
     if quick_reply is not None:
         return quick_reply
@@ -302,18 +263,19 @@ def llama_chat(prompt: str, system: Optional[str] = None, max_tokens: int = 512)
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
 
-    # Try Sarvam first (you already have a working key, multilingual native).
-    # Trimming happens exactly once, here — _sarvam_chat returns raw content.
+    # Trimming happens exactly once, here — the chain returns raw content.
     try:
-        return _trim_assistant_reply(_sarvam_chat(messages, max_tokens=max_tokens))
-    except Exception as e_sarvam:
-        print(f"[llama_chat] Sarvam failed: {e_sarvam}")
+        content, provider = _llm_chain(messages, max_tokens=max_tokens)
+        print(f"[llama_chat] answered via {provider}")
+        return _trim_assistant_reply(content)
+    except Exception as e_chain:
+        print(f"[llama_chat] provider chain failed: {e_chain}")
         try:
             return _trim_assistant_reply(_hf_chat(messages, max_tokens=max_tokens))
         except Exception as e_hf:
             print(f"[llama_chat] HF failed: {e_hf}")
             fallback_msg = (
-                "I’m sorry, I’m having trouble reaching my AI service right now. "
+                "I'm sorry, I'm having trouble reaching my AI service right now. "
                 "Please try again in a moment or ask a simpler question."
             )
             return fallback_msg
@@ -329,9 +291,10 @@ def _raw_completion(user_text: str, system: str, max_tokens: int = 400) -> str:
         {"role": "user", "content": user_text},
     ]
     try:
-        return _sarvam_chat(messages, max_tokens=max_tokens)
-    except Exception as e_sarvam:
-        print(f"[extract] Sarvam failed: {e_sarvam}")
+        content, _provider = _llm_chain(messages, max_tokens=max_tokens)
+        return content
+    except Exception as e_chain:
+        print(f"[extract] provider chain failed: {e_chain}")
         return _hf_chat(messages, max_tokens=max_tokens)
 
 

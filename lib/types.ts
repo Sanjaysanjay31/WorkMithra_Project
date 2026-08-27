@@ -81,6 +81,11 @@ export interface ReviewResponse {
   worker_id?: number | null;
   rating: number;
   review_text?: string | null;
+  /** Optional photo URL attached by the reviewer (single-image legacy field;
+   * kept in sync with the first entry of review_images). */
+  review_image?: string | null;
+  /** Up to 5 image URLs attached to this review. */
+  review_images?: string[] | null;
   created_at?: string | null;
 }
 

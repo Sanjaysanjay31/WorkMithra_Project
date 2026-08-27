@@ -102,6 +102,9 @@ class Worker(Base):
     is_active = Column(Boolean, default=True)
     # Session revocation anchor — see users.token_version.
     token_version = Column(Integer, default=0, nullable=False)
+    # Single-use password-reset anchor — see users.reset_jti. Workers reset
+    # their password from this table (they never have a users row).
+    reset_jti = Column(String(64), nullable=True)
 
     user = relationship("User", back_populates="workers")
     services = relationship("WorkerService", back_populates="worker")
@@ -207,6 +210,13 @@ class RatingReview(Base):
     id = Column(Integer, primary_key=True, index=True)
     rating = Column(Float, nullable=False)
     review_text = Column(Text, nullable=True)
+    # Optional photo the client attaches as proof/illustration of the job.
+    # Stored as a public Supabase Storage URL (uploaded via /upload-review-image).
+    review_image = Column(String(2000), nullable=True)
+    # Up to FIVE photos per review, persisted as a JSON array of URLs. The
+    # single review_image column is kept in sync with the first entry so
+    # older clients (and old deploy snapshots mid-migration) still render.
+    review_images = Column(String(4000), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     booking_id = Column(Integer, ForeignKey("bookings.id"), nullable=True)

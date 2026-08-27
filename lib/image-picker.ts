@@ -32,8 +32,11 @@ export async function pickImageNative(): Promise<NativePickedAsset | null> {
   if (!perm.granted) throw new Error('Photo library permission denied');
   const res = await ImagePicker.launchImageLibraryAsync({
     mediaTypes: ImagePicker.MediaTypeOptions.Images,
-    allowsEditing: true,
-    aspect: [1, 1],
+    // No crop/edit screen — the user picks a photo and it is used as-is.
+    // (allowsEditing:true forced an OS crop UI over every pick, which users
+    // found confusing; round avatars are handled by the Avatar component's
+    // container, not by cropping the source image.)
+    allowsEditing: false,
     quality: 0.85,
   });
   if (res.canceled) return null;

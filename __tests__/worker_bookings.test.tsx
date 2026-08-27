@@ -5,6 +5,8 @@ import { authFetch, expectJson } from '@/lib/api';
 import { storage } from '@/lib/storage';
 
 jest.mock('expo-router', () => ({
+  usePathname: () => '/',
+  useFocusEffect: (cb: any) => { jest.requireActual<typeof import('react')>('react').useEffect(cb); },
   useRouter: () => ({ push: jest.fn(), replace: jest.fn(), back: jest.fn() }),
   Stack: { Screen: () => null },
   useLocalSearchParams: () => ({ id: '1' }),

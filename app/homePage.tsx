@@ -10,8 +10,8 @@ import { storage } from '@/lib/storage';
 import { WorkerResponse } from '@/lib/types';
 import { Ionicons } from '@expo/vector-icons';
 import * as Location from 'expo-location';
-import { Stack, useRouter } from 'expo-router';
-import React, { useEffect, useRef, useState } from 'react';
+import { Stack, useFocusEffect, useRouter } from 'expo-router';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
     ActivityIndicator,
     Alert,
@@ -97,6 +97,22 @@ export default function HomePage() {
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchQuery, minWage, maxWage, maxDistance, minExperience, minRating, minJobs, verifiedOnly, availability, sortBy]);
+
+  // Focus-driven refresh: the bottom nav PUSHES screens and back pops them,
+  // so this screen stays mounted while workers flip their availability — a
+  // returning client would otherwise book from a stale list. The first focus
+  // is skipped because the filter effect above already loads on mount.
+  const focusedOnce = useRef(false);
+  useFocusEffect(
+    useCallback(() => {
+      if (!focusedOnce.current) {
+        focusedOnce.current = true;
+        return;
+      }
+      fetchWorkers();
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []),
+  );
 
   // Aborts the previous in-flight search so a slow stale response can't land
   // after (and clobber) a newer one.

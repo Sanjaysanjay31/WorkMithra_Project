@@ -167,6 +167,23 @@ export default function RegisterScreen() {
         setMessage({ type: 'error', text: 'Please fix the highlighted fields' });
         return;
       }
+      // The verify token only lives ~10 minutes. If it expired while the user
+      // filled in the form, /register rejects it — unlock the OTP step so they
+      // can request a fresh one. Otherwise the screen is a deadlock: the email
+      // field is locked and the Get-OTP button is hidden once verified.
+      const msg: string = error?.message || '';
+      const verifyExpired =
+        error?.name === 'AuthApiError' &&
+        error.status === 400 &&
+        /expired or invalid|request a new otp/i.test(msg);
+      if (verifyExpired) {
+        setIsOtpVerified(false);
+        setIsOtpSent(false);
+        setVerifyToken(null);
+        setFormData((f) => ({ ...f, otp: '' }));
+        setMessage({ type: 'error', text: 'Verification expired — request a new OTP, then create your account.' });
+        return;
+      }
       // No offline fallback: a registration that never reached the server is
       // not a real account, and login requires the server. Surface the error.
       setMessage({ type: 'error', text: error?.message || 'Registration failed. Please check your connection and try again.' });

@@ -1,5 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
-import { Href, useRouter } from 'expo-router';
+import { Href, usePathname, useRouter } from 'expo-router';
 import React from 'react';
 import { Alert, Platform, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { clearAllWorkMitraStorage } from '@/lib/storage';
@@ -45,6 +45,7 @@ interface BottomNavProps {
 
 export default function BottomNav({ currentRoute, role = 'user' }: BottomNavProps) {
   const router = useRouter();
+  const pathname = usePathname();
   const { t } = useI18n();
   const items = role === 'worker' ? WORKER_ITEMS : CLIENT_ITEMS;
 
@@ -54,6 +55,12 @@ export default function BottomNav({ currentRoute, role = 'user' }: BottomNavProp
   // window.confirm to match the profile screens' logout idiom.)
   const handlePress = async (item: NavItem) => {
     if (item.id !== 'switch_role') {
+      // Already on this exact screen — pushing again would stack a duplicate
+      // (repeated taps grew the stack unboundedly and back cycled through
+      // identical copies). Compare the REAL pathname, not the `currentRoute`
+      // highlight: detail screens reuse a tab id while sitting on their own
+      // route, and tapping that tab there must still navigate.
+      if (pathname === item.route) return;
       router.push(item.route);
       return;
     }

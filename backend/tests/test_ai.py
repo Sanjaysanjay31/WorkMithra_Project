@@ -16,7 +16,10 @@ def test_route_exists():
 
 
 def test_llama_chat_returns_fallback_when_all_providers_fail(monkeypatch):
-    monkeypatch.setattr(ai_svc, "_sarvam_chat", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("sarvam down")))
+    # The LLM chain is Gemini -> Groq -> Sarvam (services/providers/); when
+    # the whole chain and the legacy HF last resort are down, the user gets a
+    # polite message instead of an error.
+    monkeypatch.setattr(ai_svc, "_llm_chain", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("provider chain down")))
     monkeypatch.setattr(ai_svc, "_hf_chat", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("hf down")))
 
     reply = ai_svc.llama_chat("Can you help me with this app?")

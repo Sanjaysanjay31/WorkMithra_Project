@@ -300,7 +300,13 @@ export async function authFetch(
 
     });
 
-    if (response.status === 401) {
+    if (response.status === 401 && token) {
+
+      // Only a 401 on a request we ACTUALLY authenticated means the stored
+      // session is dead. A 401 with no token (logged-out visitor touching a
+      // protected endpoint, e.g. the AI assistant on the landing page) just
+      // means "needs auth" — wiping storage and force-redirecting to /login
+      // there would strand/lose any in-progress public screen.
 
       void handleUnauthorized();
 

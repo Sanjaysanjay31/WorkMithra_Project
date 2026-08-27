@@ -8,8 +8,8 @@ import { ensureSocket, onNotificationCreated } from '@/lib/socket';
 import { storage } from '@/lib/storage';
 import { BookingResponse, PastWorkItem, ReviewResponse } from '@/lib/types';
 import { Ionicons } from '@expo/vector-icons';
-import { Stack, useRouter } from 'expo-router';
-import React, { useEffect, useState } from 'react';
+import { Stack, useFocusEffect, useRouter } from 'expo-router';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
     ActivityIndicator,
     Image,
@@ -38,6 +38,11 @@ type WorkerProfile = {
   pincode?: string;
   email?: string;
   bio?: string;
+  // city/timings are part of the shared worker_profile cache that the profile
+  // EDIT form also reads — the dashboard must persist them too, otherwise a
+  // save from a cache-only load would blank them out on the server.
+  city?: string;
+  timings?: string;
   aadhaar_verified?: boolean;
   completed_jobs?: number;
   rating?: number;
@@ -51,8 +56,9 @@ export default function WorkerDashboard() {
   const [unread, setUnread] = useState(0);
   const [loadingWork, setLoadingWork] = useState(true);
   const [loadError, setLoadError] = useState('');
-  // Bumped by pull-to-refresh to re-run the load effect below.
-  const [reloadTick, setReloadTick] = useState(0);
+  // Pull-to-refresh has its own flag so its spinner animates independently of
+  // the initial-load spinner.
+  const [refreshing, setRefreshing] = useState(false);
 
   const [userId, setUserId] = useState<string>('');
 
@@ -87,101 +93,143 @@ export default function WorkerDashboard() {
       });
     })();
     return () => { alive = false; off(); };
-  }, [userId, reloadTick]);
+  }, [userId]);
 
+  // Local cache for instant paint — but only if it belongs to the current
+  // worker. Users and workers have overlapping ids and a device can host
+  // multiple accounts, so an unguarded read could paint account A's cached
+  // profile onto account B's dashboard after a switch.
   useEffect(() => {
     (async () => {
-      // Local cache for instant paint
       const p = await storage.get(WORKER_PROFILE_KEY);
-      if (p) try { setProfile(JSON.parse(p)); } catch {}
-
-      // Wait for the real user id from storage — never query with a guessed id.
-      if (!userId) return;
-
-      setLoadingWork(true);
-      setLoadError('');
-
-      // Live profile from backend
+      if (!p) return;
       try {
-        const wRes = await authFetch(`/workers/${userId}`);
-        if (wRes.ok) {
-          const w = await wRes.json();
-          const merged: WorkerProfile = {
-            full_name: w.full_name,
-            age: w.age != null ? String(w.age) : undefined,
-            skill: w.skill,
-            hourly_rate: w.hourly_rate != null ? String(w.hourly_rate) : undefined,
-            experience_years: w.experience_years != null ? String(w.experience_years) : undefined,
-            phone: w.phone,
-            alternate_phone: w.alternate_phone || w.alt_phone,
-            profile_image: w.profile_image,
-            location: w.location || w.city || w.address,
-            pincode: w.pincode,
-            email: w.email,
-            bio: w.bio,
-            aadhaar_verified: !!w.aadhaar_verified,
-            completed_jobs: w.completed_jobs ?? w.total_jobs,
-            rating: w.rating,
-          };
-          setProfile(merged);
-          storage.set(WORKER_PROFILE_KEY, JSON.stringify(merged)).catch(() => {});
+        const cached = JSON.parse(p);
+        if (!cached.__uid || String(cached.__uid) === String(userId)) {
+          setProfile(cached);
         }
-      } catch (e) {
-        console.warn('Failed to fetch worker profile', e);
-      }
-
-      try {
-        // The worker's token scopes this list to their own bookings.
-        // limit=100 — the default 20 silently truncates the past-work history.
-        const res = await authFetch('/bookings?limit=100');
-        if (!res.ok) {
-          // An error must never masquerade as "no past work yet".
-          setLoadError('Could not load your work history. Pull down or reopen to retry.');
-          return;
-        }
-        const data: BookingResponse[] = await res.json();
-        const completed = data.filter((b) => isCompletedStatus(normalizeBookingStatus(b.status)));
-
-        // Fetch all reviews for this worker once, then index by booking_id.
-        const reviewByBooking: Record<string, ReviewResponse> = {};
-        try {
-          const rr = await authFetch(`/reviews/?worker_id=${userId}`);
-          if (rr.ok) {
-            const reviews: ReviewResponse[] = await rr.json();
-            for (const r of reviews) {
-              if (r.booking_id != null) reviewByBooking[String(r.booking_id)] = r;
-            }
-          }
-        } catch {}
-
-        // Client name/avatar come embedded on each booking — no extra requests.
-        const past = completed.map((b) => {
-          const review = reviewByBooking[String(b.id)];
-          const client = b.user;
-          return {
-            id: String(b.id),
-            client_name: client?.full_name || `User ${b.user_id}`,
-            client_avatar: client?.profile_image || undefined,
-            place: b.customer_address || 'Local Area',
-            date: b.booking_date || 'Recent',
-            description: b.problem_description || 'Completed service',
-            payment: b.final_price || b.estimated_price || 0,
-            // Only an AGREED (final) price is real earnings — a proposal the
-            // client never accepted is not money in the bank.
-            earned: b.final_price || 0,
-            rating: review ? Number(review.rating) || 0 : 0,
-            review: review ? (review.review_text || '') : '',
-          };
-        });
-        setPastWork(past);
-      } catch (e) {
-        console.warn('Failed to fetch past work', e);
-        setLoadError('Could not load your work history. Pull down or reopen to retry.');
-      } finally {
-        setLoadingWork(false);
-      }
+      } catch {}
     })();
   }, [userId]);
+
+  /** Fetch profile + past work. silent=true (re-focus / pull-to-refresh)
+   * keeps the existing list on screen instead of flashing the spinner. */
+  const loadDashboard = useCallback(async (silent: boolean) => {
+    // Wait for the real user id from storage — never query with a guessed id.
+    if (!userId) return;
+
+    if (!silent) {
+      setLoadingWork(true);
+    }
+    setLoadError('');
+
+    // Live profile from backend
+    try {
+      const wRes = await authFetch(`/workers/${userId}`);
+      if (wRes.ok) {
+        const w = await wRes.json();
+        const merged: WorkerProfile = {
+          full_name: w.full_name,
+          age: w.age != null ? String(w.age) : undefined,
+          skill: w.skill,
+          hourly_rate: w.hourly_rate != null ? String(w.hourly_rate) : undefined,
+          experience_years: w.experience_years != null ? String(w.experience_years) : undefined,
+          phone: w.phone,
+          alternate_phone: w.alternate_phone || w.alt_phone,
+          profile_image: w.profile_image,
+          location: w.location || w.city || w.address,
+          pincode: w.pincode,
+          email: w.email,
+          bio: w.bio,
+          // Keep the shared cache complete for the profile EDIT form — it
+          // reads city/timings from this same key.
+          city: w.city,
+          timings: w.timings,
+          aadhaar_verified: !!w.aadhaar_verified,
+          completed_jobs: w.completed_jobs ?? w.total_jobs,
+          rating: w.rating,
+        };
+        setProfile(merged);
+        // Tag the cache with the owning account id — the profile form's read
+        // guard refuses entries whose __uid doesn't match, so an untagged
+        // write here would leak this account's profile onto another's load.
+        storage.set(WORKER_PROFILE_KEY, JSON.stringify({ ...merged, __uid: userId })).catch(() => {});
+      }
+    } catch (e) {
+      console.warn('Failed to fetch worker profile', e);
+    }
+
+    try {
+      // The worker's token scopes this list to their own bookings.
+      // limit=100 — the default 20 silently truncates the past-work history.
+      const res = await authFetch('/bookings/?limit=100');
+      if (!res.ok) {
+        // An error must never masquerade as "no past work yet".
+        setLoadError('Could not load your work history. Pull down or reopen to retry.');
+        return;
+      }
+      const data: BookingResponse[] = await res.json();
+      const completed = data.filter((b) => isCompletedStatus(normalizeBookingStatus(b.status)));
+
+      // Fetch all reviews for this worker once, then index by booking_id.
+      const reviewByBooking: Record<string, ReviewResponse> = {};
+      try {
+        const rr = await authFetch(`/reviews/?worker_id=${userId}`);
+        if (rr.ok) {
+          const reviews: ReviewResponse[] = await rr.json();
+          for (const r of reviews) {
+            if (r.booking_id != null) reviewByBooking[String(r.booking_id)] = r;
+          }
+        }
+      } catch {}
+
+      // Client name/avatar come embedded on each booking — no extra requests.
+      const past = completed.map((b) => {
+        const review = reviewByBooking[String(b.id)];
+        const client = b.user;
+        return {
+          id: String(b.id),
+          client_name: client?.full_name || `User ${b.user_id}`,
+          client_avatar: client?.profile_image || undefined,
+          place: b.customer_address || 'Local Area',
+          date: b.booking_date || 'Recent',
+          description: b.problem_description || 'Completed service',
+          payment: b.final_price || b.estimated_price || 0,
+          // Only an AGREED (final) price is real earnings — a proposal the
+          // client never accepted is not money in the bank.
+          earned: b.final_price || 0,
+          rating: review ? Number(review.rating) || 0 : 0,
+          review: review ? (review.review_text || '') : '',
+        };
+      });
+      setPastWork(past);
+    } catch (e) {
+      console.warn('Failed to fetch past work', e);
+      setLoadError('Could not load your work history. Pull down or reopen to retry.');
+    } finally {
+      if (!silent) setLoadingWork(false);
+    }
+  }, [userId]);
+
+  // Focus-driven refresh: the bottom nav PUSHES screens and back pops them,
+  // so this dashboard stays mounted while the worker marks jobs completed on
+  // the Requests screen — a mount-only fetch would show stale history when
+  // they return. Re-fetch every time the screen comes into focus.
+  const hasLoadedRef = React.useRef(false);
+  useFocusEffect(
+    useCallback(() => {
+      if (!userId) return;
+      const silent = hasLoadedRef.current;
+      hasLoadedRef.current = true;
+      void loadDashboard(silent);
+    }, [userId, loadDashboard]),
+  );
+
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    await loadDashboard(true);
+    setRefreshing(false);
+  }, [loadDashboard]);
 
   // Average over REVIEWED jobs only — counting unreviewed jobs as 0 stars
   // would drag the rating down unfairly.
@@ -243,7 +291,7 @@ export default function WorkerDashboard() {
           contentContainerStyle={{ paddingBottom: 120 }}
           showsVerticalScrollIndicator={false}
           refreshControl={
-            <RefreshControl refreshing={loadingWork} onRefresh={() => setReloadTick((t) => t + 1)} tintColor="#6F42C1" />
+            <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#6F42C1" colors={['#6F42C1']} />
           }
         >
           {tab === 'details' ? (

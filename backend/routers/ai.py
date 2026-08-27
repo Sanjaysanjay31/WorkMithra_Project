@@ -7,8 +7,9 @@ from rate_limit import limiter
 
 router = APIRouter()
 
-# Every /ai/* call is a paid provider call — bounded inputs plus per-IP rate
-# limits keep a single client from draining the Sarvam/HF quota.
+# Every /ai/* call is a paid provider call (Sarvam / Gemini / Groq, with
+# sequential fallback — see services/providers/) — bounded inputs plus per-IP
+# rate limits keep a single client from draining the provider quotas.
 _MAX_TEXT_CHARS = 2000       # chat / extract / detect
 _MAX_TRANSLATE_CHARS = 5000  # chat messages can be a bit longer
 _MAX_TTS_CHARS = 1000        # frontend chunks long speech itself

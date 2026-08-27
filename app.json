@@ -29,7 +29,6 @@
       "predictiveBackGestureEnabled": false,
       "permissions": [
         "RECORD_AUDIO",
-        "READ_MEDIA_IMAGES",
         "ACCESS_FINE_LOCATION",
         "ACCESS_COARSE_LOCATION",
         "POST_NOTIFICATIONS"
@@ -62,6 +61,12 @@
       ],
       "@react-native-community/datetimepicker",
       "expo-secure-store",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "WorkMithra needs photo library access to upload your profile picture."
+        }
+      ],
       "expo-audio",
       [
         "expo-notifications",

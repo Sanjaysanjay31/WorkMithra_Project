@@ -124,9 +124,12 @@ export async function aiDetectLang(text: string): Promise<LangCode> {
 
 export async function aiTranslate(text: string, source: LangCode, target: LangCode): Promise<string> {
   if (!text.trim() || source === target) return text;
+  // Generous timeout: a cold Render dyno can take ~50s to wake before the
+  // translate call even starts, and the default 30s would abort first.
   const res = await authFetch('/ai/translate', {
     method: 'POST',
     json: { text, source_lang: source, target_lang: target },
+    timeoutMs: 60000,
   });
   if (!res.ok) throw new Error('translate failed');
   const data = await res.json();
@@ -137,15 +140,20 @@ export async function aiExtract(text: string, schemaHint: string): Promise<any> 
   const res = await authFetch('/ai/extract', {
     method: 'POST',
     json: { text, schema: schemaHint },
+    timeoutMs: 90000,
   });
   if (!res.ok) throw new Error('extract failed');
   return res.json();
 }
 
 export async function aiChat(prompt: string, system?: string): Promise<string> {
+  // LLM generation plus a possible cold start routinely exceeds the default
+  // 30s fetch timeout — with it, the first question after the backend slept
+  // always died with an AbortError bubble.
   const res = await authFetch('/ai/chat', {
     method: 'POST',
     json: { prompt, system },
+    timeoutMs: 90000,
   });
   if (!res.ok) {
     let detail = `${res.status}`;
@@ -178,6 +186,7 @@ export async function aiTTS(text: string, targetLang: LangCode = 'en-IN'): Promi
   const res = await authFetch('/ai/tts', {
     method: 'POST',
     json: { text: cleanText, target_lang: targetLang },
+    timeoutMs: 60000,
   });
   if (!res.ok) throw new Error('tts failed');
   const blob = await res.blob();

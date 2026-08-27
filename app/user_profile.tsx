@@ -122,7 +122,7 @@ export default function UserProfilePage() {
       // list to their own bookings; we then narrow to this client locally.
       // limit=100 — the default 20 silently truncates a busy worker's list.
       try {
-        const res = await authFetch('/bookings?limit=100');
+        const res = await authFetch('/bookings/?limit=100');
         if (res.ok) {
           const list: BookingResponse[] = await res.json();
           const mapped: RequestItem[] = list
@@ -214,9 +214,27 @@ export default function UserProfilePage() {
   }
 
   if (!client) {
+    // With a clientId this is a normal in-flight load (spinner). Without one the
+    // fetch never runs, so a bare spinner would be a permanent dead end — on web
+    // there's no swipe-back to escape. Always offer a way back.
+    const hasId = !!String(clientId || '');
     return (
-      <View style={styles.center}>
-        <ActivityIndicator color="#6F42C1" />
+      <View style={styles.screen}>
+        <Stack.Screen options={{ headerShown: false }} />
+        <View style={styles.center}>
+          {hasId ? (
+            <ActivityIndicator color="#6F42C1" />
+          ) : (
+            <>
+              <Ionicons name="person-outline" size={40} color="#ccc" />
+              <Text style={styles.noClientText}>No client selected</Text>
+            </>
+          )}
+          <TouchableOpacity style={styles.backLinkBtn} onPress={() => router.back()}>
+            <Ionicons name="arrow-back" size={16} color="#6F42C1" />
+            <Text style={styles.backLinkText}>Go back</Text>
+          </TouchableOpacity>
+        </View>
       </View>
     );
   }
@@ -439,6 +457,9 @@ const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: '#fff' },
   frame: { flex: 1, width: '100%', backgroundColor: '#fff' },
   center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
+  noClientText: { marginTop: 10, fontSize: 14, fontWeight: '700', color: '#999' },
+  backLinkBtn: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 16, paddingHorizontal: 16, paddingVertical: 9, borderRadius: 10, backgroundColor: '#f0e6ff' },
+  backLinkText: { fontSize: 13, fontWeight: '700', color: '#6F42C1' },
 
   headerRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', backgroundColor: '#6F42C1', paddingHorizontal: 14, paddingVertical: 10 },
   headerTitle: { fontSize: 15, fontWeight: '800', color: '#fff' },

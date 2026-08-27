@@ -67,7 +67,14 @@ export default function LoginScreen() {
            role: serverRole,
         };
         await storage.set('workmithra:auth', JSON.stringify(authData));
-      } catch {}
+      } catch (e) {
+        // If the session can't be persisted, navigating would just bounce the
+        // user back to /login (the auth guard reads the token from storage).
+        // Fail loudly here instead of silently stranding them.
+        console.warn('Failed to persist session', e);
+        notify('Login failed', 'Could not save your session on this device. Please try again.');
+        return;
+      }
       // Connect the realtime socket for the session now that the token is
       // persisted. ensureSocket() no-ops if anything is missing.
       ensureSocket();

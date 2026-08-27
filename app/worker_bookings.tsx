@@ -9,9 +9,9 @@ import { storage } from '@/lib/storage';
 import { ensureSocket, onBookingRequest, onBookingStatusChanged } from '@/lib/socket';
 import { BookingResponse } from '@/lib/types';
 import { Ionicons } from '@expo/vector-icons';
-import { Stack, useRouter } from 'expo-router';
+import { Stack, useFocusEffect, useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, KeyboardAvoidingView, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Alert, KeyboardAvoidingView, RefreshControl, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 
 type Tab = 'pending' | 'accepted';
 
@@ -58,15 +58,17 @@ function mapRequests(data: BookingResponse[]): Request[] {
         },
       };
     })
-    // The inbox holds actionable requests only: an active status AND a
-    // scheduled slot that hasn't passed yet. Once the time is gone a
-    // request can no longer be accepted/declined, so it drops out of the
-    // inbox (completed work still shows on the dashboard history).
-    .filter(
-      (row) =>
-        isActiveStatus(row.canonical) &&
-        !isBookingDateTimePast(row.booking.booking_date, row.booking.booking_time),
-    )
+    // The inbox holds actionable requests only. Pending requests expire out of
+    // the inbox once their slot has passed (they can no longer be accepted),
+    // but ACCEPTED (upcoming) jobs stay until the worker marks them completed —
+    // otherwise a job would vanish from the inbox at exactly the moment it needs
+    // completing, and the worker could never finish it (blocking reviews and
+    // their completed-jobs stats).
+    .filter((row) => {
+      if (!isActiveStatus(row.canonical)) return false;
+      if (row.canonical === 'upcoming') return true; // keep until completed
+      return !isBookingDateTimePast(row.booking.booking_date, row.booking.booking_time);
+    })
     .map((row) => row.item);
 }
 
@@ -75,6 +77,9 @@ export default function WorkerBookings() {
   const [tab, setTab] = useState<Tab>('pending');
   const [requests, setRequests] = useState<Request[]>([]);
   const [loading, setLoading] = useState(true);
+  // A failed load is NOT an empty inbox — render it distinctly with a retry.
+  const [loadError, setLoadError] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [quoteFor, setQuoteFor] = useState<Request | null>(null);
   const [quoteAmount, setQuoteAmount] = useState('');
   // Ref-based double-submit guard — state lags a re-render, so rapid taps
@@ -107,22 +112,39 @@ export default function WorkerBookings() {
       // The worker's token scopes this list to their own bookings.
       // limit=100 — the default 20 silently truncates a busy inbox.
       const data: BookingResponse[] = await expectJson(
-        await authFetch('/bookings?limit=100'),
+        await authFetch('/bookings/?limit=100'),
         'Could not load booking requests',
       );
       setRequests(mapRequests(data));
+      setLoadError(false);
     } catch (e: any) {
       console.warn('Failed to fetch requests', e);
-      if (!silent) {
-        Alert.alert('Booking requests', e?.message || 'Could not load booking requests. Reopen to retry.');
-      }
+      // Only a loud failure sets the error state; silent (realtime) refreshes
+      // must not flip a good inbox into an error screen on a blip.
+      if (!silent) setLoadError(true);
     } finally {
       if (!silent) setLoading(false);
     }
   }, []);
 
-  useEffect(() => {
-    void loadRequests(uid);
+  // Focus-driven refresh: the bottom nav PUSHES screens and back pops them,
+  // so this inbox stays mounted while the client's status changes land — and
+  // a worker returning here after completing a job elsewhere sees fresh data.
+  // First load shows the spinner; re-focus refreshes silently.
+  const hasLoadedRef = useRef(false);
+  useFocusEffect(
+    useCallback(() => {
+      if (!uid) return;
+      const silent = hasLoadedRef.current;
+      hasLoadedRef.current = true;
+      void loadRequests(uid, silent);
+    }, [loadRequests, uid]),
+  );
+
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    await loadRequests(uid, true);
+    setRefreshing(false);
   }, [loadRequests, uid]);
 
   // Realtime: a new request pushed by the server refreshes the inbox, and
@@ -187,20 +209,27 @@ export default function WorkerBookings() {
     );
   }
 
-  async function updateStatus(id: string, action: 'accepted' | 'declined') {
+  async function updateStatus(id: string, action: 'accepted' | 'declined' | 'completed') {
     if (actionRef.current) return;
     const r = requests.find((x) => x.id === id);
     if (!r) return;
     actionRef.current = true;
 
-    const backendStatus = action === 'accepted' ? 'upcoming' : 'rejected';
+    const backendStatus =
+      action === 'accepted' ? 'upcoming' : action === 'completed' ? 'completed' : 'rejected';
+    const errLabel =
+      action === 'accepted'
+        ? 'Could not accept the booking'
+        : action === 'completed'
+          ? 'Could not mark the job completed'
+          : 'Could not decline the booking';
     try {
       await expectJson(
         await authFetch(`/bookings/${id}`, {
           method: 'PUT',
           json: { status: backendStatus },
         }),
-        action === 'accepted' ? 'Could not accept the booking' : 'Could not decline the booking',
+        errLabel,
       );
     } catch (e: any) {
       Alert.alert('Update failed', e?.message || 'Could not update the booking. Please try again.');
@@ -209,18 +238,25 @@ export default function WorkerBookings() {
       actionRef.current = false;
     }
 
-    // Update the UI only after the server confirmed the change. A declined
-    // booking is no longer active, so it leaves the inbox entirely.
+    // Update the UI only after the server confirmed the change. Declined and
+    // completed bookings are no longer actionable, so they leave the inbox
+    // (completed work shows on the dashboard history).
     if (action === 'accepted') {
       setRequests((rs) => rs.map((x) => (x.id === id ? { ...x, status: 'accepted' } : x)));
     } else {
       setRequests((rs) => rs.filter((x) => x.id !== id));
     }
 
+    if (action === 'completed') {
+      // The backend settles the final price, records job history, bumps the
+      // worker's stats, and notifies the client — nothing to do client-side.
+      Alert.alert('Job completed 🎉', `${r.client} can now leave you a review.`);
+    }
+
     // No client-side notification POST here: the backend persists and pushes
-    // the accepted/declined notification itself, so it also reaches a client
-    // who was offline at this moment (and can't be double-sent if this app
-    // is killed right after the tap).
+    // the accepted/declined/completed notification itself, so it also reaches
+    // a client who was offline at this moment (and can't be double-sent if
+    // this app is killed right after the tap).
   }
 
   async function acceptPrice(r: Request) {
@@ -363,9 +399,23 @@ export default function WorkerBookings() {
           </TouchableOpacity>
         </View>
 
-        <ScrollView contentContainerStyle={{ paddingBottom: 100 }} showsVerticalScrollIndicator={false}>
+        <ScrollView
+          contentContainerStyle={{ paddingBottom: 100 }}
+          showsVerticalScrollIndicator={false}
+          refreshControl={
+            <RefreshControl refreshing={refreshing} onRefresh={onRefresh} colors={['#6F42C1']} tintColor="#6F42C1" />
+          }
+        >
           {loading ? (
             <ActivityIndicator color="#6F42C1" style={{ marginTop: 30 }} />
+          ) : loadError && requests.length === 0 ? (
+            <View style={styles.errorBox}>
+              <Ionicons name="cloud-offline-outline" size={36} color="#ccc" />
+              <Text style={styles.errorText}>Couldn&apos;t load booking requests.</Text>
+              <TouchableOpacity style={styles.retryBtn} onPress={() => void loadRequests(uid)}>
+                <Text style={styles.retryText}>Retry</Text>
+              </TouchableOpacity>
+            </View>
           ) : filtered.length === 0 ? (
             <Text style={styles.empty}>No {tab} requests</Text>
           ) : (
@@ -409,9 +459,18 @@ export default function WorkerBookings() {
                       </TouchableOpacity>
                     </View>
                   ) : (
-                    <View style={styles.acceptedRow}>
-                      <Ionicons name="checkmark-circle" size={13} color="#10b981" />
-                      <Text style={styles.acceptedTag}>Accepted</Text>
+                    <View style={styles.acceptedActions}>
+                      <View style={styles.acceptedRow}>
+                        <Ionicons name="checkmark-circle" size={13} color="#10b981" />
+                        <Text style={styles.acceptedTag}>Accepted</Text>
+                      </View>
+                      <TouchableOpacity
+                        style={styles.completeBtn}
+                        onPress={(e) => { e.stopPropagation?.(); updateStatus(r.id, 'completed'); }}
+                      >
+                        <Ionicons name="checkmark-done" size={13} color="#fff" />
+                        <Text style={styles.completeText}>Mark Completed</Text>
+                      </TouchableOpacity>
                     </View>
                   )}
                 </View>
@@ -492,9 +551,16 @@ const styles = StyleSheet.create({
   acceptText: { color: '#fff', fontWeight: '800', fontSize: 11 },
   declineBtn: { backgroundColor: '#f0f0f0' },
   declineText: { color: '#666', fontWeight: '700', fontSize: 11 },
-  acceptedRow: { flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 8 },
+  acceptedActions: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginTop: 8 },
+  acceptedRow: { flexDirection: 'row', alignItems: 'center', gap: 4 },
   acceptedTag: { color: '#10b981', fontWeight: '800', fontSize: 12 },
+  completeBtn: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingVertical: 6, paddingHorizontal: 10, borderRadius: 8, backgroundColor: '#6F42C1' },
+  completeText: { color: '#fff', fontWeight: '800', fontSize: 11 },
   empty: { fontSize: 13, color: '#999', textAlign: 'center', marginTop: 24 },
+  errorBox: { alignItems: 'center', paddingVertical: 40 },
+  errorText: { marginTop: 10, fontSize: 13, fontWeight: '700', color: '#b91c1c', textAlign: 'center' },
+  retryBtn: { marginTop: 12, paddingHorizontal: 18, paddingVertical: 8, borderRadius: 8, backgroundColor: '#6F42C1' },
+  retryText: { color: '#fff', fontWeight: '700', fontSize: 12 },
 
   // --- price negotiation panel ---
   agreedRow: { flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 8 },

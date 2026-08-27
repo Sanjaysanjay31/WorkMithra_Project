@@ -283,8 +283,10 @@ def update_booking(
 
     Status changes must follow the lifecycle in shared/booking-status.json:
     pending -> upcoming -> completed, with rejection allowed while active.
-    Only the worker may accept (pending->upcoming) or complete
-    (upcoming->completed); either participant may reject/cancel.
+    Only the worker may accept (pending->upcoming); EITHER participant may
+    complete (upcoming->completed) — whichever side confirms the job is done
+    settles it for both (history, stats, notification to the other side).
+    Either participant may reject/cancel.
     Price fields (estimated/final) are worker-writable only — a customer
     must not be able to rewrite the agreed price on their own booking."""
     # with_for_update() takes a row lock so concurrent updates (e.g. the
@@ -354,10 +356,10 @@ def update_booking(
                     status_code=400,
                     detail=f"Cannot change status from '{current_status}' to '{normalized}'",
                 )
-            if normalized in ("upcoming", "completed") and not is_worker_side:
+            if normalized == "upcoming" and not is_worker_side:
                 raise HTTPException(
                     status_code=403,
-                    detail="Only the worker can accept or complete a booking",
+                    detail="Only the worker can accept a booking",
                 )
         data["status"] = normalized
 

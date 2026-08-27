@@ -9,8 +9,8 @@ import { storage } from '@/lib/storage';
 import { ensureSocket, onBookingStatusChanged } from '@/lib/socket';
 import { BookingResponse, WorkerBrief } from '@/lib/types';
 import { Ionicons } from '@expo/vector-icons';
-import { Stack, useRouter } from 'expo-router';
-import React, { useEffect, useRef, useState } from 'react';
+import { Stack, useFocusEffect, useRouter } from 'expo-router';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
     ActivityIndicator,
     RefreshControl,
@@ -80,6 +80,9 @@ export default function BookingsPage() {
   const router = useRouter();
   const [tab, setTab] = useState<Tab>('present');
   const [loading, setLoading] = useState(true);
+  // A failed load is NOT an empty history — keep it distinct so the screen
+  // shows an error + retry instead of a misleading "No bookings here yet".
+  const [loadError, setLoadError] = useState('');
 
   const [present, setPresent] = useState<Booking[]>([]);
   const [past, setPast] = useState<Booking[]>([]);
@@ -88,8 +91,9 @@ export default function BookingsPage() {
   // Session id kept in a ref so the realtime handler below can scope
   // incoming bookings without re-subscribing.
   const uidRef = useRef(0);
-  // Bumped by pull-to-refresh to re-run the load effect.
-  const [reloadTick, setReloadTick] = useState(0);
+  // Pull-to-refresh has its own flag so its spinner animates independently of
+  // the initial-load spinner.
+  const [refreshing, setRefreshing] = useState(false);
   // Ref-based double-submit guard: state updates lag a re-render, so rapid
   // taps could fire duplicate POST/PUTs before `busy` ever renders.
   const actionRef = useRef(false);
@@ -99,6 +103,71 @@ export default function BookingsPage() {
     const item = toBookingItem(b, Number(b.user_id))!;
     setPresent((rs) => rs.map((x) => (x.id === item.id ? item : x)));
     setPast((rs) => rs.map((x) => (x.id === item.id ? item : x)));
+  }
+
+  /** Merge a STATUS change: active bookings stay in Present, terminal ones
+   * move to Past — the same rule the realtime handler applies, so a job
+   * marked completed from this screen moves tabs immediately. */
+  function mergeStatusUpdate(b: BookingResponse) {
+    const item = toBookingItem(b, uidRef.current || b.user_id);
+    if (!item) return;
+    const active = isActiveStatus(item.status);
+    setPresent((rs) =>
+      !rs.some((x) => x.id === item.id)
+        ? rs
+        : active
+          ? rs.map((x) => (x.id === item.id ? item : x))
+          : rs.filter((x) => x.id !== item.id),
+    );
+    setPast((rs) => {
+      if (!rs.some((x) => x.id === item.id)) return active ? [...rs, item] : rs;
+      return active
+        ? rs.filter((x) => x.id !== item.id)
+        : rs.map((x) => (x.id === item.id ? item : x));
+    });
+  }
+
+  /** Client-side completion — either participant may confirm the job is done. */
+  function markCompleted(b: Booking) {
+    Alert.alert(
+      'Mark job completed?',
+      `Confirm that ${b.worker.full_name || 'the worker'} finished the job (${b.date}).`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Yes, completed',
+          onPress: () => void (async () => {
+            if (actionRef.current) return;
+            actionRef.current = true;
+            try {
+              const updated: BookingResponse = await expectJson(
+                await authFetch(`/bookings/${b.id}`, {
+                  method: 'PUT',
+                  json: { status: 'completed' },
+                }),
+                'Could not mark the job completed',
+              );
+              mergeStatusUpdate(updated);
+              Alert.alert(
+                'Job completed 🎉',
+                'Thanks for confirming! You can now leave a review for the worker.',
+                [
+                  {
+                    text: 'Review now',
+                    onPress: () => router.push({ pathname: '/worker_info', params: { id: String(b.worker.id), tab: 'reviews' } }),
+                  },
+                  { text: 'Later' },
+                ],
+              );
+            } catch (e: any) {
+              Alert.alert('Could not complete', e?.message || 'Please try again.');
+            } finally {
+              actionRef.current = false;
+            }
+          })(),
+        },
+      ],
+    );
   }
 
   async function acceptPrice(b: Booking) {
@@ -149,9 +218,11 @@ export default function BookingsPage() {
     }
   }
 
-  useEffect(() => {
-    (async () => {
-      let uid = 0;
+  /** Fetch bookings. silent=true (re-focus / pull-to-refresh) keeps the
+   * current list on screen instead of swapping it for a spinner. */
+  const loadBookings = useCallback(async (silent: boolean) => {
+    let uid = uidRef.current;
+    if (!uid) {
       try {
         const authRaw = await storage.get('workmithra:auth');
         if (authRaw) {
@@ -160,42 +231,63 @@ export default function BookingsPage() {
         }
       } catch {}
       uidRef.current = uid;
-      try {
-        // The backend embeds worker details on each booking, so one request is enough.
-        // limit=100 — the default 20 silently truncates long histories.
-        const bookingsList: BookingResponse[] = await expectJson(
-          await authFetch('/bookings?limit=100'),
-          'Could not load your bookings',
-        );
+    }
+    if (!silent) setLoading(true);
+    setLoadError('');
+    try {
+      // The backend embeds worker details on each booking, so one request is enough.
+      // limit=100 — the default 20 silently truncates long histories.
+      const bookingsList: BookingResponse[] = await expectJson(
+        await authFetch('/bookings/?limit=100'),
+        'Could not load your bookings',
+      );
 
-        const realPresent: Booking[] = [];
-        const realPast: Booking[] = [];
+      const realPresent: Booking[] = [];
+      const realPast: Booking[] = [];
 
-        bookingsList.forEach((b) => {
-          const bookingItem = toBookingItem(b, uid);
-          if (!bookingItem) return;
-          // Present = an upcoming slot that hasn't happened yet.
-          // Past = the scheduled time has passed OR it reached a terminal
-          // state. We keep the real status label (pending/upcoming/rejected/
-          // completed) so a never-accepted booking still shows as Pending.
-          const isPast = isBookingDateTimePast(b.booking_date, b.booking_time) || !isActiveStatus(bookingItem.status);
-          if (isPast) {
-            realPast.push(bookingItem);
-          } else {
-            realPresent.push(bookingItem);
-          }
-        });
+      bookingsList.forEach((b) => {
+        const bookingItem = toBookingItem(b, uid);
+        if (!bookingItem) return;
+        // Present = an upcoming slot that hasn't happened yet.
+        // Past = the scheduled time has passed OR it reached a terminal
+        // state. We keep the real status label (pending/upcoming/rejected/
+        // completed) so a never-accepted booking still shows as Pending.
+        const isPast = isBookingDateTimePast(b.booking_date, b.booking_time) || !isActiveStatus(bookingItem.status);
+        if (isPast) {
+          realPast.push(bookingItem);
+        } else {
+          realPresent.push(bookingItem);
+        }
+      });
 
-        setPresent(realPresent);
-        setPast(realPast);
-      } catch (e: any) {
-        console.warn('Failed to fetch bookings', e);
-        Alert.alert('Bookings', e?.message || 'Could not load your bookings. Pull down or reopen to retry.');
-      } finally {
-        setLoading(false);
-      }
-    })();
-  }, [reloadTick]);
+      setPresent(realPresent);
+      setPast(realPast);
+    } catch (e: any) {
+      console.warn('Failed to fetch bookings', e);
+      setLoadError(e?.message || 'Could not load your bookings.');
+    } finally {
+      if (!silent) setLoading(false);
+    }
+  }, []);
+
+  // Focus-driven refresh: the bottom nav PUSHES screens and back pops them,
+  // so this screen stays mounted while the worker accepts/completes a job
+  // from their side — without a re-focus fetch the client's list goes stale
+  // (a just-completed job never moves to the Past tab until a manual pull).
+  const hasLoadedRef = useRef(false);
+  useFocusEffect(
+    useCallback(() => {
+      const silent = hasLoadedRef.current;
+      hasLoadedRef.current = true;
+      void loadBookings(silent);
+    }, [loadBookings]),
+  );
+
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    await loadBookings(true);
+    setRefreshing(false);
+  }, [loadBookings]);
 
   // Realtime: when the worker accepts/completes/rejects or the price moves,
   // the server pushes 'booking_status_changed'. Refetch that one booking
@@ -215,23 +307,7 @@ export default function BookingsPage() {
               await authFetch(`/bookings/${data.booking_id}`),
               'Could not refresh the booking',
             );
-            const item = toBookingItem(updated, uidRef.current);
-            if (!item) return;
-            const active = isActiveStatus(item.status);
-            // Present holds active bookings; terminal ones move to Past.
-            setPresent((rs) =>
-              !rs.some((x) => x.id === item.id)
-                ? rs
-                : active
-                  ? rs.map((x) => (x.id === item.id ? item : x))
-                  : rs.filter((x) => x.id !== item.id),
-            );
-            setPast((rs) => {
-              if (!rs.some((x) => x.id === item.id)) return active ? [...rs, item] : rs;
-              return active
-                ? rs.filter((x) => x.id !== item.id)
-                : rs.map((x) => (x.id === item.id ? item : x));
-            });
+            mergeStatusUpdate(updated);
           } catch {}
         })();
       });
@@ -243,6 +319,9 @@ export default function BookingsPage() {
   }, []);
 
   const data = tab === 'present' ? present : past;
+  // Decides between the full-screen initial spinner and keeping the list (with
+  // its pull-to-refresh) mounted while a refetch runs.
+  const hasAnyData = present.length > 0 || past.length > 0;
 
   /** Title of the offer modal depends on where the negotiation stands. */
   const priceModalTitle = !priceFor
@@ -346,6 +425,22 @@ export default function BookingsPage() {
             </Text>
           </View>
           {tab === 'present' && b.status !== 'rejected' && renderPricePanel(b)}
+          {tab === 'present' && b.status === 'upcoming' && (
+            <TouchableOpacity style={styles.completeBtn} activeOpacity={0.8} onPress={() => markCompleted(b)}>
+              <Ionicons name="checkmark-circle-outline" size={15} color="#166534" />
+              <Text style={styles.completeText}>Mark Completed</Text>
+            </TouchableOpacity>
+          )}
+          {tab === 'past' && b.status === 'completed' && (
+            <TouchableOpacity
+              style={styles.rateBtn}
+              activeOpacity={0.8}
+              onPress={(e) => { e.stopPropagation?.(); router.push({ pathname: '/worker_info', params: { id: String(b.worker.id), tab: 'reviews' } }); }}
+            >
+              <Ionicons name="star" size={15} color="#FFB800" />
+              <Text style={styles.rateText}>Rate worker</Text>
+            </TouchableOpacity>
+          )}
         </View>
       </TouchableOpacity>
     );
@@ -366,17 +461,25 @@ export default function BookingsPage() {
           </TouchableOpacity>
         </View>
 
-        {loading ? (
+        {loading && !hasAnyData ? (
           <ActivityIndicator color="#6F42C1" style={{ marginTop: 30 }} />
         ) : (
           <ScrollView
             contentContainerStyle={{ paddingBottom: 100 }}
             showsVerticalScrollIndicator={false}
             refreshControl={
-              <RefreshControl refreshing={loading} onRefresh={() => setReloadTick((t) => t + 1)} tintColor="#6F42C1" />
+              <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#6F42C1" colors={['#6F42C1']} />
             }
           >
-            {data.length === 0 ? (
+            {loadError && data.length === 0 ? (
+              <View style={styles.errorBox}>
+                <Ionicons name="cloud-offline-outline" size={36} color="#ccc" />
+                <Text style={styles.errorText}>{loadError}</Text>
+                <TouchableOpacity style={styles.retryBtn} onPress={() => void loadBookings(false)}>
+                  <Text style={styles.retryText}>Retry</Text>
+                </TouchableOpacity>
+              </View>
+            ) : data.length === 0 ? (
               <Text style={styles.placeholder}>No bookings here yet</Text>
             ) : (
               data.map(renderCard)
@@ -438,6 +541,10 @@ const styles = StyleSheet.create({
   tabText: { fontSize: 12, fontWeight: '700', color: '#666' },
   tabTextActive: { color: '#fff' },
   placeholder: { fontSize: 14, color: '#999', textAlign: 'center', marginTop: 30 },
+  errorBox: { alignItems: 'center', paddingVertical: 40 },
+  errorText: { marginTop: 10, fontSize: 13, fontWeight: '700', color: '#b91c1c', textAlign: 'center', paddingHorizontal: 24 },
+  retryBtn: { marginTop: 12, paddingHorizontal: 18, paddingVertical: 8, borderRadius: 8, backgroundColor: '#6F42C1' },
+  retryText: { color: '#fff', fontWeight: '700', fontSize: 12 },
 
   card: {
     flexDirection: 'row',
@@ -476,6 +583,10 @@ const styles = StyleSheet.create({
   waitingText: { color: '#b45309', fontWeight: '700', fontSize: 11, flex: 1 },
   priceBtn: { marginTop: 8, flexDirection: 'row', paddingVertical: 7, borderRadius: 8, borderWidth: 1, borderColor: '#6F42C1', backgroundColor: '#f5f0fb', alignItems: 'center', justifyContent: 'center', gap: 4 },
   priceBtnText: { color: '#6F42C1', fontWeight: '800', fontSize: 11 },
+  completeBtn: { marginTop: 8, flexDirection: 'row', paddingVertical: 8, borderRadius: 8, borderWidth: 1, borderColor: '#16a34a', backgroundColor: '#f0fdf4', alignItems: 'center', justifyContent: 'center', gap: 5 },
+  completeText: { color: '#166534', fontWeight: '800', fontSize: 12 },
+  rateBtn: { marginTop: 8, flexDirection: 'row', paddingVertical: 8, borderRadius: 8, borderWidth: 1, borderColor: '#FFB800', backgroundColor: '#fffbeb', alignItems: 'center', justifyContent: 'center', gap: 5 },
+  rateText: { color: '#92400e', fontWeight: '800', fontSize: 12 },
 
   modalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'center', alignItems: 'center', padding: 24 },
   priceKav: { width: '100%', maxWidth: 320, justifyContent: 'center' },

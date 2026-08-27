@@ -64,7 +64,13 @@ _COLUMN_DDL = (
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_jti VARCHAR(64)",
     "ALTER TABLE workers ADD COLUMN IF NOT EXISTS token_version INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE workers ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE",
+    "ALTER TABLE workers ADD COLUMN IF NOT EXISTS reset_jti VARCHAR(64)",
     "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS price_proposed_by VARCHAR(10)",
+    # Clients may attach one photo to their review of a completed job.
+    "ALTER TABLE ratings_reviews ADD COLUMN IF NOT EXISTS review_image VARCHAR(2000)",
+    # Reviews carry up to FIVE photos (JSON array of URLs); the single
+    # review_image stays in sync with the first entry for old clients.
+    "ALTER TABLE ratings_reviews ADD COLUMN IF NOT EXISTS review_images VARCHAR(4000)",
     # Extra profile fields shown by the app's profile forms — added here so
     # existing databases gain the columns without a manual migration.
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS age INTEGER",
@@ -292,10 +298,19 @@ def verify_otp(request: Request, data: schemas.OTPVerify, db: Session = Depends(
         db.commit()
 
         # Issue the reset token for the existing forgot-password flow. The jti
-        # is recorded on the user row if one already exists (single-use).
+        # is recorded on the matching account row if one already exists
+        # (single-use). Users and workers authenticate from SEPARATE tables, so
+        # record it on both a users row and a workers row when present — a
+        # worker's password lives in the workers table, and recording only on
+        # users is what made worker password resets silently no-op.
+        reset_jti_hash = hash_reset_jti(reset_jti)
         user = db.query(models.User).filter(models.User.email == data.email).first()
         if user is not None:
-            user.reset_jti = hash_reset_jti(reset_jti)
+            user.reset_jti = reset_jti_hash
+        worker = db.query(models.Worker).filter(models.Worker.email == data.email).first()
+        if worker is not None:
+            worker.reset_jti = reset_jti_hash
+        if user is not None or worker is not None:
             db.commit()
 
         # Only echo back the email we already know — never the full Supabase
@@ -346,32 +361,18 @@ def change_password(
     return {"message": "Password updated successfully"}
 
 
-@app.post("/upload-profile-image")
-async def upload_profile_image(
-    file: UploadFile = File(...),
-    db: Session = Depends(get_db),
-    current: Dict[str, Any] = Depends(get_current_user),
-):
-    """Upload an avatar to Supabase Storage (bucket: all_images) and save URL on the row.
-    The target user/worker always comes from the authenticated token."""
-    if not SUPABASE_URL or not SUPABASE_KEY:
-        raise HTTPException(status_code=500, detail="Supabase not configured")
-    try:
-        uid = int(current["sub"])
-    except (KeyError, ValueError, TypeError):
-        raise HTTPException(status_code=401, detail="Invalid token payload")
-    role = current.get("role", "user")
+async def _read_validated_image(file: UploadFile) -> tuple:
+    """Read an upload and verify it is a real JPEG/PNG/GIF/WebP image.
 
-    # Only accept images, and cap the size so a huge body can't exhaust memory.
+    Returns (content_bytes, content_type). Rejects non-images, SVG (can carry
+    scripts — never allowed into a public bucket) and anything over 5 MB.
+    Size is enforced while streaming so a multi-GB body can't exhaust RAM."""
     content_type = (file.content_type or "").lower()
     if not content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="Only image uploads are allowed")
-    # SVG can contain scripts — never allow it into a public bucket.
     if "svg" in content_type:
         raise HTTPException(status_code=400, detail="SVG images are not allowed")
     MAX_UPLOAD_BYTES = 5 * 1024 * 1024  # 5 MB
-    # Read in bounded chunks and abort AS SOON as the cap is exceeded —
-    # reading the whole body first would let a multi-GB request exhaust RAM.
     chunks = []
     total = 0
     while True:
@@ -400,12 +401,11 @@ async def upload_profile_image(
         detected = None
     if detected is None:
         raise HTTPException(status_code=400, detail="File does not look like a valid image (JPEG/PNG/GIF/WebP only)")
-    content_type = detected
+    return content, detected
 
-    import re as _re
-    base_name = (file.filename or "image").rsplit("/", 1)[-1]
-    safe_name = _re.sub(r"[^A-Za-z0-9._-]", "_", base_name) or "image"
-    path = f"{role}_{uid}/{int(time.time())}_{safe_name}"
+
+async def _store_image(content: bytes, content_type: str, path: str) -> str:
+    """Upload image bytes to Supabase Storage and return the public URL."""
     try:
         # requests is blocking — run it in a worker thread so the event loop
         # (and other clients) aren't stalled for the duration of the upload.
@@ -433,10 +433,34 @@ async def upload_profile_image(
     except HTTPException:
         raise
     except Exception as e:
-        print(f"[upload-profile-image] failed: {e}")
+        print(f"[image upload] failed: {e}")
         raise HTTPException(status_code=502, detail="Image upload failed — try again shortly")
+    return f"{SUPABASE_URL}/storage/v1/object/public/{SUPABASE_BUCKET}/{path}"
 
-    public_url = f"{SUPABASE_URL}/storage/v1/object/public/{SUPABASE_BUCKET}/{path}"
+
+@app.post("/upload-profile-image")
+async def upload_profile_image(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current: Dict[str, Any] = Depends(get_current_user),
+):
+    """Upload an avatar to Supabase Storage (bucket: all_images) and save URL on the row.
+    The target user/worker always comes from the authenticated token."""
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        raise HTTPException(status_code=500, detail="Supabase not configured")
+    try:
+        uid = int(current["sub"])
+    except (KeyError, ValueError, TypeError):
+        raise HTTPException(status_code=401, detail="Invalid token payload")
+    role = current.get("role", "user")
+
+    content, content_type = await _read_validated_image(file)
+
+    import re as _re
+    base_name = (file.filename or "image").rsplit("/", 1)[-1]
+    safe_name = _re.sub(r"[^A-Za-z0-9._-]", "_", base_name) or "image"
+    path = f"{role}_{uid}/{int(time.time())}_{safe_name}"
+    public_url = await _store_image(content, content_type, path)
 
     # Best-effort: persist URL ONLY on the table the caller belongs to.
     # users and workers are separate tables with overlapping id space, so we
@@ -461,8 +485,38 @@ async def upload_profile_image(
             db.rollback()
 
     # Blocking SQLAlchemy work — keep it off the event loop like the upload.
+    import asyncio as _asyncio
     await _asyncio.to_thread(_persist_url)
 
+    return {"url": public_url, "path": path}
+
+
+@app.post("/upload-review-image")
+@limiter.limit("10/minute")
+async def upload_review_image(
+    request: Request,
+    file: UploadFile = File(...),
+    current: Dict[str, Any] = Depends(get_current_user),
+):
+    """Upload a photo to attach to a review. Same validation/storage as
+    avatars, but the URL is only RETURNED — it is persisted later as part of
+    POST /reviews/ (review_image). Stored under review_{uid}/ so review photos
+    never collide with profile avatars."""
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        raise HTTPException(status_code=500, detail="Supabase not configured")
+    try:
+        uid = int(current["sub"])
+    except (KeyError, ValueError, TypeError):
+        raise HTTPException(status_code=401, detail="Invalid token payload")
+    role = current.get("role", "user")
+
+    content, content_type = await _read_validated_image(file)
+
+    import re as _re
+    base_name = (file.filename or "image").rsplit("/", 1)[-1]
+    safe_name = _re.sub(r"[^A-Za-z0-9._-]", "_", base_name) or "image"
+    path = f"review_{role}_{uid}/{int(time.time())}_{safe_name}"
+    public_url = await _store_image(content, content_type, path)
     return {"url": public_url, "path": path}
 
 
@@ -489,26 +543,43 @@ def reset_password(request: Request, data: schemas.PasswordReset, db: Session = 
     if token_email != data.email.lower():
         raise HTTPException(status_code=400, detail="This reset token was issued for a different email")
 
-    # Case-insensitive lookup: the token email is lowercased but a stored
-    # email may carry different casing.
+    # Case-insensitive lookup across BOTH account tables — users and workers
+    # authenticate from separate tables, so a worker's reset must hit workers.
+    # (Looking up only users is what made worker resets silently no-op while
+    # still returning a success message.)
     user = (
         db.query(models.User)
         .filter(models.User.email.ilike(data.email))
         .first()
     )
-    if not user:
+    worker = (
+        db.query(models.Worker)
+        .filter(models.Worker.email.ilike(data.email))
+        .first()
+    )
+    if not user and not worker:
         # Uniform response — don't reveal that no account exists.
         return success_response
 
-    # Single-use enforcement: the token's jti must be the latest one issued
-    # for this user. Missing jti (legacy token) or a mismatch is rejected.
+    # Single-use enforcement: the token's jti must be the latest one issued for
+    # the account. Missing jti (legacy token) or a mismatch is rejected.
     jti = payload.get("jti")
-    if not jti or user.reset_jti != hash_reset_jti(jti):
+    jti_hash = hash_reset_jti(jti) if jti else None
+
+    reset_any = False
+    for account in (user, worker):
+        if account is None:
+            continue
+        if not jti_hash or account.reset_jti != jti_hash:
+            continue
+        account.hashed_password = hash_password(data.password)
+        account.reset_jti = None  # consume the token
+        account.token_version = (account.token_version or 0) + 1  # revoke sessions
+        reset_any = True
+
+    if not reset_any:
         raise HTTPException(status_code=400, detail="Reset link expired or invalid — request a new OTP")
 
-    user.hashed_password = hash_password(data.password)
-    user.reset_jti = None  # consume the token
-    user.token_version = (user.token_version or 0) + 1  # revoke all sessions
     db.commit()
     return success_response
 

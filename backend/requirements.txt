@@ -1,6 +1,10 @@
 # Direct dependencies only (transitive deps resolve via pip).
 fastapi==0.131.0
 uvicorn==0.41.0
+# uvicorn's ws="auto" needs an installed websocket protocol implementation;
+# without it every Socket.IO websocket upgrade fails on the deployed server
+# (clients log "websocket error" and degrade to long-polling).
+websockets==15.0.1
 SQLAlchemy==2.0.46
 psycopg2-binary==2.9.11
 PyJWT==2.12.1

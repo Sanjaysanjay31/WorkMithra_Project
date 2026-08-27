@@ -3,6 +3,8 @@ import { render } from '@testing-library/react-native';
 import RegisterScreen from '../app/register';
 
 jest.mock('expo-router', () => ({
+  usePathname: () => '/',
+  useFocusEffect: (cb: any) => { jest.requireActual<typeof import('react')>('react').useEffect(cb); },
   useRouter: () => ({ push: jest.fn(), replace: jest.fn(), back: jest.fn() }),
   Stack: { Screen: () => null },
   useLocalSearchParams: () => ({ id: '1' }),

@@ -4,10 +4,11 @@ import RootLayout from '../app/_layout';
 
 jest.mock('expo-router', () => {
   const Stack = ({ children }: { children?: React.ReactNode }) => children ?? null;
-  (Stack as any).Screen = () => null;
+  (Stack as any).Screen = function Screen() { return null; };
   return {
     useRouter: () => ({ push: jest.fn(), replace: jest.fn(), back: jest.fn() }),
     usePathname: () => '/',
+  useFocusEffect: (cb: any) => { jest.requireActual<typeof import('react')>('react').useEffect(cb); },
     Stack,
     useLocalSearchParams: () => ({ id: '1' }),
   };

@@ -5,6 +5,8 @@ import { listAvailability, upsertAvailability } from '@/lib/availability';
 import { storage } from '@/lib/storage';
 
 jest.mock('expo-router', () => ({
+  usePathname: () => '/',
+  useFocusEffect: (cb: any) => { jest.requireActual<typeof import('react')>('react').useEffect(cb); },
   useRouter: () => ({ push: jest.fn(), replace: jest.fn(), back: jest.fn() }),
   Stack: { Screen: () => null },
   useLocalSearchParams: () => ({}),
@@ -59,5 +61,16 @@ describe('WorkerAvailabilityPage component', () => {
     // Unavailable days show the blocked note (6 of 7 days here).
     const blocked = await findAllByText('Not available — new bookings are blocked');
     expect(blocked.length).toBe(6);
+  });
+
+  it('shows an error with retry when the availability load fails', async () => {
+    // A failed load must NOT render the week grid with every day switched
+    // off — that looks like the worker's hours were wiped.
+    (listAvailability as jest.Mock).mockRejectedValue(new Error('Network down'));
+    const { findByText, queryByText } = render(<WorkerAvailabilityPage />);
+    expect(await findByText('Network down')).toBeTruthy();
+    expect(await findByText('Retry')).toBeTruthy();
+    expect(queryByText('Available 0 of 7 days')).toBeNull();
+    expect(queryByText('Monday')).toBeNull();
   });
 });

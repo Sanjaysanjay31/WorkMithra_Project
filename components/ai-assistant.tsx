@@ -1,5 +1,5 @@
 import { aiChat, aiExtract, aiTranslate, cleanTextForSpeech, LangCode, pauseAudio, resumeAudio, setMuted, speakLong, stopAudio, webSTT } from '@/lib/ai';
-import { authFetch, getAuth } from '@/lib/api';
+import { authFetch, getAuth, getToken } from '@/lib/api';
 import { appendHistory, clearHistory, loadHistory } from '@/lib/assistant-history';
 import { assistantBus } from '@/lib/assistant-bus';
 import { getScreenContext, Step, WORKER_STEPS } from '@/lib/assistant-context';
@@ -366,6 +366,18 @@ export function AIAssistant() {
     setInput('');
     setBusy(true);
     try {
+      // The chat endpoint requires authentication. The FAB is also visible on
+      // public screens (landing/login), where a raw 401 error bubble is the
+      // only thing a visitor would ever see — guide them to log in instead.
+      const token = await getToken();
+      if (!token) {
+        appendMsgPersist({
+          who: 'ai',
+          text: 'Please log in (or create an account) first — then I can answer your questions and help you book services. 🙏',
+        });
+        return;
+      }
+
       const targetLangName = LANG_NAME[lang] || 'English';
 
       const system =

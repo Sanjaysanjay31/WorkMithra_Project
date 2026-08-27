@@ -309,6 +309,29 @@ class RatingReviewBase(BaseModel):
     worker_id: Optional[int] = None
     rating: float
     review_text: Optional[str] = None
+    # Optional photo URL attached by the reviewer (uploaded first via
+    # /upload-review-image). Capped to stop absurdly long strings.
+    review_image: Optional[str] = Field(default=None, max_length=2000)
+    # Up to FIVE photos per review (each pre-uploaded via /upload-review-image).
+    # Both the array length and each URL's length are capped so a client can't
+    # bloat rows; the router additionally treats non-URLs as invalid input.
+    review_images: Optional[List[str]] = Field(
+        default=None,
+        max_length=5,
+        description="Up to 5 image URLs (http/https) attached to this review",
+    )
+
+    @field_validator("review_images")
+    @classmethod
+    def _check_review_images(cls, v):
+        if v is None:
+            return v
+        for url in v:
+            if len(url) > 2000:
+                raise ValueError("Each review image URL must be at most 2000 characters")
+            if not url.lower().startswith(("http://", "https://")):
+                raise ValueError("Each review image must be an http(s) URL")
+        return v
 
 
 class RatingReviewResponse(RatingReviewBase):

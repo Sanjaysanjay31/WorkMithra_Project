@@ -9,14 +9,15 @@ export type AvailabilitySlot = {
   is_available: boolean;
 };
 
+/**
+ * Fetch a worker's weekly slots. Throws on network/HTTP failure so screens
+ * can distinguish "load failed" from "no slots saved yet" — silently
+ * returning [] made a failed load look like every day was switched off.
+ */
 export async function listAvailability(workerId: number): Promise<AvailabilitySlot[]> {
-  try {
-    const res = await authFetch(`/availability/?worker_id=${workerId}`);
-    if (!res.ok) return [];
-    return await res.json();
-  } catch {
-    return [];
-  }
+  const res = await authFetch(`/availability/?worker_id=${workerId}`);
+  if (!res.ok) throw new Error(`Server responded with ${res.status}`);
+  return await res.json();
 }
 
 export async function upsertAvailability(slot: {

@@ -48,6 +48,18 @@ def _pseudonym(name: Optional[str]) -> Optional[str]:
     return f"{parts[0]} {parts[-1][0]}."
 
 
+def _parse_review_images(raw: Optional[str]) -> List[str]:
+    """The review_images column stores a JSON array of URLs. Corrupt/legacy
+    values degrade to an empty list instead of breaking the response."""
+    if not raw:
+        return []
+    try:
+        parsed = _json.loads(raw)
+    except Exception:
+        return []
+    return [str(u) for u in parsed] if isinstance(parsed, list) else []
+
+
 def _to_dict(r: models.RatingReview, user_name: Optional[str]) -> Dict[str, Any]:
     return {
         "id": r.id,
@@ -57,6 +69,8 @@ def _to_dict(r: models.RatingReview, user_name: Optional[str]) -> Dict[str, Any]
         "worker_id": r.worker_id,
         "rating": float(r.rating) if r.rating is not None else 0.0,
         "review_text": r.review_text,
+        "review_image": r.review_image,
+        "review_images": _parse_review_images(r.review_images),
         "created_at": r.created_at.isoformat() if r.created_at else None,
     }
 
@@ -113,6 +127,23 @@ def create_review(
         raise HTTPException(status_code=400, detail="worker_id is required")
     if payload.rating is None or payload.rating < 1 or payload.rating > 5:
         raise HTTPException(status_code=400, detail="rating must be between 1 and 5")
+    # Images are optional URLs (uploaded beforehand via /upload-review-image).
+    # Only accept http(s) so a reviewer can't stash arbitrary payloads here.
+    review_image = (payload.review_image or "").strip() or None
+    if review_image is not None and not review_image.lower().startswith(("http://", "https://")):
+        raise HTTPException(status_code=400, detail="review_image must be an http(s) URL")
+    # Up to FIVE photos per review. The schema already caps the array (422),
+    # but validate again here for a clean 400 and defense against schema drift.
+    image_urls = [u.strip() for u in (payload.review_images or []) if u and u.strip()]
+    if len(image_urls) > 5:
+        raise HTTPException(status_code=400, detail="A review can include at most 5 images")
+    for u in image_urls:
+        if not u.lower().startswith(("http://", "https://")):
+            raise HTTPException(status_code=400, detail="Each review image must be an http(s) URL")
+    # Backward compatibility: single-image readers (older app builds) only
+    # look at review_image — keep it pointing at the first photo.
+    if not review_image and image_urls:
+        review_image = image_urls[0]
     # Reviews are written by clients about workers. A worker token must not be
     # able to create (or collide with) reviews via a same-numbered user id.
     if current.get("role", "user") != "user":
@@ -155,6 +186,8 @@ def create_review(
         worker_id=payload.worker_id,
         rating=float(payload.rating),
         review_text=payload.review_text,
+        review_image=review_image,
+        review_images=_json.dumps(image_urls) if image_urls else None,
         created_at=datetime.utcnow(),
     )
     db.add(review)

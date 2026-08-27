@@ -87,9 +87,11 @@ export function initializeSocket(userId: number): Socket {
       console.error('Socket authentication error:', data);
     });
 
-    // Handle connection errors
+    // Handle connection errors. These are EXPECTED transiently (server cold
+    // start, network switch, airplane mode) — reconnection is automatic and
+    // unlimited, so log at warn level instead of spamming ERROR.
     socket.on('connect_error', (error) => {
-      console.error('Socket connection error:', error);
+      console.warn('[workmithra] socket connect_error (will retry):', error?.message || error);
     });
 
     // Handle general errors
@@ -186,7 +188,9 @@ export function onMessageReceived(
   callback: (data: {
     id: number;
     sender_id: number;
+    sender_role?: 'user' | 'worker';
     receiver_id: number;
+    receiver_role?: 'user' | 'worker';
     message: string;
     booking_id?: number;
     sent_at: string;
