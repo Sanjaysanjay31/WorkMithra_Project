@@ -245,10 +245,18 @@ def get_worker_reviews(
     db: Session = Depends(database.get_db),
     current: Dict[str, Any] = Depends(get_current_user),
 ):
-    """Get reviews for a worker (authenticated read), latest first."""
+    """Get reviews RECEIVED BY a worker (authenticated read), latest first.
+    Worker-written reviews about clients share worker_id but are excluded."""
+    from sqlalchemy import or_
     reviews = (
         db.query(models.RatingReview)
-        .filter(models.RatingReview.worker_id == worker_id)
+        .filter(
+            models.RatingReview.worker_id == worker_id,
+            or_(
+                models.RatingReview.reviewer_role == "user",
+                models.RatingReview.reviewer_role.is_(None),
+            ),
+        )
         .order_by(models.RatingReview.created_at.desc(), models.RatingReview.id.desc())
         .offset(skip)
         .limit(limit)

@@ -6,13 +6,16 @@ import { pickImageNative, pickImageWeb } from '@/lib/image-picker';
 import { unregisterPush } from '@/lib/push';
 import { disconnectSocket } from '@/lib/socket';
 import { clearAllWorkMitraStorage, storage } from '@/lib/storage';
+import { ReviewResponse } from '@/lib/types';
 import { Ionicons } from '@expo/vector-icons';
 import { Stack, useRouter } from 'expo-router';
 import React, { useEffect, useState } from 'react';
 import {
     ActivityIndicator,
     Alert,
+    Image,
     KeyboardAvoidingView,
+    Modal,
     Platform,
     ScrollView,
     StyleSheet,
@@ -32,6 +35,16 @@ type ProfileForm = {
   location: string;
   pincode: string;
   profile_image?: string;
+};
+
+/** Review a worker wrote about this client (shown on the profile). */
+type ReceivedReview = {
+  id: string | number;
+  name: string;
+  rating: number;
+  date: string;
+  text: string;
+  images?: string[];
 };
 
 const EMPTY: ProfileForm = {
@@ -54,7 +67,43 @@ export default function ProfilePage() {
   const [pwdLoading, setPwdLoading] = useState(false);
   const [currentUserId, setCurrentUserId] = useState('');
 
+  // Reviews this client RECEIVED from workers — the mirror of the review
+  // list a worker sees on their dashboard.
+  const [reviews, setReviews] = useState<ReceivedReview[]>([]);
+  // Full-screen viewer for review photos.
+  const [viewImage, setViewImage] = useState<string | null>(null);
+  // Details vs Reviews tabs — keeps a long review history from turning the
+  // profile into one endless scroll.
+  const [tab, setTab] = useState<'details' | 'reviews' | 'settings'>('details');
+
   useEffect(() => { load(); }, []);
+
+  async function loadReviews(uid: string) {
+    if (!uid) return;
+    try {
+      const res = await authFetch(`/reviews/?user_id=${uid}`);
+      if (!res.ok) return;
+      const data: ReviewResponse[] = await res.json();
+      setReviews(
+        data.map((r) => ({
+          id: r.id,
+          // user_name carries the REVIEWER's display name — the worker.
+          name: r.user_name || 'Worker',
+          rating: Number(r.rating) || 0,
+          date: r.created_at ? String(r.created_at).split('T')[0] : '',
+          text: r.review_text || '',
+          images:
+            r.review_images && r.review_images.length > 0
+              ? r.review_images
+              : r.review_image
+                ? [r.review_image]
+                : undefined,
+        })),
+      );
+    } catch (e) {
+      console.warn('Failed to load received reviews', e);
+    }
+  }
 
   async function load() {
     let uid = '';
@@ -82,6 +131,9 @@ export default function ProfilePage() {
     } catch {}
 
     if (!uid) return;
+    // Reviews from workers load alongside the profile (independent request —
+    // a failure there must not block the profile form).
+    void loadReviews(uid);
     try {
       const res = await authFetch(`/profiles/user/${uid}`);
       if (!res.ok) return;
@@ -212,8 +264,6 @@ export default function ProfilePage() {
       <Stack.Screen options={{ headerShown: false }} />
       <View style={styles.frame}>
         <KeyboardAvoidingView style={styles.kav} behavior="padding">
-        <ScrollView contentContainerStyle={{ paddingBottom: 100 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
-
           {/* Avatar header */}
           <View style={styles.headerBg}>
             <View style={styles.avatarWrap}>
@@ -230,6 +280,25 @@ export default function ProfilePage() {
             <Text style={styles.headerSub}>{profile.email || profile.phone || 'Add your details below'}</Text>
           </View>
 
+          {/* Details / Reviews switch — keeps a long review history from
+              turning the profile into one endless scroll. */}
+          <View style={styles.tabRow}>
+            <TouchableOpacity style={[styles.tab, tab === 'details' && styles.tabActive]} onPress={() => setTab('details')}>
+              <Text style={[styles.tabText, tab === 'details' && styles.tabTextActive]}>My Details</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={[styles.tab, tab === 'reviews' && styles.tabActive]} onPress={() => setTab('reviews')}>
+              <Text style={[styles.tabText, tab === 'reviews' && styles.tabTextActive]}>
+                My Reviews{reviews.length > 0 ? ` (${reviews.length})` : ''}
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={[styles.tab, tab === 'settings' && styles.tabActive]} onPress={() => setTab('settings')}>
+              <Text style={[styles.tabText, tab === 'settings' && styles.tabTextActive]}>Settings</Text>
+            </TouchableOpacity>
+          </View>
+
+          <ScrollView contentContainerStyle={{ paddingBottom: 100 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+            {tab === 'details' && (
+              <>
           {/* Editable form */}
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>My Details</Text>
@@ -250,7 +319,57 @@ export default function ProfilePage() {
               )}
             </TouchableOpacity>
           </View>
+              </>
+            )}
 
+            {tab === 'reviews' && (
+              // Reviews received from workers — the client's side of the review
+              // system (workers see the mirror list on their dashboard).
+              <View style={styles.section}>
+            <Text style={styles.sectionTitle}>
+              My Reviews{reviews.length > 0 ? ` (${reviews.length})` : ''}
+            </Text>
+            {reviews.length === 0 ? (
+              <View style={styles.reviewsEmpty}>
+                <Ionicons name="star-outline" size={18} color="#999" />
+                <Text style={styles.reviewsEmptyText}>
+                  No reviews yet — workers can review you after a completed job.
+                </Text>
+              </View>
+            ) : (
+              <>
+                <View style={styles.reviewsSummary}>
+                  <Ionicons name="star" size={16} color="#FFB800" />
+                  <Text style={styles.reviewsSummaryText}>
+                    {(reviews.reduce((s, r) => s + r.rating, 0) / reviews.length).toFixed(1)} average from {reviews.length} {reviews.length === 1 ? 'worker' : 'workers'}
+                  </Text>
+                </View>
+                {reviews.map((r) => (
+                  <View key={r.id} style={styles.reviewCard}>
+                    <View style={styles.reviewHeader}>
+                      <Text style={styles.reviewName}>{r.name}</Text>
+                      <Text style={styles.reviewRating}>⭐ {r.rating.toFixed(1)}</Text>
+                    </View>
+                    <Text style={styles.reviewDate}>{r.date}</Text>
+                    {r.text ? <Text style={styles.reviewText}>&quot;{r.text}&quot;</Text> : null}
+                    {r.images && r.images.length > 0 && (
+                      <View style={styles.reviewImageRow}>
+                        {r.images.map((img, i) => (
+                          <TouchableOpacity key={`${img}-${i}`} activeOpacity={0.8} onPress={() => setViewImage(img)}>
+                            <Image source={{ uri: img }} style={styles.reviewThumb} resizeMode="cover" />
+                          </TouchableOpacity>
+                        ))}
+                      </View>
+                    )}
+                  </View>
+                ))}
+              </>
+            )}
+          </View>
+            )}
+
+            {tab === 'settings' && (
+              <>
           {/* Switch Role + Logout */}
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>Account Settings</Text>
@@ -368,8 +487,24 @@ export default function ProfilePage() {
               </View>
             )}
           </View>
+              </>
+            )}
         </ScrollView>
         </KeyboardAvoidingView>
+
+        {/* Full-screen viewer for review photos. */}
+        <Modal visible={!!viewImage} transparent animationType="fade" onRequestClose={() => setViewImage(null)}>
+          <TouchableOpacity style={styles.imageModalBackdrop} activeOpacity={1} onPress={() => setViewImage(null)}>
+            {viewImage ? (
+              <Image source={{ uri: viewImage }} style={styles.imageModalImg} resizeMode="contain" />
+            ) : null}
+            <View style={styles.imageModalCloseRow}>
+              <TouchableOpacity style={styles.imageModalClose} onPress={() => setViewImage(null)}>
+                <Ionicons name="close" size={22} color="#fff" />
+              </TouchableOpacity>
+            </View>
+          </TouchableOpacity>
+        </Modal>
       </View>
       <BottomNav currentRoute="profile" />
     </View>
@@ -419,6 +554,12 @@ const styles = StyleSheet.create({
   headerName: { fontSize: 16, fontWeight: '800', color: '#fff', marginTop: 4 },
   headerSub: { fontSize: 12, color: '#e9d5ff', marginTop: 2 },
 
+  tabRow: { flexDirection: 'row', backgroundColor: '#fff', borderBottomWidth: 1, borderBottomColor: '#e9ecef' },
+  tab: { flex: 1, paddingVertical: 10, alignItems: 'center', borderBottomWidth: 2, borderBottomColor: 'transparent' },
+  tabActive: { borderBottomColor: '#6F42C1' },
+  tabText: { fontSize: 12, fontWeight: '700', color: '#999' },
+  tabTextActive: { color: '#6F42C1' },
+
   section: { paddingHorizontal: 16, paddingTop: 16 },
   sectionTitle: { fontSize: 13, fontWeight: '800', color: '#333', marginBottom: 10 },
 
@@ -438,4 +579,22 @@ const styles = StyleSheet.create({
   pwdTitle: { fontSize: 13, fontWeight: '800', color: '#333' },
   pwdSub: { fontSize: 11, color: '#666', marginTop: 1 },
   pwdForm: { backgroundColor: '#fafafa', borderRadius: 10, padding: 10, borderWidth: 1, borderColor: '#eee' },
+
+  // --- reviews received from workers ---
+  reviewsEmpty: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#fafafa', borderRadius: 10, padding: 12, borderWidth: 1, borderColor: '#eee' },
+  reviewsEmptyText: { fontSize: 12, color: '#999', fontStyle: 'italic', flex: 1 },
+  reviewsSummary: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#fffbeb', borderRadius: 10, padding: 10, marginBottom: 10, borderWidth: 1, borderColor: '#fde68a' },
+  reviewsSummaryText: { fontSize: 12, fontWeight: '800', color: '#92400e' },
+  reviewCard: { backgroundColor: '#fafafa', padding: 12, borderRadius: 12, marginBottom: 10, borderWidth: 1, borderColor: '#eee' },
+  reviewHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  reviewName: { fontSize: 13, fontWeight: '800', color: '#333' },
+  reviewRating: { fontSize: 12, fontWeight: '800', color: '#FFB800' },
+  reviewDate: { fontSize: 11, color: '#999', marginTop: 2 },
+  reviewText: { fontSize: 12, color: '#444', lineHeight: 18, marginTop: 6, fontStyle: 'italic' },
+  reviewImageRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 8 },
+  reviewThumb: { width: 60, height: 60, borderRadius: 8, backgroundColor: '#eee' },
+  imageModalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.9)', justifyContent: 'center', alignItems: 'center' },
+  imageModalImg: { width: '92%', height: '75%' },
+  imageModalCloseRow: { position: 'absolute', top: 0, left: 0, right: 0, alignItems: 'flex-end', padding: 16 },
+  imageModalClose: { backgroundColor: 'rgba(255,255,255,0.2)', borderRadius: 20, padding: 8 },
 });

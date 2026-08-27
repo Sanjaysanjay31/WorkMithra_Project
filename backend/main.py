@@ -91,6 +91,30 @@ try:
 except Exception as _e:
     print("column migration skipped:", _e)
 
+# Reviews became BIDIRECTIONAL (clients review workers AND workers review
+# clients), so each side gets one review per booking: the old UNIQUE(booking_id)
+# constraint is replaced by UNIQUE(booking_id, reviewer_role). Each step runs
+# in its own transaction so one dialect's failure doesn't skip the rest.
+_REVIEW_ROLE_DDL = (
+    # Existing rows are all client-written reviews.
+    "ALTER TABLE ratings_reviews ADD COLUMN IF NOT EXISTS reviewer_role VARCHAR(10) NOT NULL DEFAULT 'user'",
+    # Postgres: drop the old constraint (its backing index goes with it).
+    "ALTER TABLE ratings_reviews DROP CONSTRAINT IF EXISTS uq_ratings_reviews_booking_id",
+    # SQLite: a lone unique index of that name (fresh test/dev databases).
+    "DROP INDEX IF EXISTS uq_ratings_reviews_booking_id",
+    # One review per booking per direction.
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_ratings_reviews_booking_role ON ratings_reviews (booking_id, reviewer_role)",
+)
+for _ddl in _REVIEW_ROLE_DDL:
+    try:
+        with engine.begin() as _conn:
+            from sqlalchemy import text as _sql_text
+            _conn.execute(_sql_text(_ddl))
+    except Exception as _e:
+        # Expected per-dialect no-ops (e.g. DROP CONSTRAINT on SQLite) land
+        # here too — log and continue rather than aborting startup.
+        print("review-role migration step skipped:", _ddl[:60], "->", _e)
+
 # One-time cleanup: drop the old assistant_* tables (no longer used).
 try:
     with engine.begin() as _conn:

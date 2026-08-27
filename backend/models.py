@@ -200,9 +200,13 @@ class Payment(Base):
 class RatingReview(Base):
     __tablename__ = "ratings_reviews"
     __table_args__ = (
-        # One review per booking — enforced at the DB level so concurrent
-        # duplicate submissions can't both pass the check-then-insert.
-        UniqueConstraint("booking_id", name="uq_ratings_reviews_booking_id"),
+        # One review per booking PER DIRECTION — clients review workers and
+        # workers review clients for the same completed job, so the uniqueness
+        # must include the reviewer's side. Enforced at the DB level so
+        # concurrent duplicate submissions can't both pass check-then-insert.
+        # (Startup DDL migrates existing databases from the old
+        # booking_id-only constraint to this one.)
+        UniqueConstraint("booking_id", "reviewer_role", name="uq_ratings_reviews_booking_role"),
         Index("ix_ratings_reviews_worker", "worker_id"),
         Index("ix_ratings_reviews_user", "user_id"),
     )
@@ -222,6 +226,14 @@ class RatingReview(Base):
     booking_id = Column(Integer, ForeignKey("bookings.id"), nullable=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     worker_id = Column(Integer, ForeignKey("workers.id"), nullable=True)
+    # Which side WROTE the review: 'user' (client reviewed the worker — the
+    # original direction, and the default for all legacy rows) or 'worker'
+    # (worker reviewed the client). user_id/worker_id always point at the
+    # client and the worker respectively; reviewer_role says who is the
+    # reviewer and who is being reviewed:
+    #   reviewer_role='user'   -> user_id is the reviewer, worker_id reviewed
+    #   reviewer_role='worker' -> worker_id is the reviewer, user_id reviewed
+    reviewer_role = Column(String(10), nullable=False, default="user", server_default="user")
 
     booking = relationship("Booking", back_populates="reviews")
     user = relationship("User", back_populates="reviews")

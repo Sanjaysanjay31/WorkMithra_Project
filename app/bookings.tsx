@@ -7,7 +7,7 @@ import { formatBookingDateTime, isBookingDateTimePast } from '@/lib/format';
 import { platformShadow } from '@/lib/shadow';
 import { storage } from '@/lib/storage';
 import { ensureSocket, onBookingStatusChanged } from '@/lib/socket';
-import { BookingResponse, WorkerBrief } from '@/lib/types';
+import { BookingResponse, ReviewResponse, WorkerBrief } from '@/lib/types';
 import { Ionicons } from '@expo/vector-icons';
 import { Stack, useFocusEffect, useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
@@ -86,6 +86,9 @@ export default function BookingsPage() {
 
   const [present, setPresent] = useState<Booking[]>([]);
   const [past, setPast] = useState<Booking[]>([]);
+  // Booking ids this client has ALREADY reviewed — the Past tab swaps the
+  // "Rate worker" button for "View my rating" on those jobs.
+  const [reviewedBookings, setReviewedBookings] = useState<Set<string>>(new Set());
   const [priceFor, setPriceFor] = useState<Booking | null>(null);
   const [priceAmount, setPriceAmount] = useState('');
   // Session id kept in a ref so the realtime handler below can scope
@@ -154,7 +157,7 @@ export default function BookingsPage() {
                 [
                   {
                     text: 'Review now',
-                    onPress: () => router.push({ pathname: '/worker_info', params: { id: String(b.worker.id), tab: 'reviews' } }),
+                    onPress: () => router.push({ pathname: '/worker_info', params: { id: String(b.worker.id), tab: 'reviews', booking: b.id } }),
                   },
                   { text: 'Later' },
                 ],
@@ -262,6 +265,19 @@ export default function BookingsPage() {
 
       setPresent(realPresent);
       setPast(realPast);
+
+      // Reviews THIS client wrote — a completed booking that already has one
+      // shows "View my rating" instead of "Rate worker". Failure here only
+      // costs the button label, so it must not fail the bookings load.
+      try {
+        const myReviews: ReviewResponse[] = await expectJson(
+          await authFetch('/reviews/?mine=true'),
+          'Could not load your reviews',
+        );
+        setReviewedBookings(
+          new Set(myReviews.map((r) => (r.booking_id != null ? String(r.booking_id) : '')).filter(Boolean)),
+        );
+      } catch {}
     } catch (e: any) {
       console.warn('Failed to fetch bookings', e);
       setLoadError(e?.message || 'Could not load your bookings.');
@@ -435,10 +451,10 @@ export default function BookingsPage() {
             <TouchableOpacity
               style={styles.rateBtn}
               activeOpacity={0.8}
-              onPress={(e) => { e.stopPropagation?.(); router.push({ pathname: '/worker_info', params: { id: String(b.worker.id), tab: 'reviews' } }); }}
+              onPress={(e) => { e.stopPropagation?.(); router.push({ pathname: '/worker_info', params: { id: String(b.worker.id), tab: 'reviews', booking: b.id } }); }}
             >
-              <Ionicons name="star" size={15} color="#FFB800" />
-              <Text style={styles.rateText}>Rate worker</Text>
+              <Ionicons name={reviewedBookings.has(b.id) ? 'eye-outline' : 'star'} size={15} color="#FFB800" />
+              <Text style={styles.rateText}>{reviewedBookings.has(b.id) ? 'View my rating' : 'Rate worker'}</Text>
             </TouchableOpacity>
           )}
         </View>

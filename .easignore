@@ -1,0 +1,76 @@
+# EAS Build upload filter.
+# When this file exists, EAS ignores ALL .gitignore files for the build upload
+# and uses only this one — keep it in sync with .gitignore.
+#
+# Deliberate difference from .gitignore: google-services.json is NOT ignored
+# here. The Android build needs it, and it is safe to ship to the builder:
+# it is client-only Firebase config that ends up inside every APK anyway.
+# It still stays out of git (see .gitignore). Real secrets (FCM service
+# account key, .env files) are excluded below and from git.
+
+# dependencies
+node_modules/
+
+# Expo
+.expo/
+dist/
+web-build/
+expo-env.d.ts
+
+# Native
+.kotlin/
+*.orig.*
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+
+# Metro
+.metro-health-check*
+
+# debug
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+
+# macOS
+.DS_Store
+*.pem
+
+# local env files
+.env
+.env*.local
+
+# typescript
+*.tsbuildinfo
+
+app-example
+
+# generated native folders
+/ios
+/android
+
+# Backend (FastAPI + Python venv + .env) — not needed for the Android build
+backend/
+
+# Firebase secrets (google-services.json is intentionally allowed, see above)
+GoogleService-Info.plist
+*fcm-service-account*.json
+*firebase-adminsdk*.json
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+venv/
+.venv/
+env/
+*.egg-info/
+
+# IDE
+.idea/
+.vscode/
+
+# ZCode session artifacts
+.zcode/

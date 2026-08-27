@@ -48,6 +48,14 @@ backend/.env
 # Frontend API keys
 .env
 
+# Firebase / push (contains project keys — never commit)
+# google-services.json is committed-safe client config, but kept out of git;
+# it is allowed in EAS uploads via .easignore.
+google-services.json
+GoogleService-Info.plist
+*fcm-service-account*.json
+*firebase-adminsdk*.json
+
 # Python
 __pycache__/
 *.py[cod]

@@ -7,7 +7,7 @@ import { disconnectSocket, ensureSocket } from '@/lib/socket';
 import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native';
 import { Stack, usePathname, useRouter } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { Platform, StyleSheet, View } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import 'react-native-reanimated';
@@ -33,6 +33,39 @@ export const unstable_settings = {
 
 const FRAME_WIDTH = 390;
 const FRAME_HEIGHT = 803;
+
+/**
+ * Height (px) currently hidden behind the browser's on-screen keyboard.
+ *
+ * On mobile browsers the software keyboard covers the bottom of the page
+ * without resizing the layout viewport, so a fixed-height phone frame leaves
+ * the chat composer / assistant input merged with the keyboard. The
+ * visualViewport API reports the still-visible area; the difference is the
+ * keyboard height. Always 0 on native (the OS resize mode handles it there)
+ * and on desktop browsers (no on-screen keyboard).
+ */
+function useWebKeyboardHeight(): number {
+  const [keyboardHeight, setKeyboardHeight] = useState(0);
+  useEffect(() => {
+    if (Platform.OS !== 'web' || typeof window === 'undefined') return;
+    const vv: any = (window as any).visualViewport;
+    if (!vv) return;
+    const update = () => {
+      const overlap = window.innerHeight - vv.height - (vv.offsetTop || 0);
+      setKeyboardHeight(Math.max(0, Math.round(overlap)));
+    };
+    vv.addEventListener('resize', update);
+    vv.addEventListener('scroll', update);
+    window.addEventListener('resize', update);
+    update();
+    return () => {
+      vv.removeEventListener('resize', update);
+      vv.removeEventListener('scroll', update);
+      window.removeEventListener('resize', update);
+    };
+  }, []);
+  return keyboardHeight;
+}
 
 // Routes reachable without a session. Everything else requires login.
 const PUBLIC_ROUTES = new Set([
@@ -70,6 +103,21 @@ export default function RootLayout() {
   const colorScheme = useColorScheme();
   const pathname = usePathname();
   const router = useRouter();
+  // Shrink the web phone frame by the keyboard height so the composer/input
+  // row of the open screen stays visible above the keyboard instead of
+  // merging with it (mobile browsers cover the page bottom without resizing
+  // the layout viewport).
+  const keyboardHeight = useWebKeyboardHeight();
+  const [windowHeight, setWindowHeight] = useState(() =>
+    Platform.OS === 'web' && typeof window !== 'undefined' ? window.innerHeight : FRAME_HEIGHT,
+  );
+  useEffect(() => {
+    if (Platform.OS !== 'web' || typeof window === 'undefined') return;
+    const onResize = () => setWindowHeight(window.innerHeight);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+  const webFrameHeight = Math.max(240, Math.min(FRAME_HEIGHT, windowHeight - keyboardHeight));
 
   // Realtime channel: connect + authenticate once a session exists. No-op when
   // logged out; screens receive booking/chat events without polling.
@@ -155,8 +203,8 @@ export default function RootLayout() {
     <SafeAreaProvider>
       <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
         {Platform.OS === 'web' ? (
-          <View style={styles.webBackdrop}>
-            <View style={styles.webFrame}>
+          <View style={[styles.webBackdrop, keyboardHeight > 0 && styles.webBackdropKeyboard]}>
+            <View style={[styles.webFrame, { height: webFrameHeight }]}>
               {stack}
               <AIAssistant />
             </View>
@@ -182,9 +230,13 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  // Keyboard open: the visible area is the TOP of the viewport, so pin the
+  // (now shorter) frame to the top instead of centering it out of view.
+  webBackdropKeyboard: {
+    justifyContent: 'flex-start',
+  },
   webFrame: {
     width: FRAME_WIDTH,
-    height: FRAME_HEIGHT,
     maxWidth: '100%',
     maxHeight: '100%',
     backgroundColor: '#fff',

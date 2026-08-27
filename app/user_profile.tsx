@@ -1,9 +1,11 @@
 import Avatar from '@/components/avatar';
 import BottomNav from '@/components/bottom-nav';
-import { authFetch } from '@/lib/api';
+import { authFetch, readApiError } from '@/lib/api';
 import { normalizeBookingStatus } from '@/lib/booking-status';
+import { pickImageNative, pickImageWeb } from '@/lib/image-picker';
 import { platformShadow } from '@/lib/shadow';
-import { BookingResponse, UserProfileResponse } from '@/lib/types';
+import { storage } from '@/lib/storage';
+import { BookingResponse, ReviewResponse, UserProfileResponse } from '@/lib/types';
 import { Ionicons } from '@expo/vector-icons';
 import * as Location from 'expo-location';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
@@ -11,17 +13,23 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
     ActivityIndicator,
     Alert,
+    Image,
     Linking,
+    Modal,
     Platform,
     ScrollView,
     StyleSheet,
     Text,
+    TextInput,
     TouchableOpacity,
     View
 } from 'react-native';
 import { WebView } from 'react-native-webview';
 
-type Tab = 'profile' | 'chat' | 'map' | 'requests';
+type Tab = 'profile' | 'chat' | 'map' | 'requests' | 'reviews';
+
+// Maximum photos attachable to one review (enforced by the backend too).
+const MAX_REVIEW_PHOTOS = 5;
 
 type ClientProfile = {
   id: string;
@@ -77,17 +85,183 @@ function statusColor(s: RequestItem['status']) {
 
 export default function UserProfilePage() {
   const router = useRouter();
-  const { clientId, clientName } = useLocalSearchParams<{ clientId?: string; clientName?: string }>();
-  const [tab, setTab] = useState<Tab>('profile');
+  const { clientId, clientName, tab: tabParam, bookingId: bookingParam } = useLocalSearchParams<{ clientId?: string; clientName?: string; tab?: string; bookingId?: string }>();
+  // Callers can deep-link to a tab (e.g. the requests screen's "Review
+  // client" opens straight onto the review form): /user_profile?clientId=5&tab=reviews
+  const initialTab: Tab = (['profile', 'chat', 'map', 'requests', 'reviews'] as Tab[]).includes(tabParam as Tab)
+    ? (tabParam as Tab)
+    : 'profile';
+  const [tab, setTab] = useState<Tab>(initialTab);
   const [client, setClient] = useState<ClientProfile | null>(null);
   const [requests, setRequests] = useState<RequestItem[]>([]);
   const [workerLoc, setWorkerLoc] = useState<{ lat: number; lng: number } | null>(null);
   const [locUnavailable, setLocUnavailable] = useState(false);
 
+  // Review state — reviews the client RECEIVED (worker-written) plus the
+  // form this worker uses to add their own after a completed job.
+  type ReviewItem = { id: string | number; workerId?: string; bookingId?: string; name: string; rating: number; date: string; text: string; images?: string[] };
+  const [reviews, setReviews] = useState<ReviewItem[]>([]);
+  // The logged-in worker's id — used to pick their own reviews out of the
+  // list (one per completed booking) and show them as read-only cards.
+  const [myWid, setMyWid] = useState('');
+  // The booking whose review form is currently open (one form at a time).
+  const [reviewingBookingId, setReviewingBookingId] = useState('');
+  const [feedbackText, setFeedbackText] = useState('');
+  const [feedbackRating, setFeedbackRating] = useState(5);
+  const [feedbackImages, setFeedbackImages] = useState<{ url: string; preview: string }[]>([]);
+  const [uploadingImage, setUploadingImage] = useState(false);
+  const [submittingReview, setSubmittingReview] = useState(false);
+  // Full-screen viewer for review photos.
+  const [viewImage, setViewImage] = useState<string | null>(null);
+
+  async function loadReviews() {
+    const cid = String(clientId || '');
+    if (!cid) return;
+    try {
+      const res = await authFetch(`/reviews/?user_id=${cid}`);
+      if (!res.ok) return;
+      const data: ReviewResponse[] = await res.json();
+      setReviews(
+        data.map((r) => ({
+          id: r.id,
+          // worker_id carries the REVIEWER's id for worker-written reviews —
+          // used below to spot this worker's own review.
+          workerId: r.worker_id != null ? String(r.worker_id) : undefined,
+          bookingId: r.booking_id != null ? String(r.booking_id) : undefined,
+          // user_name carries the REVIEWER's display name — for client
+          // reviews that's the worker who wrote it.
+          name: r.user_name || 'Worker',
+          rating: Number(r.rating) || 0,
+          date: r.created_at ? String(r.created_at).split('T')[0] : '',
+          text: r.review_text || '',
+          // Prefer the multi-image array; older reviews only carry the
+          // single legacy review_image.
+          images:
+            r.review_images && r.review_images.length > 0
+              ? r.review_images
+              : r.review_image
+                ? [r.review_image]
+                : undefined,
+        })),
+      );
+    } catch {}
+  }
+
+  /** Pick a photo and upload it; the returned URL joins the attached set. */
+  async function attachReviewImage() {
+    if (uploadingImage) return;
+    if (feedbackImages.length >= MAX_REVIEW_PHOTOS) {
+      Alert.alert('Photo limit', `You can attach up to ${MAX_REVIEW_PHOTOS} photos per review.`);
+      return;
+    }
+    setUploadingImage(true);
+    try {
+      const fd = new FormData();
+      let preview = '';
+      if (Platform.OS === 'web') {
+        const file = await pickImageWeb();
+        if (!file) { setUploadingImage(false); return; }
+        fd.append('file', file);
+        preview = URL.createObjectURL(file);
+      } else {
+        const asset = await pickImageNative();
+        if (!asset) { setUploadingImage(false); return; }
+        const name = asset.fileName || asset.uri.split('/').pop() || 'photo.jpg';
+        const ext = (name.split('.').pop() || 'jpg').toLowerCase();
+        const mime = asset.mimeType || (ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg');
+        // @ts-ignore RN FormData file shape
+        fd.append('file', { uri: asset.uri, name, type: mime });
+        preview = asset.uri;
+      }
+      const res = await authFetch('/upload-review-image', { method: 'POST', body: fd });
+      if (!res.ok) throw new Error(await readApiError(res, 'Upload failed'));
+      const data = await res.json();
+      setFeedbackImages((imgs) => [...imgs, { url: data.url, preview }]);
+    } catch (e: any) {
+      Alert.alert('Upload failed', e?.message || 'Could not upload the photo');
+    } finally {
+      setUploadingImage(false);
+    }
+  }
+
+  function removeReviewImage(index: number) {
+    setFeedbackImages((imgs) => imgs.filter((_, i) => i !== index));
+  }
+
+  async function handleSubmitFeedback(bookingId: string) {
+    if (!bookingId) {
+      Alert.alert('Submit failed', 'Missing booking — reopen the review form and try again.');
+      return;
+    }
+    if (!feedbackText.trim()) {
+      Alert.alert('Review', 'Please write something before submitting.');
+      return;
+    }
+    if (uploadingImage) {
+      Alert.alert('Photo still uploading', 'Wait for the photo upload to finish, or remove it.');
+      return;
+    }
+    const cid = Number(clientId);
+    if (!cid || Number.isNaN(cid)) {
+      Alert.alert('Submit failed', 'Invalid client id.');
+      return;
+    }
+    if (submittingReview) return;
+    setSubmittingReview(true);
+    const urls = feedbackImages.map((p) => p.url);
+    try {
+      const res = await authFetch('/reviews/', {
+        method: 'POST',
+        json: {
+          // Worker reviewing a CLIENT — user_id is the reviewed client; the
+          // backend verifies a completed booking between the pair.
+          user_id: cid,
+          // Pin the review to THIS booking — each completed job gets its own
+          // review (the backend enforces one review per booking per side).
+          booking_id: Number(bookingId),
+          rating: feedbackRating,
+          review_text: feedbackText,
+          review_image: urls[0],
+          review_images: urls.length > 0 ? urls : undefined,
+        },
+      });
+      if (!res.ok) {
+        // Surface the backend's reason cleanly (e.g. "You can only review a
+        // client after a completed booking with them").
+        const detail = await readApiError(res, 'Could not submit your review');
+        Alert.alert('Submit failed', detail);
+        return;
+      }
+      setFeedbackText('');
+      setFeedbackRating(5);
+      setFeedbackImages([]);
+      setReviewingBookingId('');
+      await loadReviews();
+      Alert.alert('Success', 'Thank you for your review!');
+    } catch (e: any) {
+      Alert.alert('Submit failed', e?.message || 'Network error');
+    } finally {
+      setSubmittingReview(false);
+    }
+  }
+
   useEffect(() => {
     (async () => {
       const cid = String(clientId || '');
       if (!cid) return;
+
+      // 0. This worker's own id — needed to spot their own review in the
+      // list and swap the form for a read-only "your review" card.
+      try {
+        const authRaw = await storage.get('workmithra:auth');
+        if (authRaw) {
+          const auth = JSON.parse(authRaw);
+          if (auth.id) setMyWid(String(auth.id));
+        }
+      } catch {}
+      // Deep link from the requests screen ("Review client" / "View my
+      // rating") carries the booking — open its review form straight away.
+      if (tabParam === 'reviews' && bookingParam) setReviewingBookingId(String(bookingParam));
 
       // 1. Fetch real client profile from backend
       try {
@@ -147,6 +321,9 @@ export default function UserProfilePage() {
       } catch (e) {
         console.warn('Failed to fetch client requests', e);
       }
+
+      // 3. Reviews this client received from workers.
+      loadReviews();
     })();
   }, [clientId, clientName]);
 
@@ -184,6 +361,24 @@ export default function UserProfilePage() {
     if (!workerLoc || !client?.latitude || !client?.longitude) return null;
     return haversineKm(workerLoc.lat, workerLoc.lng, client.latitude, client.longitude);
   }, [workerLoc, client]);
+
+  // Average of the worker-written reviews this client received — shown as a
+  // badge so a worker can gauge the client before accepting a job.
+  const avgClientRating = useMemo(() => {
+    if (reviews.length === 0) return null;
+    return (reviews.reduce((s, r) => s + r.rating, 0) / reviews.length).toFixed(1);
+  }, [reviews]);
+
+  // The review THIS worker wrote for a specific booking, if any. Reviews are
+  // per booking — the same client can be reviewed once per completed job.
+  function myReviewFor(bookingId?: string) {
+    if (!myWid || !bookingId) return undefined;
+    return reviews.find((r) => r.workerId === myWid && r.bookingId === bookingId);
+  }
+
+  // Completed jobs for this client — each one gets its own review slot
+  // (reviewed = read-only card, otherwise a write form).
+  const completedRequests = requests.filter((r) => r.status === 'completed');
 
   async function updateRequest(id: string, status: RequestItem['status']) {
     // Optimistic update, rolled back if the server rejects the change.
@@ -258,6 +453,12 @@ export default function UserProfilePage() {
           <Text style={styles.heroName}>{client.full_name}</Text>
           <Text style={styles.heroSub}>{client.city || client.location || '—'}{client.joined ? ` · joined ${client.joined}` : ''}</Text>
           <View style={styles.heroBadges}>
+            {avgClientRating && (
+              <View style={styles.badge}>
+                <Ionicons name="star" size={11} color="#FFB800" />
+                <Text style={styles.badgeText}>{avgClientRating}</Text>
+              </View>
+            )}
             <View style={styles.badge}>
               <Ionicons name="briefcase-outline" size={11} color="#6F42C1" />
               <Text style={styles.badgeText}>{requests.length} requests</Text>
@@ -271,7 +472,7 @@ export default function UserProfilePage() {
 
         {/* Tabs */}
         <View style={styles.tabRow}>
-          {(['profile', 'chat', 'map', 'requests'] as Tab[]).map((t) => (
+          {(['profile', 'chat', 'map', 'requests', 'reviews'] as Tab[]).map((t) => (
             <TouchableOpacity key={t} style={[styles.tab, tab === t && styles.tabActive]} onPress={() => setTab(t)}>
               <Text style={[styles.tabText, tab === t && styles.tabTextActive]}>
                 {t.charAt(0).toUpperCase() + t.slice(1)}
@@ -427,7 +628,191 @@ export default function UserProfilePage() {
               })}
             </View>
           )}
+
+          {tab === 'reviews' && (
+            <View>
+              <Text style={styles.sectionTitle}>Your reviews</Text>
+              {completedRequests.length === 0 ? (
+                <View style={styles.noJobsNote}>
+                  <Ionicons name="information-circle-outline" size={16} color="#92400e" />
+                  <Text style={styles.noJobsNoteText}>
+                    You can review {client.full_name.split(' ')[0]} after a completed job — each booking gets its own review.
+                  </Text>
+                </View>
+              ) : (
+                completedRequests.map((req) => {
+                  const my = myReviewFor(req.id);
+                  return my ? (
+                    <View key={req.id} style={styles.feedbackForm}>
+                      <View style={styles.jobReviewHead}>
+                        <Text style={styles.jobReviewDate}>Job on {req.date || '—'} · {req.service}</Text>
+                        <Text style={styles.reviewRating}>⭐ {my.rating.toFixed(1)}</Text>
+                      </View>
+                      <View style={styles.starsRow}>
+                        {[1, 2, 3, 4, 5].map((star) => (
+                          <Ionicons
+                            key={star}
+                            name={star <= my.rating ? 'star' : 'star-outline'}
+                            size={22}
+                            color="#FFB800"
+                          />
+                        ))}
+                      </View>
+                      {my.text ? <Text style={styles.myReviewText}>&quot;{my.text}&quot;</Text> : null}
+                      {my.images && my.images.length > 0 && (
+                        <View style={styles.photoPreviewRow}>
+                          {my.images.map((img, i) => (
+                            <TouchableOpacity key={`${img}-${i}`} activeOpacity={0.8} onPress={() => setViewImage(img)}>
+                              <Image source={{ uri: img }} style={styles.photoThumb} resizeMode="cover" />
+                            </TouchableOpacity>
+                          ))}
+                        </View>
+                      )}
+                      <View style={styles.alreadyReviewedNote}>
+                        <Ionicons name="checkmark-circle" size={14} color="#10b981" />
+                        <Text style={styles.alreadyReviewedText}>You reviewed this booking — one review per job.</Text>
+                      </View>
+                    </View>
+                  ) : (
+                    <View key={req.id} style={styles.feedbackForm}>
+                      <Text style={styles.jobReviewDate}>Job on {req.date || '—'} · {req.service} · not reviewed yet</Text>
+                      {reviewingBookingId === req.id ? (
+                        <>
+                          <View style={styles.starsRow}>
+                            {[1, 2, 3, 4, 5].map((star) => (
+                              <TouchableOpacity key={star} onPress={() => setFeedbackRating(star)} activeOpacity={0.7}>
+                                <Ionicons
+                                  name={star <= feedbackRating ? 'star' : 'star-outline'}
+                                  size={26}
+                                  color="#FFB800"
+                                />
+                              </TouchableOpacity>
+                            ))}
+                            <Text style={styles.ratingLabel}>{feedbackRating}/5</Text>
+                          </View>
+                          <TextInput
+                            style={styles.feedbackInput}
+                            placeholder="Share your experience working with this client..."
+                            placeholderTextColor="#999"
+                            multiline
+                            value={feedbackText}
+                            onChangeText={setFeedbackText}
+                          />
+                          {feedbackImages.length > 0 && (
+                            <View style={styles.photoPreviewRow}>
+                              {feedbackImages.map((p, idx) => (
+                                <View key={`${p.preview}-${idx}`} style={styles.photoThumbWrap}>
+                                  <Image source={{ uri: p.preview }} style={styles.photoThumb} />
+                                  <TouchableOpacity
+                                    onPress={() => removeReviewImage(idx)}
+                                    style={styles.photoRemove}
+                                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                                  >
+                                    <Ionicons name="close-circle" size={20} color="#991b1b" />
+                                  </TouchableOpacity>
+                                </View>
+                              ))}
+                              {uploadingImage && (
+                                <View style={[styles.photoThumbWrap, styles.photoThumbUploading]}>
+                                  <ActivityIndicator size="small" color="#6F42C1" />
+                                </View>
+                              )}
+                            </View>
+                          )}
+                          <TouchableOpacity
+                            style={[styles.attachPhotoBtn, feedbackImages.length >= MAX_REVIEW_PHOTOS && { opacity: 0.5 }]}
+                            onPress={attachReviewImage}
+                            disabled={uploadingImage || feedbackImages.length >= MAX_REVIEW_PHOTOS}
+                            activeOpacity={0.8}
+                          >
+                            {uploadingImage
+                              ? <ActivityIndicator size="small" color="#6F42C1" />
+                              : <Ionicons name="camera-outline" size={16} color="#6F42C1" />}
+                            <Text style={styles.attachPhotoText}>
+                              {feedbackImages.length >= MAX_REVIEW_PHOTOS
+                                ? `${MAX_REVIEW_PHOTOS}/${MAX_REVIEW_PHOTOS} photos — limit reached`
+                                : uploadingImage
+                                  ? 'Uploading…'
+                                  : `Add photos (${feedbackImages.length}/${MAX_REVIEW_PHOTOS})`}
+                            </Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity
+                            style={[styles.submitFeedbackBtn, submittingReview && { opacity: 0.6 }]}
+                            onPress={() => handleSubmitFeedback(req.id)}
+                            disabled={submittingReview}
+                            activeOpacity={0.85}
+                          >
+                            {submittingReview
+                              ? <ActivityIndicator color="#fff" />
+                              : <Ionicons name="send" size={16} color="#fff" />}
+                            <Text style={styles.submitFeedbackText}>Submit Review</Text>
+                          </TouchableOpacity>
+                        </>
+                      ) : (
+                        <TouchableOpacity
+                          style={styles.writeReviewBtn}
+                          activeOpacity={0.85}
+                          onPress={() => {
+                            // One form at a time — reset it when it moves to a
+                            // different booking so nothing leaks across jobs.
+                            setFeedbackText('');
+                            setFeedbackRating(5);
+                            setFeedbackImages([]);
+                            setReviewingBookingId(req.id);
+                          }}
+                        >
+                          <Ionicons name="create-outline" size={16} color="#fff" />
+                          <Text style={styles.writeReviewText}>Write review</Text>
+                        </TouchableOpacity>
+                      )}
+                    </View>
+                  );
+                })
+              )}
+
+              <Text style={[styles.sectionTitle, { marginTop: 18 }]}>
+                What workers say ({reviews.length})
+              </Text>
+              {reviews.length === 0 ? (
+                <Text style={styles.noReviews}>No worker reviews yet</Text>
+              ) : (
+                reviews.map((r) => (
+                  <View key={r.id} style={styles.reviewCard}>
+                    <View style={styles.reviewHeader}>
+                      <Text style={styles.reviewName}>{r.name}</Text>
+                      <Text style={styles.reviewRating}>⭐ {r.rating.toFixed(1)}</Text>
+                    </View>
+                    <Text style={styles.reviewDate}>{r.date}</Text>
+                    {r.text ? <Text style={styles.reviewText}>&quot;{r.text}&quot;</Text> : null}
+                    {r.images && r.images.length > 0 && (
+                      <View style={styles.photoPreviewRow}>
+                        {r.images.map((img, i) => (
+                          <TouchableOpacity key={`${img}-${i}`} activeOpacity={0.8} onPress={() => setViewImage(img)}>
+                            <Image source={{ uri: img }} style={styles.photoThumb} resizeMode="cover" />
+                          </TouchableOpacity>
+                        ))}
+                      </View>
+                    )}
+                  </View>
+                ))
+              )}
+            </View>
+          )}
         </ScrollView>
+
+        {/* Full-screen viewer for review photos. */}
+        <Modal visible={!!viewImage} transparent animationType="fade" onRequestClose={() => setViewImage(null)}>
+          <TouchableOpacity style={styles.imageModalBackdrop} activeOpacity={1} onPress={() => setViewImage(null)}>
+            {viewImage ? (
+              <Image source={{ uri: viewImage }} style={styles.imageModalImg} resizeMode="contain" />
+            ) : null}
+            <View style={styles.imageModalCloseRow}>
+              <TouchableOpacity style={styles.imageModalClose} onPress={() => setViewImage(null)}>
+                <Ionicons name="close" size={22} color="#fff" />
+              </TouchableOpacity>
+            </View>
+          </TouchableOpacity>
+        </Modal>
       </View>
       <BottomNav currentRoute="requests" role="worker" />
     </View>
@@ -518,4 +903,39 @@ const styles = StyleSheet.create({
   reqActions: { flexDirection: 'row', gap: 6 },
   actionBtn: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 8 },
   actionText: { fontSize: 11, color: '#fff', fontWeight: '800' },
+
+  // --- reviews tab (worker reviews the client) ---
+  feedbackForm: { backgroundColor: '#fcfcfc', borderRadius: 12, padding: 14, borderWidth: 1, borderColor: '#eee', marginBottom: 10 },
+  starsRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 12, gap: 4 },
+  ratingLabel: { marginLeft: 8, fontSize: 14, fontWeight: '800', color: '#6F42C1' },
+  feedbackInput: { backgroundColor: '#fff', borderRadius: 10, borderWidth: 1, borderColor: '#e0e0e0', padding: 12, fontSize: 13, minHeight: 80, textAlignVertical: 'top', color: '#333' },
+  attachPhotoBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, marginTop: 10, paddingVertical: 9, borderRadius: 10, borderWidth: 1, borderColor: '#d4c3f2', backgroundColor: '#f5f0fb' },
+  attachPhotoText: { fontSize: 12, fontWeight: '700', color: '#6F42C1' },
+  photoPreviewRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 10 },
+  photoThumbWrap: { width: 60, height: 60 },
+  photoThumb: { width: 60, height: 60, borderRadius: 8, backgroundColor: '#eee' },
+  photoRemove: { position: 'absolute', top: -7, right: -7, backgroundColor: '#fff', borderRadius: 10 },
+  photoThumbUploading: { alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#d4c3f2', borderStyle: 'dashed', borderRadius: 8 },
+  submitFeedbackBtn: { flexDirection: 'row', backgroundColor: '#6F42C1', paddingVertical: 12, borderRadius: 10, alignItems: 'center', justifyContent: 'center', marginTop: 12, gap: 6 },
+  submitFeedbackText: { color: '#fff', fontWeight: '800', fontSize: 14 },
+  noReviews: { fontSize: 12, color: '#999', fontStyle: 'italic', marginTop: 4 },
+  reviewCard: { backgroundColor: '#fafafa', padding: 12, borderRadius: 12, marginBottom: 10, borderWidth: 1, borderColor: '#eee' },
+  reviewHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  reviewName: { fontSize: 13, fontWeight: '800', color: '#333' },
+  reviewRating: { fontSize: 12, fontWeight: '800', color: '#FFB800' },
+  reviewDate: { fontSize: 11, color: '#999', marginTop: 2 },
+  reviewText: { fontSize: 12, color: '#444', lineHeight: 18, marginTop: 6, fontStyle: 'italic' },
+  myReviewText: { fontSize: 13, color: '#333', lineHeight: 19, marginTop: 8, fontStyle: 'italic' },
+  alreadyReviewedNote: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#dcfce7', borderRadius: 8, padding: 8, marginTop: 12, borderWidth: 1, borderColor: '#bbf7d0' },
+  alreadyReviewedText: { flex: 1, fontSize: 11, fontWeight: '700', color: '#166534' },
+  jobReviewHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 },
+  jobReviewDate: { fontSize: 12, fontWeight: '800', color: '#333', marginBottom: 6 },
+  writeReviewBtn: { flexDirection: 'row', backgroundColor: '#6F42C1', paddingVertical: 10, borderRadius: 10, alignItems: 'center', justifyContent: 'center', marginTop: 8, gap: 6 },
+  writeReviewText: { color: '#fff', fontWeight: '800', fontSize: 13 },
+  noJobsNote: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#fffbeb', borderRadius: 10, padding: 10, marginBottom: 10, borderWidth: 1, borderColor: '#fde68a' },
+  noJobsNoteText: { flex: 1, fontSize: 12, color: '#92400e', lineHeight: 17 },
+  imageModalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.9)', justifyContent: 'center', alignItems: 'center' },
+  imageModalImg: { width: '92%', height: '75%' },
+  imageModalCloseRow: { position: 'absolute', top: 0, left: 0, right: 0, alignItems: 'flex-end', padding: 16 },
+  imageModalClose: { backgroundColor: 'rgba(255,255,255,0.2)', borderRadius: 20, padding: 8 },
 });

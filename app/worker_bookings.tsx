@@ -2,18 +2,21 @@ import Avatar from '@/components/avatar';
 import BottomNav from '@/components/bottom-nav';
 import FrameModal from '@/components/frame-modal';
 import { authFetch, expectJson } from '@/lib/api';
-import { isActiveStatus, normalizeBookingStatus } from '@/lib/booking-status';
+import { BookingStatus, isActiveStatus, normalizeBookingStatus } from '@/lib/booking-status';
 import { formatBookingDateTime, isBookingDateTimePast } from '@/lib/format';
 import { platformShadow } from '@/lib/shadow';
 import { storage } from '@/lib/storage';
 import { ensureSocket, onBookingRequest, onBookingStatusChanged } from '@/lib/socket';
-import { BookingResponse } from '@/lib/types';
+import { BookingResponse, ReviewResponse } from '@/lib/types';
 import { Ionicons } from '@expo/vector-icons';
 import { Stack, useFocusEffect, useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, KeyboardAvoidingView, RefreshControl, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 
-type Tab = 'pending' | 'accepted';
+// Same Present/Past split as the client's bookings screen: Present holds
+// actionable requests, Past is the history with completed/not-completed
+// outcomes.
+type Tab = 'present' | 'past';
 
 type Request = {
   id: string;
@@ -22,59 +25,71 @@ type Request = {
   avatar?: string;
   job: string;
   date: string;
+  booking_date?: string | null;
+  booking_time?: string | null;
   /** Display amount: agreed price once locked, else the current proposal. */
   price: number;
   estimated_price: number;
   final_price: number;
   price_proposed_by: 'user' | 'worker' | null;
+  /** Canonical lifecycle status from the server. */
+  canonical: BookingStatus;
+  /** UI action state for present requests: pending or accepted (upcoming). */
   status: 'pending' | 'accepted';
 };
 
-/** Shape server bookings into inbox rows (active, non-past requests only). */
+/** Shape server bookings into request rows (the full list — Present/Past
+ * splitting happens at render time, so live status changes move cards between
+ * tabs automatically). */
 function mapRequests(data: BookingResponse[]): Request[] {
   // Client name/avatar come embedded on each booking — no extra requests.
-  return data
-    .map((b) => {
-      const info = b.user;
-      const status = normalizeBookingStatus(b.status);
-      const estimated = Number(b.estimated_price ?? 0);
-      const final = Number(b.final_price ?? 0);
-      return {
-        booking: b,
-        canonical: status,
-        item: {
-          id: String(b.id),
-          client_id: String(b.user_id),
-          client: info?.full_name || `User ${b.user_id}`,
-          avatar: info?.profile_image || undefined,
-          job: b.problem_description || 'General Service',
-          date: formatBookingDateTime(b.booking_date, b.booking_time) || 'Date not set',
-          estimated_price: estimated,
-          final_price: final,
-          price_proposed_by: b.price_proposed_by ?? null,
-          price: final || estimated,
-          // This inbox shows active requests only: pending, or accepted (upcoming).
-          status: (status === 'upcoming' ? 'accepted' : 'pending') as 'pending' | 'accepted',
-        },
-      };
-    })
-    // The inbox holds actionable requests only. Pending requests expire out of
-    // the inbox once their slot has passed (they can no longer be accepted),
-    // but ACCEPTED (upcoming) jobs stay until the worker marks them completed —
-    // otherwise a job would vanish from the inbox at exactly the moment it needs
-    // completing, and the worker could never finish it (blocking reviews and
-    // their completed-jobs stats).
-    .filter((row) => {
-      if (!isActiveStatus(row.canonical)) return false;
-      if (row.canonical === 'upcoming') return true; // keep until completed
-      return !isBookingDateTimePast(row.booking.booking_date, row.booking.booking_time);
-    })
-    .map((row) => row.item);
+  return data.map((b) => {
+    const info = b.user;
+    const status = normalizeBookingStatus(b.status);
+    const estimated = Number(b.estimated_price ?? 0);
+    const final = Number(b.final_price ?? 0);
+    return {
+      id: String(b.id),
+      client_id: String(b.user_id),
+      client: info?.full_name || `User ${b.user_id}`,
+      avatar: info?.profile_image || undefined,
+      job: b.problem_description || 'General Service',
+      date: formatBookingDateTime(b.booking_date, b.booking_time) || 'Date not set',
+      booking_date: b.booking_date,
+      booking_time: b.booking_time,
+      estimated_price: estimated,
+      final_price: final,
+      price_proposed_by: b.price_proposed_by ?? null,
+      price: final || estimated,
+      canonical: status,
+      status: (status === 'upcoming' ? 'accepted' : 'pending') as 'pending' | 'accepted',
+    };
+  });
+}
+
+/** Same Present/Past rule as the client's bookings: a request is past once
+ * its slot has gone by OR it reached a terminal state. */
+function isPastRequest(r: Request): boolean {
+  return !isActiveStatus(r.canonical) || isBookingDateTimePast(r.booking_date, r.booking_time);
+}
+
+/** Status pill colors/labels — mirrors the client's bookings screen, phrased
+ * from the worker's side. The Past tab describes OUTCOMES ("Not completed",
+ * "Not accepted") rather than still-open states. */
+function statusColor(r: Request, isPast: boolean) {
+  if (r.canonical === 'completed') return { bg: '#dcfce7', fg: '#166534', label: '✓ Completed' };
+  if (r.canonical === 'rejected') return { bg: '#fee2e2', fg: '#991b1b', label: '✗ Rejected' };
+  if (isPast) {
+    if (r.canonical === 'pending') return { bg: '#f3f4f6', fg: '#6b7280', label: '✗ Not accepted' };
+    return { bg: '#ffedd5', fg: '#9a3412', label: '⏱ Not completed' };
+  }
+  if (r.canonical === 'pending') return { bg: '#fef3c7', fg: '#92400e', label: '⏳ Pending' };
+  return { bg: '#dbeafe', fg: '#1e40af', label: '✓ Accepted' };
 }
 
 export default function WorkerBookings() {
   const router = useRouter();
-  const [tab, setTab] = useState<Tab>('pending');
+  const [tab, setTab] = useState<Tab>('present');
   const [requests, setRequests] = useState<Request[]>([]);
   const [loading, setLoading] = useState(true);
   // A failed load is NOT an empty inbox — render it distinctly with a retry.
@@ -87,6 +102,9 @@ export default function WorkerBookings() {
   const actionRef = useRef(false);
   // Restored session id; '' until storage resolves (or when logged out).
   const [uid, setUid] = useState('');
+  // Booking ids this worker has ALREADY reviewed — the Past tab swaps the
+  // "Review client" button for "View my rating" on those jobs.
+  const [reviewedBookings, setReviewedBookings] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     (async () => {
@@ -117,6 +135,19 @@ export default function WorkerBookings() {
       );
       setRequests(mapRequests(data));
       setLoadError(false);
+
+      // Reviews THIS worker wrote — a completed job that already has one
+      // shows "View my rating" instead of "Review client". Failure here only
+      // costs the button label, so it must not fail the inbox load.
+      try {
+        const myReviews: ReviewResponse[] = await expectJson(
+          await authFetch('/reviews/?mine=true'),
+          'Could not load your reviews',
+        );
+        setReviewedBookings(
+          new Set(myReviews.map((r) => (r.booking_id != null ? String(r.booking_id) : '')).filter(Boolean)),
+        );
+      } catch {}
     } catch (e: any) {
       console.warn('Failed to fetch requests', e);
       // Only a loud failure sets the error state; silent (realtime) refreshes
@@ -147,9 +178,10 @@ export default function WorkerBookings() {
     setRefreshing(false);
   }, [loadRequests, uid]);
 
-  // Realtime: a new request pushed by the server refreshes the inbox, and
-  // status/price changes merge into the visible cards — the list no longer
-  // goes stale while the screen sits open.
+  // Realtime: a new request pushed by the server refreshes the list, and
+  // status/price changes refetch+merge the single booking — completed or
+  // rejected cards move from Present to Past automatically because the split
+  // is derived from each row's canonical status.
   useEffect(() => {
     if (!uid) return;
     let cancelled = false;
@@ -164,27 +196,15 @@ export default function WorkerBookings() {
         void loadRequests(uid, true);
       });
       offStatus = onBookingStatusChanged((data) => {
-        setRequests((rs) => {
-          const row = rs.find((r) => r.id === String(data.booking_id));
-          if (!row) return rs;
-          // A terminal status means the request is no longer actionable.
-          if (data.status && !isActiveStatus(normalizeBookingStatus(data.status))) {
-            return rs.filter((r) => r.id !== String(data.booking_id));
-          }
-          const estimated = Number(data.estimated_price ?? row.estimated_price);
-          const final = Number(data.final_price ?? row.final_price);
-          return rs.map((r) =>
-            r.id === row.id
-              ? {
-                  ...r,
-                  estimated_price: estimated,
-                  final_price: final,
-                  price_proposed_by: data.price_proposed_by ?? r.price_proposed_by,
-                  price: final || estimated,
-                }
-              : r,
-          );
-        });
+        void (async () => {
+          try {
+            const updated: BookingResponse = await expectJson(
+              await authFetch(`/bookings/${data.booking_id}`),
+              'Could not refresh the booking',
+            );
+            mergeBooking(updated);
+          } catch {}
+        })();
       });
     })();
     return () => {
@@ -194,9 +214,25 @@ export default function WorkerBookings() {
     };
   }, [loadRequests, uid]);
 
-  const filtered = requests.filter((r) => r.status === tab);
+  const present = requests.filter((r) => !isPastRequest(r));
+  const past = requests
+    .filter(isPastRequest)
+    // Newest first in the history tab.
+    .sort((a, b) => (b.booking_date || '').localeCompare(a.booking_date || ''));
+  const filtered = tab === 'present' ? present : past;
 
-  /** Merge a server response into the inbox list. */
+  /** Merge a full server booking into the list (adds it if new). */
+  function mergeBooking(b: BookingResponse) {
+    const row = mapRequests([b])[0];
+    if (!row) return;
+    setRequests((rs) =>
+      rs.some((x) => x.id === row.id)
+        ? rs.map((x) => (x.id === row.id ? row : x))
+        : [...rs, row],
+    );
+  }
+
+  /** Merge a price-negotiation response into the list. */
   function applyUpdate(b: BookingResponse) {
     const estimated = Number(b.estimated_price ?? 0);
     const final = Number(b.final_price ?? 0);
@@ -238,19 +274,37 @@ export default function WorkerBookings() {
       actionRef.current = false;
     }
 
-    // Update the UI only after the server confirmed the change. Declined and
-    // completed bookings are no longer actionable, so they leave the inbox
-    // (completed work shows on the dashboard history).
+    // Update the UI only after the server confirmed the change. Accepting
+    // flips the action state; declining/completing updates the canonical
+    // status, which moves the card out of Present into the Past tab (the
+    // split is derived from status — completed work stays visible there with
+    // its outcome, and on the dashboard history).
     if (action === 'accepted') {
-      setRequests((rs) => rs.map((x) => (x.id === id ? { ...x, status: 'accepted' } : x)));
+      setRequests((rs) => rs.map((x) => (x.id === id ? { ...x, status: 'accepted', canonical: 'upcoming' } : x)));
     } else {
-      setRequests((rs) => rs.filter((x) => x.id !== id));
+      const canonical: BookingStatus = action === 'completed' ? 'completed' : 'rejected';
+      setRequests((rs) => rs.map((x) => (x.id === id ? { ...x, canonical } : x)));
     }
 
     if (action === 'completed') {
       // The backend settles the final price, records job history, bumps the
-      // worker's stats, and notifies the client — nothing to do client-side.
-      Alert.alert('Job completed 🎉', `${r.client} can now leave you a review.`);
+      // worker's stats, and notifies the client ("Leave a review") — the
+      // review itself is written on the client's profile page.
+      Alert.alert(
+        'Job completed 🎉',
+        `${r.client} can now leave you a review — and you can review ${r.client} too.`,
+        [
+          {
+            text: 'Review client',
+            onPress: () =>
+              router.push({
+                pathname: '/user_profile',
+                params: { clientId: r.client_id, clientName: r.client, tab: 'reviews', bookingId: r.id },
+              }),
+          },
+          { text: 'Later' },
+        ],
+      );
     }
 
     // No client-side notification POST here: the backend persists and pushes
@@ -388,14 +442,14 @@ export default function WorkerBookings() {
     <View style={styles.screen}>
       <Stack.Screen options={{ headerShown: false }} />
       <View style={styles.frame}>
-        <Text style={styles.title}>Booking Requests</Text>
+        <Text style={styles.title}>My Requests</Text>
 
         <View style={styles.tabRow}>
-          <TouchableOpacity style={[styles.tabBtn, tab === 'pending' && styles.tabBtnActive]} onPress={() => setTab('pending')}>
-            <Text style={[styles.tabText, tab === 'pending' && styles.tabTextActive]}>Pending</Text>
+          <TouchableOpacity style={[styles.tabBtn, tab === 'present' && styles.tabBtnActive]} onPress={() => setTab('present')}>
+            <Text style={[styles.tabText, tab === 'present' && styles.tabTextActive]}>Present Requests</Text>
           </TouchableOpacity>
-          <TouchableOpacity style={[styles.tabBtn, tab === 'accepted' && styles.tabBtnActive]} onPress={() => setTab('accepted')}>
-            <Text style={[styles.tabText, tab === 'accepted' && styles.tabTextActive]}>Accepted</Text>
+          <TouchableOpacity style={[styles.tabBtn, tab === 'past' && styles.tabBtnActive]} onPress={() => setTab('past')}>
+            <Text style={[styles.tabText, tab === 'past' && styles.tabTextActive]}>Past Requests</Text>
           </TouchableOpacity>
         </View>
 
@@ -417,9 +471,12 @@ export default function WorkerBookings() {
               </TouchableOpacity>
             </View>
           ) : filtered.length === 0 ? (
-            <Text style={styles.empty}>No {tab} requests</Text>
+            <Text style={styles.empty}>{tab === 'present' ? 'No present requests' : 'No past requests yet'}</Text>
           ) : (
-            filtered.map((r) => (
+            filtered.map((r) => {
+              const isPast = isPastRequest(r);
+              const sc = statusColor(r, isPast);
+              return (
               <TouchableOpacity key={r.id} style={styles.card} activeOpacity={0.85} onPress={() => openClient(r)}>
                 <View style={styles.leftCol}>
                   <Avatar uri={r.avatar} name={r.client} size={60} style={styles.avatar} />
@@ -427,7 +484,9 @@ export default function WorkerBookings() {
                 <View style={styles.rightCol}>
                   <View style={styles.headerRow}>
                     <Text style={styles.client} numberOfLines={1}>{r.client}</Text>
-                    <Ionicons name="chevron-forward" size={16} color="#999" />
+                    <View style={[styles.statusPill, { backgroundColor: sc.bg }]}>
+                      <Text style={[styles.statusText, { color: sc.fg }]}>{sc.label}</Text>
+                    </View>
                   </View>
                   <Text style={styles.job} numberOfLines={1}>{r.job}</Text>
                   <View style={styles.metaRow}>
@@ -438,9 +497,9 @@ export default function WorkerBookings() {
                     <Text style={styles.price}>{r.price > 0 ? `₹${r.price}` : 'Quote pending'}</Text>
                   </View>
 
-                  {renderPricePanel(r)}
+                  {!isPast && renderPricePanel(r)}
 
-                  {r.status === 'pending' ? (
+                  {!isPast && r.status === 'pending' && (
                     <View style={styles.actions}>
                       <TouchableOpacity
                         style={[styles.actionBtn, styles.acceptBtn, r.price <= 0 && { opacity: 0.5 }]}
@@ -458,7 +517,8 @@ export default function WorkerBookings() {
                         <Text style={styles.declineText}>Decline</Text>
                       </TouchableOpacity>
                     </View>
-                  ) : (
+                  )}
+                  {!isPast && r.status === 'accepted' && (
                     <View style={styles.acceptedActions}>
                       <View style={styles.acceptedRow}>
                         <Ionicons name="checkmark-circle" size={13} color="#10b981" />
@@ -473,9 +533,26 @@ export default function WorkerBookings() {
                       </TouchableOpacity>
                     </View>
                   )}
+                  {isPast && r.canonical === 'completed' && (
+                    <TouchableOpacity
+                      style={styles.reviewClientBtn}
+                      activeOpacity={0.8}
+                      onPress={(e) => {
+                        e.stopPropagation?.();
+                        router.push({
+                          pathname: '/user_profile',
+                          params: { clientId: r.client_id, clientName: r.client, tab: 'reviews', bookingId: r.id },
+                        });
+                      }}
+                    >
+                      <Ionicons name={reviewedBookings.has(r.id) ? 'eye-outline' : 'star'} size={15} color="#FFB800" />
+                      <Text style={styles.reviewClientText}>{reviewedBookings.has(r.id) ? 'View my rating' : 'Review client'}</Text>
+                    </TouchableOpacity>
+                  )}
                 </View>
               </TouchableOpacity>
-            ))
+              );
+            })
           )}
         </ScrollView>
       </View>
@@ -537,8 +614,10 @@ const styles = StyleSheet.create({
   leftCol: { width: 64, alignItems: 'center', justifyContent: 'flex-start' },
   avatar: { width: 60, height: 60, borderRadius: 30, backgroundColor: '#e9ecef' },
   rightCol: { flex: 1, paddingLeft: 10 },
-  headerRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  headerRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 6 },
   client: { fontSize: 14, fontWeight: '800', color: '#222', flex: 1 },
+  statusPill: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 10 },
+  statusText: { fontSize: 10, fontWeight: '800' },
   job: { fontSize: 12, color: '#666', marginTop: 2 },
   metaRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 6 },
   dateRow: { flexDirection: 'row', alignItems: 'center', gap: 4 },
@@ -556,6 +635,8 @@ const styles = StyleSheet.create({
   acceptedTag: { color: '#10b981', fontWeight: '800', fontSize: 12 },
   completeBtn: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingVertical: 6, paddingHorizontal: 10, borderRadius: 8, backgroundColor: '#6F42C1' },
   completeText: { color: '#fff', fontWeight: '800', fontSize: 11 },
+  reviewClientBtn: { marginTop: 8, flexDirection: 'row', paddingVertical: 8, borderRadius: 8, borderWidth: 1, borderColor: '#FFB800', backgroundColor: '#fffbeb', alignItems: 'center', justifyContent: 'center', gap: 5 },
+  reviewClientText: { color: '#92400e', fontWeight: '800', fontSize: 12 },
   empty: { fontSize: 13, color: '#999', textAlign: 'center', marginTop: 24 },
   errorBox: { alignItems: 'center', paddingVertical: 40 },
   errorText: { marginTop: 10, fontSize: 13, fontWeight: '700', color: '#b91c1c', textAlign: 'center' },

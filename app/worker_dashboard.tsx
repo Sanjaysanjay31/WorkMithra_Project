@@ -13,6 +13,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import {
     ActivityIndicator,
     Image,
+    Modal,
     RefreshControl,
     ScrollView,
     StyleSheet,
@@ -61,6 +62,8 @@ export default function WorkerDashboard() {
   const [refreshing, setRefreshing] = useState(false);
 
   const [userId, setUserId] = useState<string>('');
+  // Full-screen viewer for review photos on the Past Work cards.
+  const [viewImage, setViewImage] = useState<string | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -187,6 +190,15 @@ export default function WorkerDashboard() {
       const past = completed.map((b) => {
         const review = reviewByBooking[String(b.id)];
         const client = b.user;
+        // Prefer the multi-image array; older reviews only carry the single
+        // legacy review_image field.
+        const reviewImages = review
+          ? review.review_images && review.review_images.length > 0
+            ? review.review_images
+            : review.review_image
+              ? [review.review_image]
+              : []
+          : [];
         return {
           id: String(b.id),
           client_name: client?.full_name || `User ${b.user_id}`,
@@ -200,6 +212,7 @@ export default function WorkerDashboard() {
           earned: b.final_price || 0,
           rating: review ? Number(review.rating) || 0 : 0,
           review: review ? (review.review_text || '') : '',
+          review_images: reviewImages,
         };
       });
       setPastWork(past);
@@ -376,11 +389,46 @@ export default function WorkerDashboard() {
                         </View>
                       </View>
 
-                      {/* Review */}
-                      <View style={styles.reviewBox}>
-                        <Ionicons name="chatbox-ellipses" size={14} color="#6F42C1" />
-                        <Text style={styles.reviewText}>&quot;{w.review}&quot;</Text>
-                      </View>
+                      {/* Review — text plus any photos the client attached. */}
+                      {w.review || (w.review_images && w.review_images.length > 0) ? (
+                        <View style={styles.reviewBox}>
+                          <View style={styles.reviewHeadRow}>
+                            <Ionicons name="chatbox-ellipses" size={14} color="#6F42C1" />
+                            <Text style={styles.reviewTitle}>Client review</Text>
+                            <View style={styles.reviewStars}>
+                              {[1, 2, 3, 4, 5].map((s) => (
+                                <Ionicons
+                                  key={s}
+                                  name={s <= Math.round(w.rating) ? 'star' : 'star-outline'}
+                                  size={11}
+                                  color="#FFB800"
+                                />
+                              ))}
+                            </View>
+                          </View>
+                          {w.review ? (
+                            <Text style={styles.reviewText}>&quot;{w.review}&quot;</Text>
+                          ) : null}
+                          {w.review_images && w.review_images.length > 0 && (
+                            <View style={styles.reviewImageRow}>
+                              {w.review_images.map((img, i) => (
+                                <TouchableOpacity
+                                  key={`${img}-${i}`}
+                                  activeOpacity={0.8}
+                                  onPress={() => setViewImage(img)}
+                                >
+                                  <Image source={{ uri: img }} style={styles.reviewThumb} resizeMode="cover" />
+                                </TouchableOpacity>
+                              ))}
+                            </View>
+                          )}
+                        </View>
+                      ) : (
+                        <View style={[styles.reviewBox, styles.reviewBoxEmpty]}>
+                          <Ionicons name="chatbox-ellipses-outline" size={14} color="#999" />
+                          <Text style={styles.reviewEmptyText}>Client hasn&apos;t reviewed this job yet</Text>
+                        </View>
+                      )}
                     </View>
                   </View>
                 ))
@@ -388,6 +436,20 @@ export default function WorkerDashboard() {
             </View>
           )}
         </ScrollView>
+
+        {/* Full-screen viewer for review photos. */}
+        <Modal visible={!!viewImage} transparent animationType="fade" onRequestClose={() => setViewImage(null)}>
+          <TouchableOpacity style={styles.imageModalBackdrop} activeOpacity={1} onPress={() => setViewImage(null)}>
+            {viewImage ? (
+              <Image source={{ uri: viewImage }} style={styles.imageModalImg} resizeMode="contain" />
+            ) : null}
+            <View style={styles.imageModalCloseRow}>
+              <TouchableOpacity style={styles.imageModalClose} onPress={() => setViewImage(null)}>
+                <Ionicons name="close" size={22} color="#fff" />
+              </TouchableOpacity>
+            </View>
+          </TouchableOpacity>
+        </Modal>
       </View>
       <BottomNav currentRoute="dashboard" role="worker" />
     </View>
@@ -464,6 +526,18 @@ const styles = StyleSheet.create({
   starText: { fontSize: 11, fontWeight: '700', color: '#FFB800' },
   paymentPill: { backgroundColor: '#dcfce7', paddingHorizontal: 10, paddingVertical: 5, borderRadius: 12 },
   paymentText: { fontSize: 12, fontWeight: '800', color: '#166534' },
-  reviewBox: { flexDirection: 'row', alignItems: 'flex-start', gap: 6, backgroundColor: '#faf7ff', borderRadius: 8, padding: 8, marginTop: 8 },
-  reviewText: { fontSize: 11, color: '#444', flex: 1, fontStyle: 'italic', lineHeight: 16 },
+  reviewBox: { backgroundColor: '#faf7ff', borderRadius: 8, padding: 8, marginTop: 8 },
+  reviewHeadRow: { flexDirection: 'row', alignItems: 'center', gap: 5 },
+  reviewTitle: { fontSize: 11, fontWeight: '800', color: '#6F42C1', flex: 1 },
+  reviewStars: { flexDirection: 'row', gap: 1 },
+  reviewText: { fontSize: 11, color: '#444', fontStyle: 'italic', lineHeight: 16, marginTop: 5 },
+  reviewImageRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 7 },
+  reviewThumb: { width: 58, height: 58, borderRadius: 8, backgroundColor: '#eee', borderWidth: 1, borderColor: '#eee' },
+  reviewBoxEmpty: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#fafafa' },
+  reviewEmptyText: { fontSize: 11, color: '#999', fontStyle: 'italic' },
+
+  imageModalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.9)', justifyContent: 'center', alignItems: 'center' },
+  imageModalImg: { width: '92%', height: '75%' },
+  imageModalCloseRow: { position: 'absolute', top: 0, left: 0, right: 0, alignItems: 'flex-end', padding: 16 },
+  imageModalClose: { backgroundColor: 'rgba(255,255,255,0.2)', borderRadius: 20, padding: 8 },
 });

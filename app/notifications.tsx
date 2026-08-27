@@ -120,8 +120,11 @@ export default function NotificationsPage() {
     // Optional deep link based on kind
     if (n.kind === 'booking_request' && audience === 'worker') {
       router.push('/worker_bookings');
-    } else if ((n.kind === 'booking_accepted' || n.kind === 'booking_declined') && audience === 'user') {
+    } else if ((n.kind === 'booking_accepted' || n.kind === 'booking_declined' || n.kind === 'booking_completed') && audience === 'user') {
+      // Completed bookings surface the "Rate worker" button on the Past tab.
       router.push('/bookings');
+    } else if (n.kind === 'booking_completed' && audience === 'worker') {
+      router.push('/worker_bookings');
     }
   }
 

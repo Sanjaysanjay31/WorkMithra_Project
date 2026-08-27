@@ -76,9 +76,14 @@ export interface ReviewResponse {
   id: number;
   booking_id?: number | null;
   user_id?: number | null;
-  /** Present on GET /reviews/ responses (joined from the users table). */
+  /** Display name (pseudonym) of whoever WROTE the review — the client for
+   * client-written reviews, the worker for worker-written ones. Present on
+   * GET /reviews/ responses. */
   user_name?: string | null;
   worker_id?: number | null;
+  /** 'user' = client reviewed the worker (default/legacy),
+   * 'worker' = worker reviewed the client. */
+  reviewer_role?: 'user' | 'worker' | null;
   rating: number;
   review_text?: string | null;
   /** Optional photo URL attached by the reviewer (single-image legacy field;
@@ -143,6 +148,8 @@ export type PastWorkItem = {
   date: string;
   rating: number;
   review: string;
+  /** Photos the client attached to their review (up to 5 URLs). */
+  review_images?: string[];
   client_name: string;
   client_avatar?: string;
   payment: number;
