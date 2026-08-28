@@ -82,6 +82,10 @@ _COLUMN_DDL = (
     "ALTER TABLE workers ADD COLUMN IF NOT EXISTS timings VARCHAR(255)",
     "ALTER TABLE workers ADD COLUMN IF NOT EXISTS pincode VARCHAR(20)",
     "ALTER TABLE workers ADD COLUMN IF NOT EXISTS preferred_language VARCHAR(20)",
+    # users and workers have overlapping id spaces, so chat participants need
+    # an explicit role alongside each numeric id. Legacy rows keep NULL roles.
+    "ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS sender_role VARCHAR(20)",
+    "ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS receiver_role VARCHAR(20)",
 )
 try:
     with engine.begin() as _conn:
