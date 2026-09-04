@@ -4,6 +4,7 @@ import { authFetch, readApiError } from '@/lib/api';
 import { useI18n } from '@/lib/i18n';
 import { pickImageNative, pickImageWeb } from '@/lib/image-picker';
 import { unregisterPush } from '@/lib/push';
+import { UploadFilePart, uploadMultipart } from '@/lib/upload';
 import { disconnectSocket } from '@/lib/socket';
 import { clearAllWorkMitraStorage, storage } from '@/lib/storage';
 import { ReviewResponse } from '@/lib/types';
@@ -194,27 +195,24 @@ export default function ProfilePage() {
     }
     setUploading(true);
     try {
-      const fd = new FormData();
+      // Uploads go through uploadMultipart (XHR): global fetch rejects
+      // { uri, name, type } parts on native with "Unsupported FormDataPart".
+      let part: UploadFilePart;
       if (Platform.OS === 'web') {
         const file = await pickImageWeb();
         if (!file) { setUploading(false); return; }
-        fd.append('file', file);
+        part = file;
       } else {
         const asset = await pickImageNative();
         if (!asset) { setUploading(false); return; }
         const name = asset.fileName || asset.uri.split('/').pop() || 'photo.jpg';
         const ext = (name.split('.').pop() || 'jpg').toLowerCase();
         const mime = asset.mimeType || (ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg');
-        // @ts-ignore RN FormData file shape
-        fd.append('file', { uri: asset.uri, name, type: mime });
+        part = { uri: asset.uri, name, type: mime };
       }
-      fd.append('user_id', currentUserId);
-      fd.append('role', 'user');
-      const res = await authFetch('/upload-profile-image', { method: 'POST', body: fd });
-      // Check status BEFORE parsing — a proxy 413/502 HTML body would throw
-      // a confusing JSON parse error and mask the real failure.
-      if (!res.ok) throw new Error(await readApiError(res, 'Upload failed'));
-      const data = await res.json();
+      const data = await uploadMultipart<{ url: string }>('/upload-profile-image', part, {
+        fields: { user_id: currentUserId, role: 'user' },
+      });
       const next = { ...profile, profile_image: data.url };
       setProfile(next);
       await storage.set(PROFILE_KEY, JSON.stringify({ ...next, __uid: currentUserId }));
@@ -263,6 +261,7 @@ export default function ProfilePage() {
     <View style={styles.screen}>
       <Stack.Screen options={{ headerShown: false }} />
       <View style={styles.frame}>
+        {/* Same as ai-assistant: window pans, KAV 'padding' lifts inputs above the keyboard. */}
         <KeyboardAvoidingView style={styles.kav} behavior="padding">
           {/* Avatar header */}
           <View style={styles.headerBg}>

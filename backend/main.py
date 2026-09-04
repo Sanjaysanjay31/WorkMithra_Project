@@ -86,6 +86,18 @@ _COLUMN_DDL = (
     # an explicit role alongside each numeric id. Legacy rows keep NULL roles.
     "ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS sender_role VARCHAR(20)",
     "ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS receiver_role VARCHAR(20)",
+    # Razorpay gateway ids on the pre-existing payments table (the table was
+    # created before the gateway was integrated, so existing databases need
+    # the columns added explicitly).
+    "ALTER TABLE payments ADD COLUMN IF NOT EXISTS razorpay_order_id VARCHAR(255)",
+    "ALTER TABLE payments ADD COLUMN IF NOT EXISTS razorpay_payment_id VARCHAR(255)",
+    "ALTER TABLE payments ADD COLUMN IF NOT EXISTS razorpay_signature VARCHAR(255)",
+    "ALTER TABLE payments ADD COLUMN IF NOT EXISTS payment_proof_image VARCHAR(1000)",
+    # Withdrawal requests table — created via ORM so it works on both new and
+    # existing DBs (create_all handles the table; this DDL is for safety).
+    "CREATE TABLE IF NOT EXISTS withdrawal_requests (id INTEGER PRIMARY KEY, worker_id INTEGER NOT NULL, amount NUMERIC(10, 2) NOT NULL, status VARCHAR(20) NOT NULL DEFAULT 'pending', admin_note VARCHAR(500), requested_at TIMESTAMP, processed_at TIMESTAMP)",
+    # Worker bank account details for withdrawal disbursements.
+    "CREATE TABLE IF NOT EXISTS worker_bank_accounts (id INTEGER PRIMARY KEY, worker_id INTEGER NOT NULL UNIQUE, bank_name VARCHAR(255), account_number VARCHAR(50), ifsc_code VARCHAR(20), upi_id VARCHAR(100), account_holder_name VARCHAR(255), updated_at TIMESTAMP)",
 )
 try:
     with engine.begin() as _conn:
@@ -212,6 +224,7 @@ from routers.worker_services import router as worker_services_router
 from routers.availability import router as availability_router
 from routers.job_history import router as job_history_router
 from routers.assistant import router as assistant_router
+from routers.payments import router as payments_router
 
 app.include_router(workers_router, prefix="/workers", tags=["workers"])
 app.include_router(bookings_router, prefix="/bookings", tags=["bookings"])
@@ -225,6 +238,7 @@ app.include_router(worker_services_router, prefix="/worker-services", tags=["wor
 app.include_router(availability_router, prefix="/availability", tags=["availability"])
 app.include_router(job_history_router, prefix="/job-history", tags=["job_history"])
 app.include_router(assistant_router, prefix="/assistant", tags=["assistant"])
+app.include_router(payments_router, prefix="/payments", tags=["payments"])
 
 import requests as _requests
 

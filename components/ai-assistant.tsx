@@ -642,7 +642,7 @@ export function AIAssistant() {
             accessibilityLabel="Open AI assistant"
             hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
           >
-            <Ionicons name="sparkles" size={22} color="white" />
+            <Ionicons name="sparkles" size={20} color="white" />
           </TouchableOpacity>
         </Animated.View>
       )}
@@ -751,13 +751,13 @@ const styles = StyleSheet.create({
   },
   fabDraggable: { position: 'absolute', top: 0, left: 0, zIndex: 1000 },
   fabInner: {
-    backgroundColor: '#6f42c1', width: 52, height: 52, borderRadius: 26,
+    backgroundColor: '#6f42c1', width: 46, height: 46, borderRadius: 23,
     justifyContent: 'center', alignItems: 'center',
     ...platformShadow('0px 4px 12px rgba(111,66,193,0.35)', '#6f42c1', 0, 4, 0.35, 6, 6),
   },
   overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)' },
   kav: { flex: 1, justifyContent: 'flex-end' },
-  sheet: { width: '100%', height: '85%', backgroundColor: '#fff', borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: 12 },
+  sheet: { width: '100%', height: '70%', backgroundColor: '#fff', borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: 12 },
   header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 },
   title: { fontSize: 15, fontWeight: '800', color: '#6f42c1' },
   screenTag: { fontSize: 10, color: '#666', marginTop: 1 },

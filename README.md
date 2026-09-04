@@ -112,15 +112,16 @@ The platform runs on one Expo codebase (Android + Web), one FastAPI backend, and
 4. Chat with the worker — each message auto-translated to the reader's language.
 5. Book a date/time and describe the problem. Either side proposes a price; the other accepts.
 6. Worker accepts the request → status becomes `upcoming`; both sides get notified.
-7. Worker marks the job `completed` → final price is settled and job history is recorded.
-8. Both sides can now review that specific booking (stars + text + up to 5 photos). The bookings screen switches from "Rate worker" to "View my rating" once reviewed.
+7. Worker submits a **work report** (photos + note + final price) → status becomes `awaiting_payment`; client is notified to pay.
+8. Client pays via **Razorpay** (test checkout) → payment is verified via HMAC; status remains `awaiting_payment` with `paid=True`.
+9. Client submits a **review + rating** → review is saved, booking is **auto-completed** (`completed` status, job history recorded, worker stats updated). The bookings screen switches from "Rate worker" to "View my rating" once reviewed.
 
 **Worker journey**
 
 1. Register as a worker → set skills, wage, experience, location, availability, verification details.
 2. Dashboard shows rating, jobs, earnings, and past work.
 3. Incoming requests arrive in real time (socket + push); accept, decline, or counter the price.
-4. Mark accepted jobs completed; review the client for that booking afterwards.
+4. Submit a **work report** (photos + note + final price) when the job is done. If the client doesn't pay within a reasonable time, **report non-payment** → booking becomes `unpaid` and a 1-star review is auto-posted on the client. Otherwise, wait for payment + client review, then review the client for that booking.
 
 **Notification flow**
 
@@ -208,7 +209,7 @@ PostgreSQL on Supabase; tables are created by `Base.metadata.create_all()` at st
 | `services` | Service catalog (Plumbing, Electrical, …) |
 | `worker_services` | Many-to-many worker ↔ service (unique pair) |
 | `bookings` | Jobs: date/time, status, problem, estimated/final price, `price_proposed_by`, geo-point |
-| `payments` | Payment records (structure ready; gateway not integrated) |
+| `payments` | Razorpay test-mode payment records (order, verify, status) |
 | `ratings_reviews` | Two-way reviews: `reviewer_role`, `booking_id`, UNIQUE(`booking_id`, `reviewer_role`), up to 5 images |
 | `user_profiles` | Extended client profile fields |
 | `notifications` | Per-recipient in-app notifications (audience = user/worker) |
@@ -308,8 +309,11 @@ cd backend
 python -m venv workmithra && source workmithra/Scripts/activate   # or source workmithra/bin/activate
 pip install -r requirements.txt
 cp .env.example .env        # fill values (see Environment Variables)
-uvicorn main:app --reload --port 8000
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
+
+`--host 0.0.0.0` is required for physical-phone testing (Expo Go): without
+it the server only listens on localhost and the phone cannot reach it.
 
 Tables, indexes, and column migrations apply automatically at startup.
 
@@ -337,6 +341,8 @@ Tables, indexes, and column migrations apply automatically at startup.
 | `SARVAM_API_KEY` | –* | Sarvam AI (LLM/TTS/STT) |
 | `GEMINI_API_KEY` | –* | Google Gemini (LLM/TTS/STT + models config `GEMINI_*_MODEL`, `GEMINI_TTS_VOICE`, timeouts) |
 | `GROQ_API_KEY` | –* | Groq (LLM/STT fallback; `GROQ_*_MODEL`, timeouts) |
+| `RAZORPAY_KEY_ID` | –* | Razorpay **test-mode** Key ID (get from [dashboard.razorpay.com](https://dashboard.razorpay.com/app/keys)) |
+| `RAZORPAY_KEY_SECRET` | –* | Razorpay **test-mode** Key Secret |
 
 \* At least one AI provider key is needed for AI features; the orchestrator falls back through configured providers.
 
@@ -354,11 +360,30 @@ Tables, indexes, and column migrations apply automatically at startup.
 
 ```bash
 # 1. Backend (terminal 1)
-cd backend && uvicorn main:app --reload --port 8000
+cd backend && uvicorn main:app --reload --host 0.0.0.0 --port 8000
 
 # 2. Frontend (terminal 2)
 npm start                # then press a = Android, w = web
 ```
+
+### Testing on a physical phone with Expo Go (no Render deploy needed)
+
+1. Connect the PC and the phone to the **same WiFi**.
+2. Find the PC's LAN IP: `Get-NetIPAddress -AddressFamily IPv4` (the WiFi
+   entry, e.g. `192.168.101.73`). Put it in root `.env`:
+   `EXPO_PUBLIC_API_URL=http://<LAN-IP>:8000`.
+3. Terminal 1 — backend, reachable on the LAN:
+   `cd backend && uvicorn main:app --reload --host 0.0.0.0 --port 8000`,
+   then open `http://<LAN-IP>:8000/health` **from the phone's browser** —
+   it must return `{"status":"ok","database":"up"}` before continuing.
+4. Terminal 2 — `npx expo start` and scan the QR with Expo Go (update Expo Go
+   to the latest version first — it must support SDK 57).
+5. If the QR/bundle won't load: allow the ports through Windows Firewall
+   (admin PowerShell):
+   `New-NetFirewallRule -DisplayName "Expo Metro" -Direction Inbound -LocalPort 8081 -Protocol TCP -Action Allow`
+   `New-NetFirewallRule -DisplayName "WorkMithra API" -Direction Inbound -LocalPort 8000 -Protocol TCP -Action Allow`
+6. No EAS build or `eas.json` change is needed for this: `preview`/`production`
+   profiles already point at the Render URL, which only applies at build time.
 
 - Android emulator: `EXPO_PUBLIC_API_URL` unset → app auto-targets `http://10.0.2.2:8000`.
 - Web: `npm run web`.
@@ -393,12 +418,27 @@ npx eas build --platform android --profile production   # store-ready (auto-incr
 
 | Suite | Count | Command |
 |---|---|---|
-| Backend (pytest) | **119 tests** across 21 files | `cd backend && pytest` |
+| Backend (pytest) | **134 tests** across 21 files | `cd backend && pytest` |
 | Frontend (Jest) | **48 tests** across 18 suites | `npm test` |
 | Type check | — | `npx tsc --noEmit` |
 | Production bundle check | — | `npx expo export --platform android` |
 
 Coverage highlights: booking lifecycle + price negotiation, per-booking two-way reviews (including duplicate-booking rejection), chat with role disambiguation, push-token registration, socket events/rooms, security (auth, session revocation), profile fields, AI provider fallback, and startup migrations. Tests run against SQLite in-memory with rate limiting disabled (`RATE_LIMITING=0`).
+
+### Razorpay test-mode checkout
+
+Payments run via Razorpay in **test mode** — no real money moves. Use these test credentials inside the Razorpay checkout modal:
+
+| Field | Value |
+|---|---|
+| Card number | `4111 1111 1111 1111` |
+| Expiry | Any future date e.g. `12/28` |
+| CVV | `111` |
+| OTP | `111111` |
+
+Alternatively, use UPI: `success@razorpay` as the UPI ID. The backend verifies every payment with HMAC — tampering the amount client-side is detected and rejected.
+
+If `RAZORPAY_KEY_ID` / `RAZORPAY_KEY_SECRET` are not set in `backend/.env`, the payment endpoints return a clean 503 `"payments not configured"` — the app stays functional for all non-payment flows.
 
 ---
 
@@ -410,14 +450,13 @@ Coverage highlights: booking lifecycle + price negotiation, per-booking two-way 
 - **Skill assessments** — short voice/video quizzes per skill, AI-graded, to certify domain expertise.
 - **Dynamic surge pricing** — suggest a fair price band from local demand, time of day, and availability.
 - **Multi-worker jobs** — book a small crew for big jobs (deep cleaning, house painting) with split payments.
-- **Payments integration** — UPI/escrow in-app payments (the `payments` table is already in place).
 - **iOS push** — add `GoogleService-Info.plist` + APNs key to extend push to iOS builds.
 
 ---
 
 ## ⚠️ Limitations
 
-- **No payment gateway yet** — prices are agreed and recorded, but settlement is cash/offline; the `payments` table is a placeholder.
+- **Razorpay test-mode only** — payments use Razorpay in test mode; going live requires swapping `RAZORPAY_KEY_ID` and `RAZORPAY_KEY_SECRET` in `backend/.env` from test to production keys.
 - **Android-only push** — FCM is configured for Android; iOS push needs APNs setup, and web relies on the in-app inbox + socket.
 - **Push delivery requires the FCM V1 key upload** — until the service-account key is added in Expo credentials, system push won't deliver (in-app notifications still work).
 - **Storage policy trade-off** — the `all_images` bucket allows anon uploads (the backend uploads without a Supabase user session); backend validation guards the app path, but direct bucket writes bypass it.

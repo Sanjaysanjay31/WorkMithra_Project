@@ -77,8 +77,9 @@ def send_message(
 ):
     """Send a chat message. The sender is always the authenticated user.
 
-    Messaging is gated on an existing booking relationship: without it the
-    endpoint would be a spam/phishing channel to the entire user+worker base.
+    Messaging is allowed before a booking is created — workers and clients can
+    chat to discuss requirements, pricing, and availability. When a booking_id
+    is provided the message is linked to it; otherwise it is a free-form chat.
     The message is persisted first (source of truth), then pushed to the
     receiver over Socket.IO as a best-effort realtime notification."""
     if not message.receiver_id:
@@ -107,11 +108,6 @@ def send_message(
             raise HTTPException(status_code=403, detail="You are not part of this booking")
         if int(message.receiver_id) not in (booking.user_id, booking.worker_id):
             raise HTTPException(status_code=403, detail="The recipient is not part of this booking")
-    elif not _participants_share_booking(db, sender_id, sender_role, int(message.receiver_id), receiver_role):
-        raise HTTPException(
-            status_code=403,
-            detail="You can only message someone you share a booking with",
-        )
 
     new_message = models.ChatMessage(
         sender_id=sender_id,

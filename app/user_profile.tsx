@@ -5,6 +5,7 @@ import { normalizeBookingStatus } from '@/lib/booking-status';
 import { pickImageNative, pickImageWeb } from '@/lib/image-picker';
 import { platformShadow } from '@/lib/shadow';
 import { storage } from '@/lib/storage';
+import { UploadFilePart, uploadMultipart } from '@/lib/upload';
 import { BookingResponse, ReviewResponse, UserProfileResponse } from '@/lib/types';
 import { Ionicons } from '@expo/vector-icons';
 import * as Location from 'expo-location';
@@ -55,7 +56,7 @@ type RequestItem = {
   service: string;
   note?: string;
   price: number;
-  status: 'pending' | 'accepted' | 'declined' | 'completed';
+  status: 'pending' | 'accepted' | 'declined' | 'completed' | 'payment_proof_submitted';
 };
 
 function toRad(d: number) { return (d * Math.PI) / 180; }
@@ -156,12 +157,14 @@ export default function UserProfilePage() {
     }
     setUploadingImage(true);
     try {
-      const fd = new FormData();
+      // Uploads go through uploadMultipart (XHR): global fetch rejects
+      // { uri, name, type } parts on native with "Unsupported FormDataPart".
+      let part: UploadFilePart;
       let preview = '';
       if (Platform.OS === 'web') {
         const file = await pickImageWeb();
         if (!file) { setUploadingImage(false); return; }
-        fd.append('file', file);
+        part = file;
         preview = URL.createObjectURL(file);
       } else {
         const asset = await pickImageNative();
@@ -169,13 +172,10 @@ export default function UserProfilePage() {
         const name = asset.fileName || asset.uri.split('/').pop() || 'photo.jpg';
         const ext = (name.split('.').pop() || 'jpg').toLowerCase();
         const mime = asset.mimeType || (ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg');
-        // @ts-ignore RN FormData file shape
-        fd.append('file', { uri: asset.uri, name, type: mime });
+        part = { uri: asset.uri, name, type: mime };
         preview = asset.uri;
       }
-      const res = await authFetch('/upload-review-image', { method: 'POST', body: fd });
-      if (!res.ok) throw new Error(await readApiError(res, 'Upload failed'));
-      const data = await res.json();
+      const data = await uploadMultipart<{ url: string }>('/upload-review-image', part);
       setFeedbackImages((imgs) => [...imgs, { url: data.url, preview }]);
     } catch (e: any) {
       Alert.alert('Upload failed', e?.message || 'Could not upload the photo');
@@ -313,7 +313,9 @@ export default function UserProfilePage() {
                 status:
                   s === 'completed' ? 'completed' :
                   s === 'upcoming' ? 'accepted' :
-                  s === 'rejected' ? 'declined' : 'pending',
+                  s === 'rejected' ? 'declined' :
+                  s === 'payment_proof_submitted' ? 'payment_proof_submitted' :
+                  'pending',
               };
             });
           setRequests(mapped);
@@ -378,7 +380,7 @@ export default function UserProfilePage() {
 
   // Completed jobs for this client — each one gets its own review slot
   // (reviewed = read-only card, otherwise a write form).
-  const completedRequests = requests.filter((r) => r.status === 'completed');
+  const completedRequests = requests.filter((r) => r.status === 'completed' || r.status === 'payment_proof_submitted');
 
   async function updateRequest(id: string, status: RequestItem['status']) {
     // Optimistic update, rolled back if the server rejects the change.

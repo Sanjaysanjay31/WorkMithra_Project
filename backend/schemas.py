@@ -281,10 +281,100 @@ class PaymentBase(BaseModel):
     payment_status: Optional[str] = None
     transaction_id: Optional[str] = None
     paid_at: Optional[datetime] = None
+    payment_proof_image: Optional[str] = None
+
+
+class PaymentProofRequest(BaseModel):
+    """Payment proof image URL submitted by the client after payment."""
+    payment_proof_image: str
+
+
+class WithdrawRequestCreate(BaseModel):
+    """Worker requests a withdrawal of their available balance."""
+    amount: float = Field(gt=0)
+
+
+class WithdrawalRequestResponse(BaseModel):
+    id: int
+    worker_id: int
+    amount: float
+    status: str
+    admin_note: Optional[str] = None
+    requested_at: Optional[datetime] = None
+    processed_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class WorkerBankAccountBase(BaseModel):
+    bank_name: Optional[str] = None
+    account_number: Optional[str] = None
+    ifsc_code: Optional[str] = None
+    upi_id: Optional[str] = None
+    account_holder_name: Optional[str] = None
+
+
+class WorkerBankAccountResponse(WorkerBankAccountBase):
+    id: int
+    worker_id: int
+    updated_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
 
 
 class PaymentResponse(PaymentBase):
     id: int
+    razorpay_order_id: Optional[str] = None
+    razorpay_payment_id: Optional[str] = None
+    created_at: Optional[datetime] = None
+    class Config:
+        from_attributes = True
+
+
+class PaymentOrderRequest(BaseModel):
+    """Open a Razorpay order for a booking. The amount is always the locked
+    final_price — the client never chooses how much to pay."""
+    booking_id: int
+
+
+class PaymentOrderResponse(BaseModel):
+    """Everything the frontend needs to open Razorpay Checkout. key_id is
+    the PUBLIC key (safe for the client); the secret never leaves the backend."""
+    payment_id: int
+    order_id: str
+    key_id: str
+    amount_paise: int
+    amount: float
+    currency: str = "INR"
+
+
+class PaymentVerifyRequest(BaseModel):
+    """Razorpay Checkout success payload — the signature is verified
+    server-side with the key secret before a payment is accepted."""
+    booking_id: int
+    razorpay_order_id: str
+    razorpay_payment_id: str
+    razorpay_signature: str
+
+
+class WorkReportCreate(BaseModel):
+    """Worker's proof-of-work submitted when finishing a job. images are
+    pre-uploaded URLs (via /upload-review-image), capped at five. final_price
+    is required only when the price was never agreed during negotiation."""
+    note: Optional[str] = None
+    images: Optional[List[str]] = Field(default=None, max_length=5)
+    final_price: Optional[float] = Field(default=None, gt=0)
+
+
+class WorkReportResponse(BaseModel):
+    id: int
+    booking_id: int
+    worker_id: int
+    user_id: int
+    note: Optional[str] = None
+    images: List[str] = []
     created_at: Optional[datetime] = None
     class Config:
         from_attributes = True

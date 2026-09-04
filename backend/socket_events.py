@@ -10,20 +10,21 @@ from auth import decode_token_safe
 
 logger = logging.getLogger(__name__)
 
-# Same origin allowlist as the REST API (ALLOWED_ORIGINS in backend/.env).
-# When unset we fall back to the local dev origins — never a wildcard, so a
-# misconfigured production deploy fails closed instead of opening to everyone.
-_DEV_ORIGINS = [
-    "http://localhost:8081",
-    "http://localhost:8082",
-    "http://localhost:19006",
-    "http://localhost:3000",
-]
-_origins_csv = os.getenv("ALLOWED_ORIGINS", "").strip()
-_allowed_origins = [o.strip() for o in _origins_csv.split(",") if o.strip()] or _DEV_ORIGINS
+# Socket.IO has its OWN origin check, separate from the REST API's CORS
+# middleware in main.py — adding a phone/LAN origin to ALLOWED_ORIGINS does
+# NOT unblock sockets. Native clients (Expo Go, dev builds) connect with
+# exp:// origins / bare LAN IPs that cannot be enumerated in an allowlist,
+# so default to '*' here. This is safe: unlike cookie sessions,
+# Socket.IO auth happens via the JWT 'authenticate' event AFTER connect, so
+# the wildcard exposes no credentials. To lock it down, set SOCKET_CORS_ORIGINS
+# (comma-separated) in backend/.env.
+_cors_csv = os.getenv("SOCKET_CORS_ORIGINS", "").strip()
 
 # Initialize Socket.IO AsyncServer
-sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins=_allowed_origins)
+sio = socketio.AsyncServer(
+    async_mode='asgi',
+    cors_allowed_origins=[o.strip() for o in _cors_csv.split(",") if o.strip()] or "*",
+)
 
 # Statuses a client may set for itself. Anything else is rejected so a socket
 # can't broadcast arbitrary strings to every connected client.

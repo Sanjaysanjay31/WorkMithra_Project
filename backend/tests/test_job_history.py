@@ -4,17 +4,18 @@ Locks in the fix for the worker page bug: a client calling GET /job-history/
 with worker_id used to get their ENTIRE history back (the param was silently
 ignored for user tokens). Clients must now use with_worker, which narrows
 their own history to one worker — and worker_id fails loudly with a 400.
+
+Completion now happens via work-report → payment → client review → auto-complete.
 """
 import sys
 import os
 import uuid
 from datetime import date, timedelta
-
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from fastapi.testclient import TestClient
 from main import app
-from conftest import issue_verify_token
+from conftest import issue_verify_token, complete_booking_via_work_report
 
 client = TestClient(app)
 
@@ -56,9 +57,8 @@ def _available_worker():
     return wid, wtok
 
 
-def _completed_job(ctok, wid, wtok):
-    """Create a booking and run it to completed — the completion auto-creates
-    the job-history entry."""
+def _completed_job(ctok, wid, wtok, mock_order=None):
+    """Create a booking and run it to completed via the payment chain."""
     future = (date.today() + timedelta(days=7)).isoformat()
     r = client.post(
         "/bookings/",
@@ -69,8 +69,8 @@ def _completed_job(ctok, wid, wtok):
     bid = r.json()["id"]
     r = client.put(f"/bookings/{bid}", json={"status": "upcoming"}, headers=_auth(wtok))
     assert r.status_code == 200, r.text
-    r = client.put(f"/bookings/{bid}", json={"status": "completed"}, headers=_auth(wtok))
-    assert r.status_code == 200, r.text
+    # Use the work-report → payment → review chain on THIS booking
+    complete_booking_via_work_report(ctok, wtok, wid, client, booking_id=bid)
     return bid
 
 

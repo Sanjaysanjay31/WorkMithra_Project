@@ -1,6 +1,28 @@
-import { Audio } from 'expo-av';
 import { Platform } from 'react-native';
-import { BASE_URL, authFetch, getToken } from '@/lib/api';
+import { BASE_URL, authFetch } from '@/lib/api';
+import { uploadMultipart } from '@/lib/upload';
+
+/**
+ * expo-av / Expo Go (SDK 57): the native audio module is NOT bundled into Expo
+ * Go — it requires a development build. A bare `import { Audio } from 'expo-av'`
+ * throws "Cannot find native module 'ExponentAV'" at module-eval time, which
+ * then crashes every file that transitively imports this one
+ * (ai-assistant → _layout → all routes). Guard the require so the rest of the
+ * app still loads; callers check `hasAudio()` before touching mic/speaker.
+ */
+let Audio: any = null;
+let isAudioAvailable = false;
+try {
+  ({ Audio } = require('expo-av'));
+  isAudioAvailable = !!Audio;
+} catch {
+  // expo-av native module unavailable (Expo Go) — audio features disabled.
+}
+
+/** True when the native audio module linked and can be used. */
+export function hasAudio(): boolean {
+  return isAudioAvailable;
+}
 
 // Re-exported for existing imports; the value comes from lib/api (single source).
 export { BASE_URL };
@@ -292,7 +314,11 @@ export async function playAudio(url: string): Promise<void> {
     });
   }
 
-  // Native: expo-av
+  // Native: expo-av. Not available in Expo Go (SDK 57) — skip gracefully.
+  if (!isAudioAvailable) {
+    revokeCurrentUrl();
+    return;
+  }
   try {
     await Audio.setAudioModeAsync({
       playsInSilentModeIOS: true,
@@ -411,6 +437,10 @@ async function cleanupStaleRecording() {
 }
 
 function nativeSTTControlled(lang: LangCode = 'en-IN'): { stop: () => void; result: Promise<string> } {
+  // expo-av native module unavailable (Expo Go) — resolve with empty transcript.
+  if (!isAudioAvailable) {
+    return { stop: () => {}, result: Promise.resolve('') };
+  }
   let recording: any = null;
   let stopped = false;
   let startedAt = 0;
@@ -464,27 +494,21 @@ function nativeSTTControlled(lang: LangCode = 'en-IN'): { stop: () => void; resu
       const ext = (safeName.split('.').pop() || 'mp4').toLowerCase();
       const mime = ext === 'mp4' || ext === 'm4a' ? 'audio/mp4' : ext === 'webm' ? 'audio/webm' : 'audio/wav';
 
-      const form = new FormData();
-      // @ts-ignore RN FormData file shape
-      form.append('file', { uri, name: safeName, type: mime });
-      form.append('lang', lang === 'auto' ? 'unknown' : lang);
-
-      const sttUrl = `${BASE_URL}/ai/stt`;
-      const token = await getToken();
-      const headers: Record<string, string> = {};
-      if (token) headers['Authorization'] = `Bearer ${token}`;
-
-      const res = await fetch(sttUrl, { method: 'POST', body: form, headers });
-      const text = await res.text();
-      if (!res.ok) {
-        rejectFn(new Error(`STT failed (${res.status}): ${text.slice(0, 200)}`));
+      // Uploads go through uploadMultipart (XHR): global fetch rejects
+      // { uri, name, type } parts on native with "Unsupported FormDataPart".
+      let data: any = {};
+      try {
+        data = await uploadMultipart<any>('/ai/stt', { uri, name: safeName, type: mime }, {
+          fields: { lang: lang === 'auto' ? 'unknown' : lang },
+          timeoutMs: 60000,
+        });
+      } catch (e: any) {
+        rejectFn(new Error(e?.message || 'Speech upload failed'));
         return;
       }
-      let data: any = {};
-      try { data = JSON.parse(text); } catch { data = { transcript: text }; }
       const transcript = data.transcript || data.text || data.output || '';
       if (!transcript || !transcript.trim()) {
-        rejectFn(new Error(`No speech detected. Backend returned: ${text.slice(0, 200) || '(empty)'}`));
+        rejectFn(new Error('No speech detected. Please try again.'));
         return;
       }
       resolveFn(transcript);

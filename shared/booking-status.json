@@ -1,5 +1,20 @@
 {
-  "statuses": ["pending", "upcoming", "completed", "rejected"],
+  "statuses": [
+    "pending",
+    "upcoming",
+    "work_completed",
+    "work_reported",
+    "client_confirmed",
+    "client_not_completed",
+    "payment_completed",
+    "payment_proof_submitted",
+    "not_completed_pending_review",
+    "rated",
+    "completed",
+    "rejected",
+    "unpaid",
+    "not_completed"
+  ],
   "legacy_map": {
     "accepted": "upcoming",
     "in_progress": "upcoming",
@@ -7,5 +22,15 @@
     "declined": "rejected",
     "cancelled": "rejected"
   },
-  "active": ["pending", "upcoming"]
+  "active": [
+    "pending",
+    "upcoming",
+    "work_completed",
+    "work_reported",
+    "client_confirmed",
+    "payment_completed",
+    "payment_proof_submitted",
+    "not_completed_pending_review",
+    "rated"
+  ]
 }

@@ -1,0 +1,8 @@
+Starting project at C:\Skills\Projects\WorkMithraa__ -Copy
+React Compiler enabled
+Starting Metro Bundler
+
+Waiting on http://localhost:8081
+
+Logs for your project will appear below.
+

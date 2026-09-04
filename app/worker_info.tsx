@@ -2,9 +2,11 @@ import Avatar from '@/components/avatar';
 import BottomNav from '@/components/bottom-nav';
 import { authFetch, readApiError } from '@/lib/api';
 import { AvailabilitySlot, listAvailability } from '@/lib/availability';
+import { normalizeBookingStatus } from '@/lib/booking-status';
 import { pickImageNative, pickImageWeb } from '@/lib/image-picker';
 import { ensureSocket } from '@/lib/socket';
 import { storage } from '@/lib/storage';
+import { UploadFilePart, uploadMultipart } from '@/lib/upload';
 import { JobHistoryResponse, ReviewResponse, WorkerResponse } from '@/lib/types';
 import { Ionicons } from '@expo/vector-icons';
 import DateTimePicker from '@react-native-community/datetimepicker';
@@ -177,12 +179,14 @@ export default function WorkerInfoPage() {
     }
     setUploadingImage(true);
     try {
-      const fd = new FormData();
+      // Uploads go through uploadMultipart (XHR): global fetch rejects
+      // { uri, name, type } parts on native with "Unsupported FormDataPart".
+      let part: UploadFilePart;
       let preview = '';
       if (Platform.OS === 'web') {
         const file = await pickImageWeb();
         if (!file) { setUploadingImage(false); return; }
-        fd.append('file', file);
+        part = file;
         preview = URL.createObjectURL(file);
       } else {
         const asset = await pickImageNative();
@@ -190,13 +194,10 @@ export default function WorkerInfoPage() {
         const name = asset.fileName || asset.uri.split('/').pop() || 'photo.jpg';
         const ext = (name.split('.').pop() || 'jpg').toLowerCase();
         const mime = asset.mimeType || (ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg');
-        // @ts-ignore RN FormData file shape
-        fd.append('file', { uri: asset.uri, name, type: mime });
+        part = { uri: asset.uri, name, type: mime };
         preview = asset.uri;
       }
-      const res = await authFetch('/upload-review-image', { method: 'POST', body: fd });
-      if (!res.ok) throw new Error(await readApiError(res, 'Upload failed'));
-      const data = await res.json();
+      const data = await uploadMultipart<{ url: string }>('/upload-review-image', part);
       setFeedbackImages((imgs) => [...imgs, { url: data.url, preview }]);
     } catch (e: any) {
       // Nothing was added to the list, so there's no preview to roll back.
@@ -258,7 +259,28 @@ export default function WorkerInfoPage() {
       setFeedbackImages([]);
       setReviewingBookingId('');
       await loadReviews();
-      Alert.alert('Success', 'Thank you for your feedback!');
+      // A review on a PAID awaiting-payment booking AUTO-COMPLETES it on the
+      // backend; a review on a flagged job closes it as 'not_completed'.
+      // Check the fresh status so the alert can confirm the outcome.
+      let completed = false;
+      let closedNotCompleted = false;
+      try {
+        const bres = await authFetch(`/bookings/${bookingId}`);
+        if (bres.ok) {
+          const b = await bres.json();
+          const st = normalizeBookingStatus(b.status);
+          completed = st === 'completed';
+          closedNotCompleted = st === 'not_completed';
+        }
+      } catch {}
+      Alert.alert(
+        completed ? 'Job completed 🎉' : closedNotCompleted ? 'Booking closed ⏱' : 'Success',
+        completed
+          ? 'Thanks for your review — the booking is now marked complete.'
+          : closedNotCompleted
+            ? 'Thanks for your review — the booking is now closed as not completed.'
+            : 'Thank you for your feedback!',
+      );
     } catch (e: any) {
       Alert.alert('Submit failed', `${e?.message || 'Network error'}`);
     }
@@ -266,16 +288,35 @@ export default function WorkerInfoPage() {
 
   useEffect(() => {
     fetchWorkerDetails();
-    loadHistory();
     loadReviews();
     // This client's own id — needed to spot their own reviews in the list.
     void getCurrentUid().then(setMyUid);
-    // Deep link from the bookings screen ("Rate worker" / "View my rating")
-    // carries the booking — open its review form straight away.
-    if (initialTab === 'reviews' && bookingParam) setReviewingBookingId(String(bookingParam));
     // Any authenticated caller may read a worker's slots (pre-booking check).
     // Slots are optional here — on failure show none rather than crash.
     if (Number(id)) listAvailability(Number(id)).then(setSlots).catch(() => setSlots([]));
+    // Load the worker's history first, then (for deep links from the bookings
+    // screen's "Rate worker" / "View my rating" buttons) inject the
+    // deep-linked booking into `history` so its review form renders.
+    //
+    // ORDER MATTERS: `loadHistory()` OVERWRITES the entire `history` state
+    // when its fetch resolves, so injecting the synthetic row BEFORE it
+    // finishes would be clobbered — `reviewableJobs` would stay empty and the
+    // client would see "You can review … after a completed job" instead of
+    // the review form for an active `payment_proof_submitted` / paid booking.
+    (async () => {
+      await loadHistory();
+      if (initialTab === 'reviews' && bookingParam) {
+        const bidStr = String(bookingParam);
+        setReviewingBookingId(bidStr);
+        // Active-state bookings (e.g. `payment_proof_submitted`) don't appear
+        // in `history` (which is loaded from /job-history/ and only returns
+        // completed jobs). Without this fetch, the review form for the
+        // deep-linked booking would never render because `reviewableJobs`
+        // would be empty. We inject the booking as a synthetic history row
+        // so the existing form/markReviewed logic finds it.
+        await ensureBookingInHistory(bidStr);
+      }
+    })();
   }, [id]);
 
   useEffect(() => {
@@ -352,6 +393,31 @@ export default function WorkerInfoPage() {
     setHistory([]);
   }
 
+  /** Inject a deep-linked booking (e.g. `payment_proof_submitted`) into the
+   * history list so its review form can render. Only runs for bookings not
+   * already in the list (a completed job from /job-history/ is already there).
+   * The synthetic row carries the booking id and a "completed"-style entry so
+   * the form rendering path treats it identically to a real completed job. */
+  async function ensureBookingInHistory(bidStr: string) {
+    if (!bidStr) return;
+    const bid = Number(bidStr);
+    if (!bid || Number.isNaN(bid)) return;
+    setHistory((prev) => {
+      if (prev.some((h) => h.bookingId === bidStr)) return prev;
+      return [
+        ...prev,
+        {
+          id: `synthetic-${bidStr}`,
+          bookingId: bidStr,
+          date: '',
+          time: '',
+          price: 0,
+          status: 'completed' as const,
+        },
+      ];
+    });
+  }
+
   async function tryGetLocation() {
     // On failure we leave clientLoc null and flag locUnavailable — the UI
     // then says "Location unavailable" instead of silently substituting a
@@ -394,6 +460,15 @@ export default function WorkerInfoPage() {
     if (submitting) return; // block double-taps creating duplicate bookings
     if (!bookDate.trim() || !bookTime.trim()) {
       Alert.alert('Booking', 'Please enter both date and time.');
+      return;
+    }
+    // Never let a client book a slot that has already passed. `new Date` on a
+    // 'YYYY-MM-DDTHH:MM' string parses as LOCAL time, so today-with-past-time
+    // is caught exactly like a date in the past. The backend enforces the same
+    // rule (create_booking) as a second line of defense.
+    const chosenSlot = new Date(`${bookDate}T${String(bookTime).slice(0, 5)}`);
+    if (Number.isNaN(chosenSlot.getTime()) || chosenSlot.getTime() <= Date.now()) {
+      Alert.alert('Invalid slot', 'You cannot book a past date or time. Please pick a future slot.');
       return;
     }
     // A ₹0 agreed price is rejected by the backend — catch it client-side. An
@@ -547,9 +622,14 @@ export default function WorkerInfoPage() {
 
   const repeatBooking = history.length >= 2;
 
-  // Completed jobs with this worker that carry a booking id — each one gets
-  // its own review slot (reviewed = read-only card, otherwise a write form).
-  const completedJobs = history.filter((h) => h.status === 'completed' && !!h.bookingId);
+  // Jobs the client can review for THIS worker. Includes both completed jobs
+  // (legacy flow) and active reviewable states (new flow: client paid and
+  // submitted proof, booking is `payment_proof_submitted`). The deep-link from
+  // the bookings screen (`?tab=reviews&booking=<id>`) sets `reviewingBookingId`
+  // — if the booking is in the active chain but not yet completed, it won't
+  // appear in `history` (only completed jobs do) and the form would never
+  // open. Injecting it here ensures the form is reachable.
+  const reviewableJobs = history.filter((h) => !!h.bookingId);
 
   return (
     <View style={styles.screen}>
@@ -583,6 +663,7 @@ export default function WorkerInfoPage() {
           ))}
         </View>
 
+        {/* Same as ai-assistant: window pans, KAV 'padding' lifts inputs above the keyboard. */}
         <KeyboardAvoidingView style={styles.kav} behavior="padding">
         <ScrollView style={styles.tabContent} showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 100 }} keyboardShouldPersistTaps="handled">
           {activeTab === 'profile' && (
@@ -604,7 +685,7 @@ export default function WorkerInfoPage() {
           {activeTab === 'reviews' && (
             <View style={styles.tabPane}>
               <Text style={styles.sectionTitle}>Your reviews</Text>
-              {completedJobs.length === 0 ? (
+              {reviewableJobs.length === 0 ? (
                 <View style={styles.noJobsNote}>
                   <Ionicons name="information-circle-outline" size={16} color="#92400e" />
                   <Text style={styles.noJobsNoteText}>
@@ -612,7 +693,7 @@ export default function WorkerInfoPage() {
                   </Text>
                 </View>
               ) : (
-                completedJobs.map((h) => {
+                reviewableJobs.map((h) => {
                   const my = myReviewFor(h.bookingId);
                   return my ? (
                     <View key={h.bookingId} style={styles.feedbackForm}>

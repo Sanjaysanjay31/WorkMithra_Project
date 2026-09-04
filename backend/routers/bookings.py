@@ -1,8 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func
 from datetime import datetime, date
+import json
 import database, models, schemas
 from auth import get_current_user
 from rate_limit import limiter
@@ -12,14 +13,41 @@ from routers.notifications import build_notification, publish_notification
 
 router = APIRouter()
 
-# Allowed status transitions: pending -> upcoming -> completed, with either
-# participant able to reject/cancel while the booking is still active.
-# completed and rejected are terminal.
+# Allowed status transitions (strict sequential workflow):
+#
+#   pending -> upcoming              (worker accepts)
+#   upcoming -> work_completed       (worker marks work as done)
+#   work_completed -> work_reported  (worker submits work report)
+#   work_reported -> client_confirmed (client marks work as complete after reviewing report)
+#   client_confirmed -> payment_completed (client pays)
+#   payment_completed -> payment_proof_submitted (client posts payment proof)
+#   payment_proof_submitted -> rated  (client submits review, auto-completes)
+#   rated -> completed               (automatic on review submission)
+#
+# Early-exit paths (before payment):
+#   work_reported/client_confirmed -> unpaid  (worker reports non-payment)
+#   upcoming/work_completed/... -> not_completed_pending_review (either side
+#   flags the job as not done — it stays ACTIVE in Present until a review is
+#   submitted, which finalizes it to terminal 'not_completed' on both sides)
+#
+# Rejection is allowed while no work has been delivered yet (pending/upcoming/work_completed).
+# completed, rejected, unpaid, not_completed are terminal.
 _ALLOWED_TRANSITIONS = {
     "pending": {"upcoming", "rejected"},
-    "upcoming": {"completed", "rejected"},
+    "upcoming": {"work_completed", "rejected", "not_completed"},
+    "work_completed": {"work_reported", "rejected", "not_completed"},
+    "work_reported": {"client_confirmed", "client_not_completed", "unpaid", "not_completed"},
+    # Pending review: only POST /reviews/ finalizes it (direct write, no PUT).
+    "not_completed_pending_review": set(),
+    "client_not_completed": set(),
+    "client_confirmed": {"payment_completed", "unpaid", "not_completed"},
+    "payment_completed": {"payment_proof_submitted", "unpaid", "not_completed"},
+    "payment_proof_submitted": {"rated", "unpaid", "not_completed"},
+    "rated": {"completed"},
     "completed": set(),
     "rejected": set(),
+    "unpaid": set(),
+    "not_completed": set(),
 }
 
 # Sanity bounds for agreed prices (Numeric(10,2) would silently accept
@@ -105,6 +133,55 @@ def _assert_participant(booking: models.Booking, current: Dict[str, Any]) -> Non
             raise HTTPException(status_code=403, detail="Not your booking")
 
 
+def complete_booking(db: Session, booking: models.Booking) -> Optional[models.Notification]:
+    """Settle a job: status -> completed, final-price settle, job-history row,
+    worker stat increments, and a queued notification for the worker — ALL in
+    the CALLER's transaction (no commit here) so completion can't drift from
+    its side effects.
+
+    Completion is client-driven in the payment chain: this runs when the
+    client submits their review after paying and posting proof
+    (see routers/reviews.py). For backward compatibility, old flow
+    (awaiting_payment+paid) also completes directly."""
+    booking.status = "completed"
+    # Completing settles any dangling negotiation (legacy safety net — in the
+    # payment chain the price is already locked by the work report).
+    if booking.final_price is None and booking.estimated_price is not None:
+        booking.final_price = booking.estimated_price
+
+    # Skipped silently if an entry already exists (e.g. created manually via
+    # /job-history/ or by a legacy completion).
+    existing_history = (
+        db.query(models.JobHistory)
+        .filter(models.JobHistory.booking_id == booking.id)
+        .first()
+    )
+    if existing_history is None:
+        db.add(models.JobHistory(
+            booking_id=booking.id,
+            worker_id=booking.worker_id,
+            user_id=booking.user_id,
+            completed_at=datetime.utcnow(),
+        ))
+    # Atomic SQL increment — a read-modify-write here loses updates when two
+    # bookings for the same worker complete concurrently. coalesce guards
+    # legacy rows whose counters are NULL.
+    db.query(models.Worker).filter(models.Worker.id == booking.worker_id).update(
+        {
+            "completed_jobs": func.coalesce(models.Worker.completed_jobs, 0) + 1,
+            "total_jobs": func.coalesce(models.Worker.total_jobs, 0) + 1,
+        },
+        synchronize_session=False,
+    )
+    if booking.worker_id is None:
+        return None
+    return build_notification(
+        db, booking.worker_id, "worker", "booking_completed",
+        "Job completed 🎉",
+        f"The {_job_label(booking)} job was paid and reviewed — it's now marked complete.",
+    )
+
+
 @router.post("/", response_model=schemas.BookingResponse)
 @limiter.limit("20/minute")
 def create_booking(
@@ -154,8 +231,20 @@ def create_booking(
 
     _check_price(booking.estimated_price, "estimated_price")
 
-    if booking.booking_date is not None and booking.booking_date < datetime.utcnow().date():
-        raise HTTPException(status_code=400, detail="booking_date cannot be in the past")
+    if booking.booking_date is not None:
+        now = datetime.utcnow()
+        if booking.booking_date < now.date():
+            raise HTTPException(status_code=400, detail="booking_date cannot be in the past")
+        # Same-day booking with a time that has already passed is also invalid —
+        # rejecting it here keeps clients from booking a slot that can no longer
+        # be fulfilled.
+        if booking.booking_date == now.date() and booking.booking_time is not None:
+            try:
+                slot_time = datetime.strptime(str(booking.booking_time)[:5], "%H:%M").time()
+            except ValueError:
+                slot_time = None
+            if slot_time is not None and slot_time <= now.time():
+                raise HTTPException(status_code=400, detail="booking_time cannot be in the past")
 
     _validate_worker_bookable(db, worker, booking)
 
@@ -282,11 +371,13 @@ def update_booking(
     """Update a booking (partial update — participants only).
 
     Status changes must follow the lifecycle in shared/booking-status.json:
-    pending -> upcoming -> completed, with rejection allowed while active.
-    Only the worker may accept (pending->upcoming); EITHER participant may
-    complete (upcoming->completed) — whichever side confirms the job is done
-    settles it for both (history, stats, notification to the other side).
-    Either participant may reject/cancel.
+    pending -> upcoming -> awaiting_payment -> completed, with rejection
+    allowed before work is delivered. Only the worker may accept
+    (pending->upcoming); the worker's work report moves upcoming ->
+    awaiting_payment (via /work-report). Completion is AUTOMATIC — it
+    happens when the client submits their review after paying, so PUT
+    refuses status=completed. Either participant may reject/cancel while
+    the booking is pending/upcoming.
     Price fields (estimated/final) are worker-writable only — a customer
     must not be able to rewrite the agreed price on their own booking."""
     # with_for_update() takes a row lock so concurrent updates (e.g. the
@@ -329,7 +420,7 @@ def update_booking(
     # This check MUST run before status handling: with "status" in the body
     # a same-status PUT would otherwise skip the guard and rewrite fields on
     # a finished job (e.g. {"status": "completed", "final_price": 999999}).
-    if current_status in ("completed", "rejected"):
+    if current_status in ("completed", "rejected", "unpaid", "not_completed", "client_not_completed", "not_completed_pending_review"):
         only_same_status = (
             set(data.keys()) == {"status"}
             and normalize_status(data.get("status")) == current_status
@@ -347,7 +438,30 @@ def update_booking(
         if normalized is None:
             raise HTTPException(
                 status_code=400,
-                detail=f"Invalid status '{data['status']}'. Allowed: pending, upcoming, completed, rejected",
+                detail=f"Invalid status '{data['status']}'. See booking-status.json for the full list.",
+            )
+        if normalized == "completed":
+            # Strict workflow: a job completes only when the client's review
+            # lands after paying and submitting proof (complete_booking via
+            # POST /reviews/ when the booking is payment_proof_submitted).
+            raise HTTPException(
+                status_code=400,
+                detail="Jobs complete automatically — after the customer confirms work, pays, submits proof, and rates",
+            )
+        if normalized == "not_completed":
+            raise HTTPException(
+                status_code=400,
+                detail="Use POST /bookings/{id}/mark-incomplete to mark a job as not completed",
+            )
+        if normalized == "not_completed_pending_review":
+            raise HTTPException(
+                status_code=400,
+                detail="Use POST /bookings/{id}/mark-incomplete — the review finishes a not-completed job",
+            )
+        if normalized == "rated":
+            raise HTTPException(
+                status_code=400,
+                detail="Use POST /reviews/ to submit your review — this completes the booking automatically",
             )
         if normalized != current_status:
             allowed = _ALLOWED_TRANSITIONS.get(current_status, set())
@@ -398,10 +512,6 @@ def update_booking(
                     detail="This worker already has a booking at the requested date/time",
                 )
 
-    became_completed = (
-        data.get("status") == "completed"
-        and current_status != "completed"
-    )
     status_changed = data.get("status") is not None and data.get("status") != current_status
 
     # Persist a status-change notification for the OTHER participant in the
@@ -422,12 +532,6 @@ def update_booking(
                 "Booking accepted ✓",
                 f"Your {job} booking was accepted. Check the details and get ready.",
             )
-        elif new_status == "completed":
-            status_notif = build_notification(
-                db, recipient_id, status_notif_audience, "booking_completed",
-                "Job completed 🎉",
-                f"The {job} job was marked completed. Leave a review for the other side.",
-            )
         elif new_status == "rejected":
             declined_by_client = not is_worker_side
             status_notif = build_notification(
@@ -447,40 +551,6 @@ def update_booking(
     # /accept-price.
     if is_worker_side and "estimated_price" in data and booking.final_price is None:
         booking.price_proposed_by = "worker"
-
-    # Completing the job settles the negotiation: if no agreement was reached,
-    # the latest number on the table becomes the final price so a completed
-    # booking never dangles without one.
-    if became_completed and booking.final_price is None and booking.estimated_price is not None:
-        booking.final_price = booking.estimated_price
-
-    if became_completed:
-        # Record the job history entry and bump worker stats in the SAME
-        # transaction as the status change, so completing a job can't drift
-        # from the worker's counters. Skipped silently if an entry already
-        # exists (e.g. created manually via /job-history/).
-        existing_history = (
-            db.query(models.JobHistory)
-            .filter(models.JobHistory.booking_id == booking.id)
-            .first()
-        )
-        if existing_history is None:
-            db.add(models.JobHistory(
-                booking_id=booking.id,
-                worker_id=booking.worker_id,
-                user_id=booking.user_id,
-                completed_at=datetime.utcnow(),
-            ))
-        # Atomic SQL increment — a read-modify-write here loses updates when
-        # two bookings for the same worker complete concurrently. coalesce
-        # guards legacy rows whose counters are NULL.
-        db.query(models.Worker).filter(models.Worker.id == booking.worker_id).update(
-            {
-                "completed_jobs": func.coalesce(models.Worker.completed_jobs, 0) + 1,
-                "total_jobs": func.coalesce(models.Worker.total_jobs, 0) + 1,
-            },
-            synchronize_session=False,
-        )
 
     db.commit()
     db.refresh(booking)
@@ -572,7 +642,7 @@ def _load_booking_for_update(db: Session, booking_id: int) -> models.Booking:
 
 def _reject_if_terminal(booking: models.Booking) -> None:
     current_status = normalize_status(booking.status) or "pending"
-    if current_status in ("completed", "rejected"):
+    if current_status in ("completed", "rejected", "unpaid", "not_completed", "client_not_completed", "not_completed_pending_review"):
         raise HTTPException(
             status_code=400,
             detail=f"This booking is {current_status} and can no longer be modified",
@@ -694,5 +764,446 @@ def accept_price(
 
     publish_notification(db, notif, other_role)
     emit_to_user(other_id, "booking_status_changed", _price_payload(booking, uid), role=other_role)
+
+    return booking
+
+
+# ---------------------------------------------------------------------------
+# Sequential work completion workflow
+#
+# Step 1 — Worker Mark Work Complete:
+#   POST /{booking_id}/mark-work-complete
+#   booking: upcoming -> work_completed
+#   notifies client that work is done and report is ready to view
+#
+# Step 2 — Worker Submit Work Report:
+#   POST /{booking_id}/work-report
+#   booking: work_completed -> work_reported
+#   stores the report (photos + note); client is notified to preview and confirm
+#
+# Step 3 — Client Confirm Work:
+#   POST /{booking_id}/confirm-work
+#   booking: work_reported -> client_confirmed
+#   unlocks the client's Razorpay payment
+#
+# Step 4 — Client Pay (existing /payments/order + /payments/verify):
+#   booking: client_confirmed -> payment_completed
+#
+# Step 5 — Client Post Payment Proof (existing /payments/{id}/proof):
+#   booking: payment_completed -> payment_proof_submitted
+#
+# Step 6 — Client Submit Review (existing /reviews/):
+#   booking: payment_proof_submitted -> completed (auto via complete_booking)
+#
+# Early-exit paths:
+#   work_reported/client_confirmed -> unpaid  (worker reports non-payment)
+#   work_reported/client_confirmed -> not_completed (either party flags)
+# ---------------------------------------------------------------------------
+
+def _parse_report_images(raw: Optional[str]) -> List[str]:
+    """images is stored as a JSON array of URLs; corrupt values degrade to
+    an empty list instead of breaking the response."""
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return []
+    return [str(u) for u in parsed] if isinstance(parsed, list) else []
+
+
+def _report_dict(r: models.WorkReport) -> Dict[str, Any]:
+    return {
+        "id": r.id,
+        "booking_id": r.booking_id,
+        "worker_id": r.worker_id,
+        "user_id": r.user_id,
+        "note": r.note,
+        "images": _parse_report_images(r.images),
+        "created_at": r.created_at.isoformat() if r.created_at else None,
+    }
+
+
+@router.post("/{booking_id}/mark-work-complete", response_model=schemas.BookingResponse)
+@limiter.limit("10/minute")
+def mark_work_complete(
+    request: Request,
+    booking_id: int,
+    db: Session = Depends(database.get_db),
+    current: Dict[str, Any] = Depends(get_current_user),
+):
+    """Step 1 of the work-flow: worker marks their work as done. Moves the
+    booking from 'upcoming' to 'work_completed', signalling the client that
+    the work is finished and a work report is ready to be submitted.
+    The worker then submits the actual work report via POST /work-report."""
+    booking = _load_booking_for_update(db, booking_id)
+    uid = _current_user_id(current)
+    if current.get("role") != "worker" or booking.worker_id != uid:
+        raise HTTPException(status_code=403, detail="Only the worker can mark their work as complete")
+
+    current_status = normalize_status(booking.status) or "pending"
+    if current_status != "upcoming":
+        raise HTTPException(
+            status_code=400,
+            detail="Only accepted (upcoming) bookings can be marked as work complete",
+        )
+
+    booking.status = "work_completed"
+
+    job = _job_label(booking)
+    worker_row = db.query(models.Worker).filter(models.Worker.id == uid).first()
+    worker_name = (worker_row.full_name if worker_row and worker_row.full_name else "The worker")
+    notif = build_notification(
+        db, booking.user_id, "user", "work_marked_complete",
+        "Work marked as complete ✓",
+        f"{worker_name} marked your {job} job as complete. A work report will be submitted shortly.",
+    )
+
+    db.commit()
+    db.refresh(booking)
+
+    publish_notification(db, notif, "user")
+    emit_to_user(booking.user_id, "booking_status_changed", _price_payload(booking, uid), role="user")
+    return booking
+
+
+@router.post("/{booking_id}/work-report", response_model=schemas.WorkReportResponse)
+@limiter.limit("10/minute")
+def submit_work_report(
+    request: Request,
+    booking_id: int,
+    payload: schemas.WorkReportCreate,
+    db: Session = Depends(database.get_db),
+    current: Dict[str, Any] = Depends(get_current_user),
+):
+    """Step 2 of the work-flow: worker submits the work report (photos + note).
+    Moves the booking from 'work_completed' to 'work_reported', notifying the
+    client to preview the report and confirm the work. If the price was never
+    agreed, payload.final_price is required and becomes the locked amount."""
+    booking = _load_booking_for_update(db, booking_id)
+    uid = _current_user_id(current)
+    if current.get("role") != "worker" or booking.worker_id != uid:
+        raise HTTPException(status_code=403, detail="Only the worker of this booking can submit the work report")
+
+    current_status = normalize_status(booking.status) or "pending"
+    if current_status != "work_completed":
+        raise HTTPException(
+            status_code=400,
+            detail="Mark your work as complete first (POST /bookings/{id}/mark-work-complete) before submitting the work report",
+        )
+
+    existing = (
+        db.query(models.WorkReport)
+        .filter(models.WorkReport.booking_id == booking.id)
+        .first()
+    )
+    if existing is not None:
+        raise HTTPException(status_code=409, detail="A work report was already submitted for this booking")
+
+    # Settle the price before opening payment — a payable booking always has
+    # a locked amount.
+    if booking.final_price is None:
+        if payload.final_price is None:
+            raise HTTPException(
+                status_code=400,
+                detail="final_price is required — the price was not agreed yet, so set the amount to be paid",
+            )
+        _check_price(payload.final_price, "final_price")
+        booking.final_price = payload.final_price
+
+    image_urls = [u.strip() for u in (payload.images or []) if u and u.strip()]
+    if len(image_urls) > 5:
+        raise HTTPException(status_code=400, detail="A work report can include at most 5 images")
+    for u in image_urls:
+        if not u.lower().startswith(("http://", "https://")):
+            raise HTTPException(status_code=400, detail="Each work report image must be an http(s) URL")
+
+    note = (payload.note or "").strip() or None
+
+    report = models.WorkReport(
+        booking_id=booking.id,
+        worker_id=uid,
+        user_id=booking.user_id,
+        note=note,
+        images=json.dumps(image_urls) if image_urls else None,
+    )
+    db.add(report)
+    booking.status = "work_reported"
+
+    worker_row = db.query(models.Worker).filter(models.Worker.id == uid).first()
+    worker_name = (worker_row.full_name if worker_row and worker_row.full_name else "The worker")
+    job = _job_label(booking)
+    notif = build_notification(
+        db, booking.user_id, "user", "work_report_submitted",
+        "Work report ready ✓ Review to confirm",
+        f"{worker_name} submitted a work report for your {job}. "
+        f"Preview it and mark as complete to unlock the payment.",
+    )
+
+    try:
+        db.flush()
+    except Exception:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="A work report was already submitted for this booking")
+    db.commit()
+    db.refresh(report)
+
+    publish_notification(db, notif, "user")
+    emit_to_user(booking.user_id, "booking_status_changed", _price_payload(booking, uid), role="user")
+    return _report_dict(report)
+
+
+@router.get("/{booking_id}/work-report", response_model=schemas.WorkReportResponse)
+def get_work_report(
+    booking_id: int,
+    db: Session = Depends(database.get_db),
+    current: Dict[str, Any] = Depends(get_current_user),
+):
+    """The work report for a booking (participants only)."""
+    booking = db.query(models.Booking).filter(models.Booking.id == booking_id).first()
+    if not booking:
+        raise HTTPException(status_code=404, detail="Booking not found")
+    _assert_participant(booking, current)
+    report = (
+        db.query(models.WorkReport)
+        .filter(models.WorkReport.booking_id == booking_id)
+        .first()
+    )
+    if report is None:
+        raise HTTPException(status_code=404, detail="No work report for this booking yet")
+    return _report_dict(report)
+
+
+@router.post("/{booking_id}/confirm-work", response_model=schemas.BookingResponse)
+@limiter.limit("10/minute")
+def confirm_work(
+    request: Request,
+    booking_id: int,
+    db: Session = Depends(database.get_db),
+    current: Dict[str, Any] = Depends(get_current_user),
+):
+    """Step 3 of the work-flow: client confirms the work after reviewing the work
+    report. Moves the booking from 'work_reported' to 'client_confirmed', which
+    unlocks the Razorpay payment. Can only be called after a work report exists."""
+    booking = _load_booking_for_update(db, booking_id)
+    uid = _current_user_id(current)
+    if current.get("role") == "worker" or booking.user_id != uid:
+        raise HTTPException(status_code=403, detail="Only the client can confirm the work")
+
+    current_status = normalize_status(booking.status) or "pending"
+    if current_status != "work_reported":
+        raise HTTPException(
+            status_code=400,
+            detail="A work report must be submitted first before confirming the work",
+        )
+
+    # Ensure work report exists
+    report = (
+        db.query(models.WorkReport)
+        .filter(models.WorkReport.booking_id == booking.id)
+        .first()
+    )
+    if report is None:
+        raise HTTPException(status_code=400, detail="No work report found — confirm work is only possible after the worker submits a report")
+
+    booking.status = "client_confirmed"
+
+    job = _job_label(booking)
+    notif = build_notification(
+        db, booking.worker_id, "worker", "work_confirmed_by_client",
+        "Work confirmed ✓ Payment unlocked",
+        f"The client confirmed the work for your {job}. Payment of {_fmt_price(booking.final_price)} is now unlocked.",
+    )
+
+    db.commit()
+    db.refresh(booking)
+
+    publish_notification(db, notif, "worker")
+    emit_to_user(booking.worker_id, "booking_status_changed", _price_payload(booking, uid), role="worker")
+    return booking
+
+
+@router.post("/{booking_id}/confirm-not-completed", response_model=schemas.BookingResponse)
+@limiter.limit("5/minute")
+def confirm_not_completed(
+    request: Request,
+    booking_id: int,
+    db: Session = Depends(database.get_db),
+    current: Dict[str, Any] = Depends(get_current_user),
+):
+    """Step 3-alt of the work-flow: client has reviewed the work report but
+    considers the job not completed. Moves the booking from 'work_reported' to
+    the ACTIVE 'not_completed_pending_review' state — it stays in Present for
+    both sides until a review is submitted, which finalizes it to terminal
+    'not_completed' (Past). No payment is required."""
+    booking = _load_booking_for_update(db, booking_id)
+    uid = _current_user_id(current)
+    if current.get("role") == "worker" or booking.user_id != uid:
+        raise HTTPException(status_code=403, detail="Only the client can confirm not completed")
+
+    current_status = normalize_status(booking.status) or "pending"
+    if current_status != "work_reported":
+        raise HTTPException(
+            status_code=400,
+            detail="A work report must be submitted first",
+        )
+
+    # Ensure work report exists
+    report = (
+        db.query(models.WorkReport)
+        .filter(models.WorkReport.booking_id == booking.id)
+        .first()
+    )
+    if report is None:
+        raise HTTPException(status_code=400, detail="No work report found")
+
+    booking.status = "not_completed_pending_review"
+
+    job = _job_label(booking)
+    notif = build_notification(
+        db, booking.worker_id, "worker", "work_not_completed_by_client",
+        "Job marked not completed ⏱",
+        f"The client marked your {job} as not completed. No payment is required. "
+        "It moves to history once the review is submitted.",
+    )
+
+    db.commit()
+    db.refresh(booking)
+
+    publish_notification(db, notif, "worker")
+    emit_to_user(booking.worker_id, "booking_status_changed", _price_payload(booking, uid), role="worker")
+    return booking
+
+
+@router.post("/{booking_id}/report-nonpayment", response_model=schemas.BookingResponse)
+@limiter.limit("5/minute")
+def report_nonpayment(
+    request: Request,
+    booking_id: int,
+    db: Session = Depends(database.get_db),
+    current: Dict[str, Any] = Depends(get_current_user),
+):
+    """Worker escalates an unpaid job: booking -> terminal 'unpaid' and a
+    1-star review is posted on the CLIENT (with the work-report photos), so
+    the non-payment shows on their account and reviews — not just as a
+    report. Only available while the booking is awaiting payment."""
+    booking = _load_booking_for_update(db, booking_id)
+    uid = _current_user_id(current)
+    if current.get("role") != "worker" or booking.worker_id != uid:
+        raise HTTPException(status_code=403, detail="Only the worker of this booking can report non-payment")
+
+    current_status = normalize_status(booking.status) or "pending"
+    if current_status not in ("work_completed", "work_reported", "client_confirmed", "payment_completed", "payment_proof_submitted"):
+        raise HTTPException(
+            status_code=400,
+            detail="Non-payment can only be reported after the work is marked complete and before payment is completed",
+        )
+
+    paid = (
+        db.query(models.Payment)
+        .filter(
+            models.Payment.booking_id == booking.id,
+            models.Payment.payment_status == "paid",
+        )
+        .first()
+    )
+    if paid is not None:
+        raise HTTPException(status_code=409, detail="This booking has already been paid")
+
+    booking.status = "unpaid"
+
+    # The negative mark on the client's account: one review per booking per
+    # side, so skip if the worker already reviewed this client for this job.
+    existing_review = (
+        db.query(models.RatingReview)
+        .filter(
+            models.RatingReview.booking_id == booking.id,
+            models.RatingReview.reviewer_role == "worker",
+        )
+        .first()
+    )
+    report = (
+        db.query(models.WorkReport)
+        .filter(models.WorkReport.booking_id == booking.id)
+        .first()
+    )
+    report_images = _parse_report_images(report.images if report else None)
+    if existing_review is None:
+        db.add(models.RatingReview(
+            booking_id=booking.id,
+            user_id=booking.user_id,
+            worker_id=booking.worker_id,
+            reviewer_role="worker",
+            rating=1.0,
+            review_text="Payment was not received for this job.",
+            review_image=report_images[0] if report_images else None,
+            review_images=json.dumps(report_images) if report_images else None,
+            created_at=datetime.utcnow(),
+        ))
+
+    notif = build_notification(
+        db, booking.user_id, "user", "nonpayment_reported",
+        "Booking marked unpaid ⚠",
+        f"The worker reported non-payment for your {_job_label(booking)} job. "
+        "This is now reflected on your account and reviews.",
+    )
+
+    db.commit()
+    db.refresh(booking)
+
+    publish_notification(db, notif, "user")
+    emit_to_user(booking.user_id, "booking_status_changed", _price_payload(booking, uid), role="user")
+
+    return booking
+
+
+@router.post("/{booking_id}/mark-incomplete", response_model=schemas.BookingResponse)
+@limiter.limit("5/minute")
+def mark_incomplete(
+    request: Request,
+    booking_id: int,
+    db: Session = Depends(database.get_db),
+    current: Dict[str, Any] = Depends(get_current_user),
+):
+    """Either party can flag a job that reached the work-report stage but was
+    not successfully completed. The booking moves to the ACTIVE
+    'not_completed_pending_review' state — NO review is auto-posted. The
+    flagging side is prompted to review the job (photos optional), and the
+    review submission (either side) finalizes it to terminal 'not_completed' —
+    which is the moment it moves to Past for both parties."""
+    booking = _load_booking_for_update(db, booking_id)
+    uid = _current_user_id(current)
+    role = current.get("role")
+    # The OTHER participant — they receive the notification and the realtime
+    # status event when this side flags the job.
+    reviewee_id = booking.user_id if role == "worker" else booking.worker_id
+
+    # Either participant can flag — worker or client. Allowed from the moment
+    # the booking is ACCEPTED (upcoming) — a job can always turn out to be a
+    # no-show / not done, and both sides need a way to close it that way.
+    _assert_participant(booking, current)
+
+    current_status = normalize_status(booking.status) or "pending"
+    if current_status not in ("upcoming", "work_completed", "client_confirmed", "payment_completed", "payment_proof_submitted"):
+        raise HTTPException(
+            status_code=400,
+            detail="Only accepted-or-later bookings can be marked as not completed",
+        )
+
+    booking.status = "not_completed_pending_review"
+
+    other_role = "user" if role == "worker" else "worker"
+    notif = build_notification(
+        db, reviewee_id, other_role, "job_incomplete",
+        "Job marked not completed ⏱",
+        f"Your {_job_label(booking)} job has been marked as not completed by the {role}. "
+        "It moves to history once the review is submitted.",
+    )
+
+    db.commit()
+    db.refresh(booking)
+
+    publish_notification(db, notif, other_role)
+    emit_to_user(reviewee_id, "booking_status_changed", _price_payload(booking, uid), role=other_role)
 
     return booking

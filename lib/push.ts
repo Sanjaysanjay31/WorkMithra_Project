@@ -1,23 +1,37 @@
 import Constants from 'expo-constants';
-import * as Notifications from 'expo-notifications';
 import { Platform } from 'react-native';
 
 import { authFetch, getAuth } from '@/lib/api';
 
 /**
- * System push notifications via expo-notifications + the Expo push service.
- *
- * Flow: after login we request the OS permission, fetch the Expo push token
- * for this device, and register it with the backend (POST
- * /notifications/push-token). The backend then pushes every notification it
- * creates through the Expo push API, so alerts arrive even when the app is
- * closed or in the background. The in-app inbox + socket badge remain the
- * realtime path while the app is open.
- *
- * Before this module existed the app had no push integration at all —
- * Android showed "notifications off" for the app with no way to turn them
- * on, because nothing ever requested the permission or posted an alert.
+ * expo-notifications / Expo Go: remote (push) notifications were removed from
+ * Expo Go in SDK 53 — they require a development build. A static
+ * `import * as Notifications from 'expo-notifications'` resolves the JS module
+ * fine (just a console.warn), but every subsequent native call
+ * (setNotificationHandler, getPermissionsAsync, …) throws a hard unrecoverable
+ * error. So we only require + run those calls in a development build
+ * (appOwnership !== 'expo') and otherwise no-op silently. Push features simply
+ * no-op in Expo Go until you switch to a development build.
  */
+const isExpoGo = Constants.appOwnership === 'expo';
+let Notifications: any = null;
+
+// Only load the module when we know the native bridge exists. In Expo Go the
+// require itself succeeds but every native call throws, and calling
+// setNotificationHandler at load time (outside the try below) used to crash
+// the entire route loader. Guard both the require AND every native call.
+if (!isExpoGo && Platform.OS !== 'web') {
+  try {
+    Notifications = require('expo-notifications');
+  } catch {
+    // expo-notifications unavailable — push features disabled in this runtime.
+  }
+}
+
+/** True when push notifications can be used (development build, not Expo Go). */
+export function hasPush(): boolean {
+  return !!Notifications;
+}
 
 let registeredToken: string | null = null;
 let setupInFlight: Promise<void> | null = null;
@@ -26,15 +40,22 @@ let setupInFlight: Promise<void> | null = null;
 let setupBlocked = false;
 
 // Show the alert banner even when the app is foregrounded (user is on a
-// different screen than the inbox).
-Notifications.setNotificationHandler({
-  handleNotification: async () => ({
-    shouldShowBanner: true,
-    shouldShowList: true,
-    shouldPlaySound: true,
-    shouldSetBadge: false,
-  }),
-});
+// different screen than the inbox). Wrap in try/catch because the native
+// bridge call can throw even after a successful require in Expo Go.
+if (Notifications) {
+  try {
+    Notifications.setNotificationHandler({
+      handleNotification: async () => ({
+        shouldShowBanner: true,
+        shouldShowList: true,
+        shouldPlaySound: true,
+        shouldSetBadge: false,
+      }),
+    });
+  } catch {
+    // setNotificationHandler not supported in this runtime — skip.
+  }
+}
 
 /**
  * Idempotent push setup: permission -> token -> backend registration.
@@ -43,7 +64,7 @@ Notifications.setNotificationHandler({
  * app restart. No-ops on web and on devices without push support.
  */
 export function ensurePushSetup(): Promise<void> {
-  if (Platform.OS === 'web' || setupBlocked || registeredToken) return Promise.resolve();
+  if (!Notifications || Platform.OS === 'web' || setupBlocked || registeredToken) return Promise.resolve();
   if (!setupInFlight) {
     setupInFlight = runSetup().finally(() => {
       setupInFlight = null;
@@ -109,7 +130,7 @@ export async function unregisterPush(): Promise<void> {
 /** Subscribe to notification taps (user tapped a system alert) — screens use
  * this to deep-link into the in-app inbox. Returns an unsubscribe fn. */
 export function onNotificationTap(callback: () => void): () => void {
-  if (Platform.OS === 'web') return () => {};
+  if (Platform.OS === 'web' || !Notifications) return () => {};
   const sub = Notifications.addNotificationResponseReceivedListener(callback);
   return () => sub.remove();
 }

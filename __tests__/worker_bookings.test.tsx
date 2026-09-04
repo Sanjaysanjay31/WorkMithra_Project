@@ -88,4 +88,36 @@ describe('WorkerBookings component', () => {
     const { findByText } = render(<WorkerBookings />);
     expect(await findByText('Send Quote')).toBeTruthy();
   });
+
+  it('shows Accept/Decline only for a pending request', async () => {
+    seedBookings([booking()]);
+    const { findByText, queryByText } = render(<WorkerBookings />);
+    expect(await findByText('Accept')).toBeTruthy();
+    expect(await findByText('Decline')).toBeTruthy();
+    expect(queryByText('Mark Work Complete')).toBeNull();
+  });
+
+  it('shows Mark Work Complete AND Mark not complete once the booking is accepted', async () => {
+    seedBookings([booking({ status: 'upcoming' })]);
+    const { findByText } = render(<WorkerBookings />);
+    expect(await findByText('Mark Work Complete')).toBeTruthy();
+    expect(await findByText('Mark not complete')).toBeTruthy();
+  });
+
+  it('shows the payment-proof state for a payment_proof_submitted booking and NEVER Accept/Decline', async () => {
+    seedBookings([booking({ status: 'payment_proof_submitted' })]);
+    const { findByText, queryByText } = render(<WorkerBookings />);
+    expect(await findByText('Proof submitted · waiting for review')).toBeTruthy();
+    expect(queryByText('Accept')).toBeNull();
+    expect(queryByText('Decline')).toBeNull();
+    expect(queryByText('Mark Work Complete')).toBeNull();
+  });
+
+  it('keeps a reported job in the Present tab until the client closes it', async () => {
+    seedBookings([booking({ status: 'work_reported' })]);
+    const { findByText, queryByText } = render(<WorkerBookings />);
+    expect(await findByText('Waiting for client to preview & confirm')).toBeTruthy();
+    expect(queryByText('Accept')).toBeNull();
+    expect(queryByText('Decline')).toBeNull();
+  });
 });

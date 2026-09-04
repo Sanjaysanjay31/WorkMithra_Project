@@ -18,6 +18,7 @@
 
  */
 
+import Constants from 'expo-constants';
 import { Platform } from 'react-native';
 
 import { clearAllWorkMitraStorage, storage } from '@/lib/storage';
@@ -50,11 +51,57 @@ const DEV_FALLBACK =
 
     : 'http://127.0.0.1:8000';
 
+/** True for http(s) URLs pointing at this machine itself — unreachable from a
+ * physical phone (127.0.0.1 on the phone IS the phone). */
+function isLoopbackUrl(url: string): boolean {
+  const m = url.toLowerCase().match(/^https?:\/\/([^/:]+)/);
+  if (!m) return false;
+  const host = m[1].replace(/^\[|\]$/g, '');
+  return host === 'localhost' || host === '127.0.0.1' || host === '::1';
+}
 
+/** LAN IPv4 of the Metro server that served this bundle (dev only).
+ * Expo Go reports it as hostUri, e.g. "192.168.101.73:8081" on a physical
+ * phone or "10.0.2.2:8081" on an Android emulator. Tunnel hostnames can never
+ * reach this PC on :8000, so only plain IPv4 is accepted. */
+function metroLanHost(): string | null {
+  try {
+    const cfg: any = (Constants as any)?.expoConfig;
+    const raw: string =
+      cfg?.hostUri ||
+      (Constants as any)?.manifest2?.extra?.expoClient?.hostUri ||
+      (Constants as any)?.manifest?.debuggerHost ||
+      '';
+    const host = String(raw || '').split(':')[0].trim();
+    if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host) && host !== '127.0.0.1') return host;
+  } catch {}
+  return null;
+}
 
-export const BASE_URL = ENV_URL || DEV_FALLBACK;
+function resolveBaseUrl(): string {
+  // An explicit non-loopback URL (Render deploy, deliberate LAN IP) is always
+  // used verbatim — in dev AND in release builds.
+  if (ENV_URL && !isLoopbackUrl(ENV_URL)) return ENV_URL;
+  if (__DEV__) {
+    // Dev with a missing — or stale loopback — env value: follow the Metro
+    // server's own host, which is by construction reachable from this device.
+    // This keeps physical-phone testing working even when a stale
+    // 127.0.0.1 got baked into the bundle (env override, wrong terminal,
+    // forgotten cache clear).
+    const lan = metroLanHost();
+    if (lan) return `http://${lan}:8000`;
+  }
+  return ENV_URL || DEV_FALLBACK;
+}
 
+export const BASE_URL = resolveBaseUrl();
 
+if (__DEV__) {
+  // Printed once at startup in the Metro terminal — the first thing to check
+  // when the phone cannot reach the backend.
+  // eslint-disable-next-line no-console
+  console.log(`[workmithra] API: ${BASE_URL}`);
+}
 
 if (ENV_URL && __DEV__ === false) {
 
@@ -64,9 +111,9 @@ if (ENV_URL && __DEV__ === false) {
 
   console.warn(
 
-    '[workmithra] EXPO_PUBLIC_API_URL is not set — falling back to ' +
+    '[workmithra] EXPO_PUBLIC_API_URL is not set — using ' +
 
-      DEV_FALLBACK +
+      BASE_URL +
 
       '. Set it to the deployed backend before building for release.'
 

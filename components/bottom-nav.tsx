@@ -2,6 +2,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { Href, usePathname, useRouter } from 'expo-router';
 import React from 'react';
 import { Alert, Platform, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { clearAllWorkMitraStorage } from '@/lib/storage';
 import { unregisterPush } from '@/lib/push';
 import { disconnectSocket } from '@/lib/socket';
@@ -9,7 +10,7 @@ import { useI18n } from '@/lib/i18n';
 
 export type NavRoute =
   | 'home' | 'bookings' | 'switch_role' | 'profile'
-  | 'dashboard' | 'requests' | 'hours';
+  | 'dashboard' | 'requests' | 'payments' | 'profile_worker';
 
 interface NavItem {
   id: NavRoute;
@@ -33,9 +34,9 @@ const CLIENT_ITEMS: NavItem[] = [
 const WORKER_ITEMS: NavItem[] = [
   { id: 'dashboard', label: 'Dashboard', icon: 'grid', route: '/worker_dashboard' },
   { id: 'requests', label: 'Requests', icon: 'mail', route: '/worker_bookings' },
-  { id: 'hours', label: 'Hours', icon: 'time', route: '/worker_availability' },
+  { id: 'payments', label: 'Payments', icon: 'wallet', route: '/worker_payments' },
   { id: 'switch_role', label: 'Switch', icon: 'repeat', route: '/login' },
-  { id: 'profile', label: 'Profile', icon: 'person', route: '/worker_profile' },
+  { id: 'profile_worker', label: 'Profile', icon: 'person', route: '/worker_profile' },
 ];
 
 interface BottomNavProps {
@@ -48,6 +49,16 @@ export default function BottomNav({ currentRoute, role = 'user' }: BottomNavProp
   const pathname = usePathname();
   const { t } = useI18n();
   const items = role === 'worker' ? WORKER_ITEMS : CLIENT_ITEMS;
+  // System navigation area (Android edge-to-edge draws the 3-button bar /
+  // gesture pill OVER the app, and its height varies per phone). The root
+  // layout already pads the screen bottom by this inset with a light
+  // background — so without compensation a light strip shows below this dark
+  // bar (taller on 3-button phones, thin on gesture phones: the "doesn't fit
+  // on some phones" complaint). Pull the dark background down over that strip
+  // (marginBottom) and pad the buttons by at least 12px, so the tappable row
+  // always floats above the system bar / screen edge on every phone.
+  const bottomInset = useSafeAreaInsets().bottom;
+  const bottomPad = Math.max(bottomInset, 12);
 
   // Switching role IS a logout: wipe the session, caches, and realtime
   // socket before heading to login — matching profile.tsx's switch flow.
@@ -82,7 +93,7 @@ export default function BottomNav({ currentRoute, role = 'user' }: BottomNavProp
   };
 
   return (
-    <View style={styles.wrap}>
+    <View style={[styles.wrap, { marginBottom: -bottomInset, paddingBottom: bottomPad }]}>
       <View style={styles.navBar}>
         {items.map((item) => {
           const active = currentRoute === item.id;

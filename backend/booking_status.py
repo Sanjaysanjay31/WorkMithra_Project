@@ -2,8 +2,13 @@
 
 Single source of truth shared by the bookings router and socket events:
 
-    pending -> upcoming -> completed
-        \\--------> rejected
+    pending -> upcoming -> awaiting_payment -> completed
+        \\------------> rejected
+    awaiting_payment -> unpaid   (worker reports non-payment)
+
+The worker submits a work report to move a job upcoming -> awaiting_payment;
+the client then pays (Razorpay) and submits a review, which auto-completes
+the booking. A job the client never pays for ends terminal "unpaid".
 
 The statuses, legacy aliases, and active set are defined ONCE in
 shared/booking-status.json (repo root) and consumed by both this module and

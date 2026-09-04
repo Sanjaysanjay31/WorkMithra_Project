@@ -104,6 +104,52 @@ export interface JobHistoryResponse {
   completed_at?: string | null;
 }
 
+/** Mirrors PaymentResponse (backend/schemas.py). */
+export interface PaymentResponse {
+  id: number;
+  booking_id?: number | null;
+  user_id?: number | null;
+  worker_id?: number | null;
+  amount: number;
+  payment_method?: string | null;
+  /** 'created' (checkout open), 'paid' (verified), 'failed', legacy 'pending'. */
+  payment_status?: string | null;
+  transaction_id?: string | null;
+  razorpay_order_id?: string | null;
+  razorpay_payment_id?: string | null;
+  paid_at?: string | null;
+  created_at?: string | null;
+}
+
+/** Mirrors PaymentOrderResponse — everything needed to open Razorpay Checkout. */
+export interface PaymentOrderResponse {
+  payment_id: number;
+  order_id: string;
+  key_id: string;
+  amount_paise: number;
+  amount: number;
+  currency: string;
+}
+
+/** Razorpay Checkout success payload posted back from the WebView. */
+export interface RazorpaySuccessPayload {
+  razorpay_order_id: string;
+  razorpay_payment_id: string;
+  razorpay_signature: string;
+}
+
+/** Mirrors WorkReportResponse — the worker's proof-of-work for a booking. */
+export interface WorkReportResponse {
+  id: number;
+  booking_id: number;
+  worker_id: number;
+  user_id: number;
+  note?: string | null;
+  images: string[];
+  created_at?: string | null;
+}
+
+
 /** Mirrors ChatMessageResponse. */
 export interface ChatMessageResponse {
   id: number;

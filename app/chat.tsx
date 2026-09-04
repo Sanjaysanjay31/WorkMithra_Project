@@ -501,6 +501,8 @@ const otherLabel = myRole === 'worker' ? 'Client' : 'Worker';
     // Plain View: the root layout already applies the safe-area insets.
     // RN's deprecated SafeAreaView would double them on iOS.
     <View style={styles.safeArea}>
+      {/* Same pattern as ai-assistant (whose input fits): the window pans under
+          the keyboard, so KAV 'padding' lifts the composer exactly above it. */}
       <KeyboardAvoidingView
         style={styles.keyboardView}
         behavior="padding"

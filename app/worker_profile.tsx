@@ -1,13 +1,16 @@
 import Avatar from '@/components/avatar';
 import BottomNav from '@/components/bottom-nav';
 import { authFetch, readApiError } from '@/lib/api';
+import { AvailabilitySlot, listAvailability, upsertAvailability } from '@/lib/availability';
 import { useI18n } from '@/lib/i18n';
 import { pickImageNative, pickImageWeb } from '@/lib/image-picker';
 import { disconnectSocket } from '@/lib/socket';
 import { clearAllWorkMitraStorage, storage } from '@/lib/storage';
+import { UploadFilePart, uploadMultipart } from '@/lib/upload';
 import { ReviewResponse } from '@/lib/types';
 import { Ionicons } from '@expo/vector-icons';
 import { Stack, useRouter } from 'expo-router';
+import DateTimePicker from '@react-native-community/datetimepicker';
 import React, { useEffect, useState } from 'react';
 import {
     ActivityIndicator,
@@ -16,8 +19,10 @@ import {
     KeyboardAvoidingView,
     Modal,
     Platform,
+    RefreshControl,
     ScrollView,
     StyleSheet,
+    Switch,
     Text,
     TextInput,
     TouchableOpacity,
@@ -50,6 +55,72 @@ const EMPTY: WorkerForm = {
   city: '', location: '', pincode: '', aadhaar_verified: false, profile_image: '',
 };
 
+// ── Availability editor ────────────────────────────────────────────────────
+
+const DAYS: { key: string; label: string }[] = [
+  { key: 'monday', label: 'Monday' },
+  { key: 'tuesday', label: 'Tuesday' },
+  { key: 'wednesday', label: 'Wednesday' },
+  { key: 'thursday', label: 'Thursday' },
+  { key: 'friday', label: 'Friday' },
+  { key: 'saturday', label: 'Saturday' },
+  { key: 'sunday', label: 'Sunday' },
+];
+
+const DEFAULT_START = '09:00';
+const DEFAULT_END = '18:00';
+
+type DayState = {
+  slot_id: number | null;
+  is_available: boolean;
+  start_time: string;
+  end_time: string;
+};
+
+function pad(n: number) { return n < 10 ? `0${n}` : String(n); }
+
+function formatTimeLabel(value: string): string {
+  if (!value) return '';
+  const [hStr, mStr] = value.split(':');
+  const h = Number(hStr); const m = Number(mStr);
+  const hr12 = ((h + 11) % 12) + 1;
+  const ampm = h < 12 ? 'AM' : 'PM';
+  return `${hr12}:${pad(m)} ${ampm}`;
+}
+
+function toMinutes(t: string): number {
+  const [h, m] = t.split(':').map(Number);
+  return (h || 0) * 60 + (m || 0);
+}
+
+function dateFromTime(t: string): Date {
+  const [h, m] = t.split(':').map(Number);
+  const dt = new Date();
+  dt.setHours(h || 9, m || 0, 0, 0);
+  return dt;
+}
+
+function emptyWeek(): Record<string, DayState> {
+  return Object.fromEntries(
+    DAYS.map((d) => [d.key, { slot_id: null, is_available: false, start_time: DEFAULT_START, end_time: DEFAULT_END }]),
+  );
+}
+
+function mergeSlots(base: Record<string, DayState>, slots: AvailabilitySlot[]): Record<string, DayState> {
+  const next = { ...base };
+  slots.forEach((s) => {
+    const key = (s.available_day || '').toLowerCase();
+    if (!next[key]) return;
+    next[key] = {
+      slot_id: s.id,
+      is_available: s.is_available,
+      start_time: s.start_time || DEFAULT_START,
+      end_time: s.end_time || DEFAULT_END,
+    };
+  });
+  return next;
+}
+
 /** Review a client wrote about this worker (shown on the My Reviews tab). */
 type ReceivedReview = {
   id: string | number;
@@ -80,9 +151,16 @@ export default function WorkerProfilePage() {
   const [reviews, setReviews] = useState<ReceivedReview[]>([]);
   // Full-screen viewer for review photos.
   const [viewImage, setViewImage] = useState<string | null>(null);
-  // Details / Reviews / Settings tabs — keeps the profile compact instead of
-  // one endless scroll.
-  const [tab, setTab] = useState<'details' | 'reviews' | 'settings'>('details');
+
+  // Availability editor state (Active hours tab)
+  const [availDays, setAvailDays] = useState<Record<string, DayState>>(emptyWeek());
+  const [availLoading, setAvailLoading] = useState(true);
+  const [availError, setAvailError] = useState('');
+  const [busyDay, setBusyDay] = useState<string | null>(null);
+  const [picker, setPicker] = useState<{ day: string; field: 'start_time' | 'end_time' } | null>(null);
+  // Details / Reviews / Active hours / Settings tabs — keeps the profile compact
+  // instead of one endless scroll.
+  const [tab, setTab] = useState<'details' | 'reviews' | 'hours' | 'settings'>('details');
 
   useEffect(() => { load(); }, []);
 
@@ -141,6 +219,18 @@ export default function WorkerProfilePage() {
     // Reviews from clients load alongside the profile (independent request —
     // a failure there must not block the profile form).
     void loadReviews(wid);
+
+    // Load availability
+    setAvailLoading(true);
+    setAvailError('');
+    try {
+      const slots = await listAvailability(Number(wid));
+      setAvailDays((prev) => mergeSlots(emptyWeek(), slots));
+    } catch (e: any) {
+      console.warn('Failed to load availability', e);
+      setAvailError(e?.message || 'Could not reach the server.');
+    }
+    setAvailLoading(false);
     try {
       const res = await authFetch(`/workers/${wid}`);
       if (!res.ok) return;
@@ -171,6 +261,45 @@ export default function WorkerProfilePage() {
       console.warn('Failed to load worker from backend', e);
     }
   }
+
+  // ── Availability helpers ─────────────────────────────────────────────────
+
+  async function saveAvailDay(dayKey: string, patch: Partial<DayState>) {
+    if (!currentWorkerId) return;
+    const merged = { ...availDays[dayKey], ...patch };
+    setAvailDays((d) => ({ ...d, [dayKey]: merged }));
+    setBusyDay(dayKey);
+    const saved = await upsertAvailability({
+      worker_id: Number(currentWorkerId),
+      available_day: dayKey,
+      start_time: merged.start_time,
+      end_time: merged.end_time,
+      is_available: merged.is_available,
+    });
+    setBusyDay(null);
+    if (saved) {
+      setAvailDays((d) => ({ ...d, [dayKey]: { ...merged, slot_id: saved.id } }));
+    } else {
+      Alert.alert('Not saved', 'Could not update your availability. Please try again.');
+      try {
+        const slots = await listAvailability(Number(currentWorkerId));
+        setAvailDays(() => mergeSlots(emptyWeek(), slots));
+      } catch { /* keep optimistic value */ }
+    }
+  }
+
+  function onAvailTimeChange(dayKey: string, field: 'start_time' | 'end_time', value: string) {
+    if (!value) return;
+    const cur = availDays[dayKey];
+    const next = { ...cur, [field]: value, is_available: true };
+    if (toMinutes(next.start_time) >= toMinutes(next.end_time)) {
+      Alert.alert('Invalid time window', 'Start time must be before end time.');
+      return;
+    }
+    void saveAvailDay(dayKey, next);
+  }
+
+  // ── General helpers ─────────────────────────────────────────────────────
 
   function update<K extends keyof WorkerForm>(k: K, v: any) {
     setProfile((p) => ({ ...p, [k]: v }));
@@ -232,27 +361,24 @@ export default function WorkerProfilePage() {
     }
     setUploading(true);
     try {
-      const fd = new FormData();
+      // Uploads go through uploadMultipart (XHR): global fetch rejects
+      // { uri, name, type } parts on native with "Unsupported FormDataPart".
+      let part: UploadFilePart;
       if (Platform.OS === 'web') {
         const file = await pickImageWeb();
         if (!file) { setUploading(false); return; }
-        fd.append('file', file);
+        part = file;
       } else {
         const asset = await pickImageNative();
         if (!asset) { setUploading(false); return; }
         const name = asset.fileName || asset.uri.split('/').pop() || 'photo.jpg';
         const ext = (name.split('.').pop() || 'jpg').toLowerCase();
         const mime = asset.mimeType || (ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg');
-        // @ts-ignore RN FormData file shape
-        fd.append('file', { uri: asset.uri, name, type: mime });
+        part = { uri: asset.uri, name, type: mime };
       }
-      fd.append('user_id', currentWorkerId);
-      fd.append('role', 'worker');
-      const res = await authFetch('/upload-profile-image', { method: 'POST', body: fd });
-      // Check status BEFORE parsing — a proxy 413/502 HTML body would throw
-      // a confusing JSON parse error and mask the real failure.
-      if (!res.ok) throw new Error(await readApiError(res, 'Upload failed'));
-      const data = await res.json();
+      const data = await uploadMultipart<{ url: string }>('/upload-profile-image', part, {
+        fields: { user_id: currentWorkerId, role: 'worker' },
+      });
       const next = { ...profile, profile_image: data.url };
       setProfile(next);
       await storage.set(WORKER_KEY, JSON.stringify({ ...next, __uid: currentWorkerId }));
@@ -290,6 +416,7 @@ export default function WorkerProfilePage() {
     <View style={styles.screen}>
       <Stack.Screen options={{ headerShown: false }} />
       <View style={styles.frame}>
+        {/* Same as ai-assistant: window pans, KAV 'padding' lifts inputs above the keyboard. */}
         <KeyboardAvoidingView style={styles.kav} behavior="padding">
           {/* Hero header */}
           <View style={styles.hero}>
@@ -331,6 +458,9 @@ export default function WorkerProfilePage() {
               <Text style={[styles.tabText, tab === 'reviews' && styles.tabTextActive]}>
                 My Reviews{reviews.length > 0 ? ` (${reviews.length})` : ''}
               </Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={[styles.tab, tab === 'hours' && styles.tabActive]} onPress={() => setTab('hours')}>
+              <Text style={[styles.tabText, tab === 'hours' && styles.tabTextActive]} numberOfLines={1}>Active hours</Text>
             </TouchableOpacity>
             <TouchableOpacity style={[styles.tab, tab === 'settings' && styles.tabActive]} onPress={() => setTab('settings')}>
               <Text style={[styles.tabText, tab === 'settings' && styles.tabTextActive]}>Settings</Text>
@@ -472,6 +602,104 @@ export default function WorkerProfilePage() {
               </View>
             )}
 
+            {tab === 'hours' && (
+              <>
+          {/* Inline availability editor — same UX as worker_availability.tsx */}
+          <View style={styles.section}>
+            <SectionTitle>Your Availability</SectionTitle>
+            <Text style={styles.hoursDesc}>
+              Clients can only book you during these hours. Days you switch off block new requests.
+            </Text>
+            {availLoading ? (
+              <ActivityIndicator color="#6F42C1" style={{ marginVertical: 20 }} />
+            ) : availError ? (
+              <View style={{ alignItems: 'center', padding: 16 }}>
+                <Text style={{ color: '#b91c1c', fontSize: 13, textAlign: 'center' }}>{availError}</Text>
+                <TouchableOpacity style={{ marginTop: 10 }} onPress={() => void load()}>
+                  <Text style={{ color: '#6F42C1', fontWeight: '700', fontSize: 13 }}>Retry</Text>
+                </TouchableOpacity>
+              </View>
+            ) : (
+              <>
+            <Text style={styles.availCount}>
+              Available {DAYS.filter((d) => availDays[d.key]?.is_available).length} of 7 days
+            </Text>
+            {DAYS.map((d) => {
+              const st = availDays[d.key];
+              const busy = busyDay === d.key;
+              return (
+                <View key={d.key} style={[styles.dayCard, !st.is_available && styles.dayCardOff]}>
+                  <View style={styles.dayHead}>
+                    <Text style={[styles.dayName, !st.is_available && styles.dayNameOff]}>{d.label}</Text>
+                    <View style={styles.dayHeadRight}>
+                      {busy && <ActivityIndicator size="small" color="#6F42C1" />}
+                      <Switch
+                        value={st.is_available}
+                        onValueChange={(v) => void saveAvailDay(d.key, { is_available: v })}
+                        disabled={busy}
+                        trackColor={{ false: '#e5e7eb', true: '#d4c3f2' }}
+                        thumbColor={st.is_available ? '#6F42C1' : '#f4f4f5'}
+                      />
+                    </View>
+                  </View>
+                  {st.is_available ? (
+                    Platform.OS === 'web' ? (
+                      <View style={styles.timeRow}>
+                        <View style={styles.webTimeWrap}>
+                          <Ionicons name="time-outline" size={14} color="#6F42C1" />
+                          {React.createElement('input', {
+                            type: 'time',
+                            value: st.start_time,
+                            onChange: (e: any) => onAvailTimeChange(d.key, 'start_time', e.target.value),
+                            style: { flex: 1, padding: 6, fontSize: 13, border: 'none', outline: 'none', background: 'transparent', color: '#333' },
+                          })}
+                        </View>
+                        <Text style={styles.timeSep}>to</Text>
+                        <View style={styles.webTimeWrap}>
+                          <Ionicons name="time-outline" size={14} color="#6F42C1" />
+                          {React.createElement('input', {
+                            type: 'time',
+                            value: st.end_time,
+                            onChange: (e: any) => onAvailTimeChange(d.key, 'end_time', e.target.value),
+                            style: { flex: 1, padding: 6, fontSize: 13, border: 'none', outline: 'none', background: 'transparent', color: '#333' },
+                          })}
+                        </View>
+                      </View>
+                    ) : (
+                      <View style={styles.timeRow}>
+                        <TouchableOpacity
+                          style={styles.timeChip}
+                          activeOpacity={0.7}
+                          disabled={busy}
+                          onPress={() => setPicker({ day: d.key, field: 'start_time' })}
+                        >
+                          <Ionicons name="time-outline" size={13} color="#6F42C1" />
+                          <Text style={styles.timeChipText}>{formatTimeLabel(st.start_time)}</Text>
+                        </TouchableOpacity>
+                        <Text style={styles.timeSep}>to</Text>
+                        <TouchableOpacity
+                          style={styles.timeChip}
+                          activeOpacity={0.7}
+                          disabled={busy}
+                          onPress={() => setPicker({ day: d.key, field: 'end_time' })}
+                        >
+                          <Ionicons name="time-outline" size={13} color="#6F42C1" />
+                          <Text style={styles.timeChipText}>{formatTimeLabel(st.end_time)}</Text>
+                        </TouchableOpacity>
+                      </View>
+                    )
+                  ) : (
+                    <Text style={styles.offText}>Not available — new bookings are blocked</Text>
+                  )}
+                </View>
+              );
+            })}
+              </>
+            )}
+          </View>
+              </>
+            )}
+
             {tab === 'settings' && (
               <>
           {/* Switch Role + Logout */}
@@ -606,8 +834,26 @@ export default function WorkerProfilePage() {
             </View>
           </TouchableOpacity>
         </Modal>
+
+        {/* DateTimePicker for availability time selection. */}
+        {picker ? (
+          <DateTimePicker
+            value={dateFromTime(availDays[picker.day]?.[picker.field] || '09:00')}
+            mode="time"
+            display={Platform.OS === 'ios' ? 'spinner' : 'default'}
+            onChange={(_: any, date?: Date) => {
+              if (Platform.OS !== 'ios') setPicker(null);
+              if (date) {
+                const hh = pad(date.getHours());
+                const mm = pad(date.getMinutes());
+                onAvailTimeChange(picker.day, picker.field, `${hh}:${mm}`);
+              }
+              if (Platform.OS === 'ios') setPicker(null);
+            }}
+          />
+        ) : null}
       </View>
-      <BottomNav currentRoute="profile" role="worker" />
+      <BottomNav currentRoute="profile_worker" role="worker" />
     </View>
   );
 }
@@ -700,6 +946,34 @@ const styles = StyleSheet.create({
   tabActive: { borderBottomColor: '#6F42C1' },
   tabText: { fontSize: 12, fontWeight: '700', color: '#999' },
   tabTextActive: { color: '#6F42C1' },
+
+  hoursDesc: { fontSize: 13, color: '#555', lineHeight: 19, marginBottom: 14 },
+  hoursManageBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#f5f0fb',
+    borderRadius: 12,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: '#e6dbf5',
+    gap: 8,
+  },
+  hoursManageText: { flex: 1, fontSize: 14, fontWeight: '800', color: '#6F42C1' },
+
+  // --- availability editor (Active hours tab) ---
+  availCount: { fontSize: 12, color: '#6F42C1', fontWeight: '700', marginBottom: 10 },
+  dayCard: { backgroundColor: '#fff', borderRadius: 12, padding: 12, marginBottom: 8, borderWidth: 1, borderColor: '#eee' },
+  dayCardOff: { backgroundColor: '#fafafa', borderColor: '#f0f0f0' },
+  dayHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  dayHeadRight: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  dayName: { fontSize: 14, fontWeight: '700', color: '#333' },
+  dayNameOff: { color: '#999' },
+  timeRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 8 },
+  timeChip: { flexDirection: 'row', alignItems: 'center', gap: 5, backgroundColor: '#f5f0fb', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6 },
+  timeChipText: { fontSize: 13, fontWeight: '600', color: '#6F42C1' },
+  timeSep: { fontSize: 12, color: '#999', fontWeight: '600' },
+  webTimeWrap: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#f5f0fb', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6 },
+  offText: { fontSize: 12, color: '#bbb', marginTop: 6, fontStyle: 'italic' },
 
   // --- reviews received from clients ---
   reviewsEmpty: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#fff', borderRadius: 12, padding: 12, borderWidth: 1, borderColor: '#eee' },

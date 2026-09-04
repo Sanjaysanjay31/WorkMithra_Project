@@ -111,6 +111,24 @@ class Worker(Base):
     bookings = relationship("Booking", back_populates="worker")
     availability_entries = relationship("WorkerAvailability", back_populates="worker")
     job_histories = relationship("JobHistory", back_populates="worker")
+    bank_account = relationship("WorkerBankAccount", back_populates="worker", uselist=False)
+
+
+class WorkerBankAccount(Base):
+    """Bank account / UPI details for a worker, used for withdrawal disbursements.
+    One row per worker — upserted on save."""
+    __tablename__ = "worker_bank_accounts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    worker_id = Column(Integer, ForeignKey("workers.id"), unique=True, nullable=False, index=True)
+    bank_name = Column(String(255), nullable=True)
+    account_number = Column(String(50), nullable=True)
+    ifsc_code = Column(String(20), nullable=True)
+    upi_id = Column(String(100), nullable=True)
+    account_holder_name = Column(String(255), nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    worker = relationship("Worker", back_populates="bank_account")
 
 
 class Service(Base):
@@ -176,6 +194,7 @@ class Booking(Base):
     payments = relationship("Payment", back_populates="booking")
     reviews = relationship("RatingReview", back_populates="booking")
     job_history = relationship("JobHistory", back_populates="booking")
+    work_report = relationship("WorkReport", back_populates="booking", uselist=False)
 
 
 class Payment(Base):
@@ -184,8 +203,18 @@ class Payment(Base):
     id = Column(Integer, primary_key=True, index=True)
     amount = Column(Numeric(10, 2), nullable=False)
     payment_method = Column(String(50), nullable=True)
+    # 'created' (Razorpay order opened), 'paid' (signature verified),
+    # 'failed' (verification rejected), legacy 'pending'.
     payment_status = Column(String(50), default="pending")
     transaction_id = Column(String(255), nullable=True)
+    # Razorpay gateway ids — the order the backend opened, the payment the
+    # customer completed in checkout, and the signature proving it (kept for
+    # audit/disputes; verification itself happens at /payments/verify time).
+    razorpay_order_id = Column(String(255), nullable=True)
+    razorpay_payment_id = Column(String(255), nullable=True)
+    razorpay_signature = Column(String(255), nullable=True)
+    # Optional screenshot / UPI reference image the client uploads after payment.
+    payment_proof_image = Column(String(1000), nullable=True)
     paid_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
@@ -195,6 +224,42 @@ class Payment(Base):
 
     booking = relationship("Booking", back_populates="payments")
     user = relationship("User", back_populates="payments")
+
+
+class WithdrawalRequest(Base):
+    """A worker's request to withdraw earned funds. Status is managed by the
+    admin directly in the database (Supabase): 'pending' -> 'success' or 'failed'."""
+    __tablename__ = "withdrawal_requests"
+
+    id = Column(Integer, primary_key=True, index=True)
+    worker_id = Column(Integer, ForeignKey("workers.id"), nullable=False, index=True)
+    amount = Column(Numeric(10, 2), nullable=False)
+    # 'pending' = awaiting processing, 'success' = disbursed, 'failed' = rejected
+    status = Column(String(20), default="pending", nullable=False)
+    # Admin notes (e.g. bank reference, failure reason)
+    admin_note = Column(String(500), nullable=True)
+    requested_at = Column(DateTime, default=datetime.utcnow)
+    processed_at = Column(DateTime, nullable=True)
+
+
+class WorkReport(Base):
+    """Proof-of-work the worker submits when finishing a job: photos of the
+    completed work plus an optional note. Submitting the report moves the
+    booking to 'awaiting_payment' and unlocks the client's Razorpay payment.
+    One report per booking (unique on booking_id)."""
+
+    __tablename__ = "work_reports"
+
+    id = Column(Integer, primary_key=True, index=True)
+    booking_id = Column(Integer, ForeignKey("bookings.id"), nullable=False, unique=True, index=True)
+    worker_id = Column(Integer, ForeignKey("workers.id"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    note = Column(Text, nullable=True)
+    # Up to FIVE photo URLs (JSON array), uploaded via /upload-review-image.
+    images = Column(String(4000), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    booking = relationship("Booking", back_populates="work_report")
 
 
 class RatingReview(Base):

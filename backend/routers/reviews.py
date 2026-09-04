@@ -8,6 +8,10 @@ import database, models, schemas
 from auth import get_current_user
 from rate_limit import limiter
 from booking_status import normalize_status
+from socket_events import emit_to_user
+from routers.notifications import build_notification, publish_notification
+from routers.bookings import complete_booking
+from routers.payments import is_booking_paid
 
 router = APIRouter()
 
@@ -167,9 +171,15 @@ def create_review(
       - clients (role 'user') review WORKERS — payload.worker_id is required;
       - workers (role 'worker') review CLIENTS — payload.user_id is required.
 
-    Either direction requires a COMPLETED booking between the pair — ratings
-    can't be fabricated without real work. Each side may leave one review per
-    booking (uniqueness on booking_id + reviewer_role)."""
+    Gates (so ratings can't be fabricated without real work):
+      - clients may review once they have PAID for the job (booking in
+        'awaiting_payment' with a verified payment) — submitting that review
+        AUTO-COMPLETES the booking (strict payment chain); legacy 'completed'
+        bookings stay reviewable too;
+      - workers may review once the work report is in ('awaiting_payment')
+        or the booking is completed.
+    Each side may leave one review per booking (uniqueness on booking_id +
+    reviewer_role)."""
     role = current.get("role", "user")
     if role == "worker":
         if payload.user_id is None:
@@ -204,10 +214,24 @@ def create_review(
         if reviewed_user is None:
             raise HTTPException(status_code=404, detail="User not found")
 
+        # Worker can review only after the client has paid (payment_completed
+        # or payment_proof_submitted), or if the booking was marked not
+        # completed (not_completed / client_not_completed), or is already
+        # completed. The client may skip the optional proof step — workers
+        # shouldn't be locked out of reviewing them in that case.
+        # Backward compat: old bookings in awaiting_payment with a verified
+        # paid payment also allow the worker to review (proof step didn't
+        # exist then).
+        worker_reviewable = set(_COMPLETED_STATUSES + [
+            "payment_proof_submitted", "payment_completed",
+            "not_completed", "client_not_completed",
+            "not_completed_pending_review",
+            "awaiting_payment",
+        ])
         booking_q = db.query(models.Booking).filter(
             models.Booking.worker_id == reviewer_id,
             models.Booking.user_id == payload.user_id,
-            models.Booking.status.in_(_COMPLETED_STATUSES),
+            models.Booking.status.in_(worker_reviewable),
         )
         if payload.booking_id is not None:
             booking_q = booking_q.filter(models.Booking.id == payload.booking_id)
@@ -215,7 +239,7 @@ def create_review(
         if booking is None:
             raise HTTPException(
                 status_code=403,
-                detail="You can only review a client after a completed booking with them",
+                detail="You can only review a client after the payment proof is submitted, or after the job is marked not completed",
             )
 
         existing = (
@@ -248,9 +272,31 @@ def create_review(
         except IntegrityError:
             db.rollback()
             raise HTTPException(status_code=409, detail="You have already reviewed this client for that booking")
+        # A worker review on a pending not-completed job FINALIZES it — a
+        # client who flags the job and walks away can't leave it stuck in
+        # Present forever. Terminal not_completed = Past on both sides.
+        finalize_not_completed = normalize_status(booking.status) == "not_completed_pending_review"
+        if finalize_not_completed:
+            booking.status = "not_completed"
         # Clients have no stored rating aggregate — nothing to recompute.
         db.commit()
         db.refresh(review)
+        if finalize_not_completed:
+            notif = build_notification(
+                db, booking.user_id, "user", "job_incomplete",
+                "Job closed as not completed ⏱",
+                "The booking was closed as not completed — the worker's review has been submitted.",
+            )
+            publish_notification(db, notif, "user")
+            emit_to_user(booking.user_id, "booking_status_changed", {
+                "booking_id": booking.id,
+                "status": booking.status,
+                "estimated_price": float(booking.estimated_price) if booking.estimated_price is not None else None,
+                "final_price": float(booking.final_price) if booking.final_price is not None else None,
+                "price_proposed_by": booking.price_proposed_by,
+                "updated_by": reviewer_id,
+                "timestamp": datetime.utcnow().isoformat(),
+            }, role="user")
         return _single_dict(db, review)
 
     # Client reviewing a worker (the original direction). A worker token must
@@ -260,21 +306,58 @@ def create_review(
     if worker is None:
         raise HTTPException(status_code=404, detail="Worker not found")
 
-    # Find a completed booking between this reviewer and worker. If the client
-    # supplied a booking_id it must be that one; otherwise any completed
-    # booking between the pair is used.
+    # Find the booking this review targets. If the client supplied a
+    # booking_id it must be that one; otherwise the most recent booking
+    # between the pair is used. Reviewable = completed (legacy flow) or
+    # awaiting payment WITH a verified payment (the payment chain).
     booking_q = db.query(models.Booking).filter(
         models.Booking.user_id == reviewer_id,
         models.Booking.worker_id == payload.worker_id,
-        models.Booking.status.in_(_COMPLETED_STATUSES),
     )
     if payload.booking_id is not None:
         booking_q = booking_q.filter(models.Booking.id == payload.booking_id)
-    booking = booking_q.first()
+    booking = booking_q.order_by(models.Booking.id.desc()).first()
     if booking is None:
         raise HTTPException(
             status_code=403,
             detail="You can only review a worker after a completed booking with them",
+        )
+    booking_status = (booking.status or "").strip().lower()
+    # Reviewable: payment_proof_submitted (proof is MANDATORY — the client must
+    # upload it after paying before they can rate), or backward-compat:
+    # awaiting_payment+paid (old flow before the proof step existed), or
+    # completed. Also the not-completed family — not_completed,
+    # client_not_completed and not_completed_pending_review (the job was
+    # flagged as not done; the review is what finalizes it). A booking in
+    # payment_completed (paid but proof not yet submitted) is NOT reviewable —
+    # that is the whole point of making the proof mandatory.
+    is_paid_awaiting = booking_status == "awaiting_payment" and is_booking_paid(db, booking.id)
+    is_proof_submitted = booking_status == "payment_proof_submitted"
+    is_not_completed = booking_status in ("not_completed", "client_not_completed", "not_completed_pending_review")
+    if not (booking_status in _COMPLETED_STATUSES or is_paid_awaiting or is_proof_submitted or is_not_completed):
+        if booking_status == "awaiting_payment":
+            raise HTTPException(
+                status_code=403,
+                detail="Pay for the job first — the review opens after your payment is confirmed",
+            )
+        if booking_status == "client_confirmed":
+            raise HTTPException(
+                status_code=403,
+                detail="Pay first — the review opens after payment and proof submission",
+            )
+        if booking_status == "payment_completed":
+            raise HTTPException(
+                status_code=403,
+                detail="Submit your payment proof first — the review opens after the proof is submitted",
+            )
+        if booking_status == "work_reported":
+            raise HTTPException(
+                status_code=403,
+                detail="Review the work report and confirm — choose Complete or Not Completed below",
+            )
+        raise HTTPException(
+            status_code=403,
+            detail="You can only review a worker after completing the required workflow",
         )
 
     existing = (
@@ -310,8 +393,55 @@ def create_review(
         db.rollback()
         raise HTTPException(status_code=409, detail="This booking has already been reviewed")
     _recompute_worker_rating(db, payload.worker_id)
+    # Strict workflow: the client's post-payment review (after proof submission)
+    # completes the job. Backward compat: old awaiting_payment+paid flow also works.
+    # A review on a not-completed job instead FINALIZES it as terminal
+    # 'not_completed' — it must never be relabelled 'completed' (no payment
+    # happened / the work failed). That finalize is what moves the job to Past
+    # on BOTH sides.
+    completes_booking = is_paid_awaiting or is_proof_submitted
+    if is_not_completed:
+        booking.status = "not_completed"
+        completion_notif = None
+    elif completes_booking:
+        completion_notif = complete_booking(db, booking)
+    else:
+        completion_notif = None
     db.commit()
     db.refresh(review)
+    if completes_booking:
+        if completion_notif is not None:
+            publish_notification(db, completion_notif, "worker")
+        # Realtime: the worker's requests screen moves the card to Past.
+        emit_to_user(booking.worker_id, "booking_status_changed", {
+            "booking_id": booking.id,
+            "status": booking.status,
+            "estimated_price": float(booking.estimated_price) if booking.estimated_price is not None else None,
+            "final_price": float(booking.final_price) if booking.final_price is not None else None,
+            "price_proposed_by": booking.price_proposed_by,
+            "updated_by": reviewer_id,
+            "timestamp": datetime.utcnow().isoformat(),
+        }, role="worker")
+    elif is_not_completed:
+        # The review just closed a flagged job — notify the worker and push
+        # the status event to BOTH screens so the card moves Present -> Past.
+        notif = build_notification(
+            db, booking.worker_id, "worker", "job_incomplete",
+            "Job closed as not completed ⏱",
+            "The booking was closed as not completed after the client's review.",
+        )
+        publish_notification(db, notif, "worker")
+        status_payload = {
+            "booking_id": booking.id,
+            "status": booking.status,
+            "estimated_price": float(booking.estimated_price) if booking.estimated_price is not None else None,
+            "final_price": float(booking.final_price) if booking.final_price is not None else None,
+            "price_proposed_by": booking.price_proposed_by,
+            "updated_by": reviewer_id,
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+        emit_to_user(booking.worker_id, "booking_status_changed", status_payload, role="worker")
+        emit_to_user(booking.user_id, "booking_status_changed", status_payload, role="user")
     return _single_dict(db, review)
 
 

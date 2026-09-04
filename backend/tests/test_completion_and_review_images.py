@@ -1,14 +1,8 @@
 """Both-sides completion + review image tests.
 
-Locks in:
-  - EITHER participant may complete an upcoming booking (the client can
-    confirm the job is done, not just the worker), while only the worker
-    may ACCEPT a pending one.
-  - Client-driven completion produces the same side effects as worker-driven:
-    job-history entry, worker stat bumps, notification to the other side.
-  - Reviews may carry UP TO FIVE photo URLs (review_images); non-URL values
-    are rejected and six-plus-photo submissions never create a review. The
-    legacy single review_image field stays synced to the first photo.
+Completion now happens automatically when the client submits a review after
+paying via Razorpay (work-report → payment → review → auto-complete).
+The old manual PUT /bookings/{id} {status: "completed"} is no longer allowed.
 """
 import sys
 import os
@@ -18,7 +12,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from fastapi.testclient import TestClient
 from main import app
-from conftest import issue_verify_token
+from conftest import issue_verify_token, complete_booking_via_work_report, complete_booking_work_report_to_awaiting_payment
 
 client = TestClient(app)
 
@@ -78,23 +72,23 @@ def test_client_cannot_accept_pending_booking():
 
 
 def test_client_can_mark_upcoming_booking_completed():
+    """Submitting a client review after paying auto-completes the booking.
+    Verifies all side-effects (job-history, worker stats, notification) match
+    what the old manual completion produced."""
     cid, ctok = _register_and_login("user")
     wid, wtok = _available_worker()
-    b = _booking(ctok, wid)
 
     # Worker stats before completion.
     r = client.get(f"/workers/{wid}", headers=_auth(ctok))
     assert r.status_code == 200, r.text
     completed_before = r.json().get("completed_jobs") or 0
 
-    # Worker accepts, then the CLIENT marks the job completed.
-    r = client.put(f"/bookings/{b['id']}", json={"status": "upcoming"}, headers=_auth(wtok))
-    assert r.status_code == 200, r.text
-    r = client.put(f"/bookings/{b['id']}", json={"status": "completed"}, headers=_auth(ctok))
-    assert r.status_code == 200, r.text
-    assert r.json()["status"] == "completed"
+    # Bring the booking to completed via the proper chain:
+    # worker accepts → work report → client pays → client reviews → auto-complete
+    b = complete_booking_via_work_report(ctok, wtok, wid, client)
+    assert b["status"] == "completed"
 
-    # Same side effects as worker-driven completion:
+    # Same side effects as the old manual completion:
     # 1. job-history entry visible to the client
     r = client.get(f"/job-history/?with_worker={wid}", headers=_auth(ctok))
     assert r.status_code == 200, r.text
@@ -117,20 +111,17 @@ def test_client_can_mark_upcoming_booking_completed():
 
 
 def test_review_with_image_url():
+    """A client review can carry a photo URL, which is returned in list reads."""
     cid, ctok = _register_and_login("user")
     wid, wtok = _available_worker()
-    b = _booking(ctok, wid)
-
-    # Complete the job (client side — exercises the new rule too).
-    client.put(f"/bookings/{b['id']}", json={"status": "upcoming"}, headers=_auth(wtok))
-    r = client.put(f"/bookings/{b['id']}", json={"status": "completed"}, headers=_auth(ctok))
-    assert r.status_code == 200, r.text
+    b = complete_booking_work_report_to_awaiting_payment(ctok, wtok, wid, client)
 
     image_url = "https://example.supabase.co/storage/v1/object/public/all_images/review_user_1/x.jpg"
     r = client.post(
         "/reviews/",
         json={
             "worker_id": wid,
+            "booking_id": b["id"],
             "rating": 5,
             "review_text": "Great work, photo attached",
             "review_image": image_url,
@@ -148,15 +139,23 @@ def test_review_with_image_url():
 
 
 def test_review_image_must_be_http_url():
+    """A non-HTTP review_image value is rejected."""
     cid, ctok = _register_and_login("user")
     wid, wtok = _available_worker()
-    b = _booking(ctok, wid)
-    client.put(f"/bookings/{b['id']}", json={"status": "upcoming"}, headers=_auth(wtok))
-    client.put(f"/bookings/{b['id']}", json={"status": "completed"}, headers=_auth(wtok))
+    b = complete_booking_work_report_to_awaiting_payment(ctok, wtok, wid, client)
 
+    # Worker reviews the client (worker can only review after payment_proof_submitted)
     r = client.post(
         "/reviews/",
-        json={"worker_id": wid, "rating": 4, "review_text": "ok", "review_image": "javascript:alert(1)"},
+        json={"user_id": cid, "booking_id": b["id"], "rating": 4, "review_text": "ok"},
+        headers=_auth(wtok),
+    )
+    assert r.status_code == 200, r.text
+
+    # Client tries to attach a non-HTTP review image — must be rejected.
+    r = client.post(
+        "/reviews/",
+        json={"worker_id": wid, "booking_id": b["id"], "rating": 4, "review_text": "ok", "review_image": "javascript:alert(1)"},
         headers=_auth(ctok),
     )
     assert r.status_code == 400, r.text
@@ -167,16 +166,16 @@ def _url(i: int) -> str:
 
 
 def test_review_accepts_five_images_and_keeps_legacy_field_synced():
+    """Reviews can carry up to 5 photo URLs; the legacy single-image field
+    stays synced to the first photo."""
     cid, ctok = _register_and_login("user")
     wid, wtok = _available_worker()
-    b = _booking(ctok, wid)
-    client.put(f"/bookings/{b['id']}", json={"status": "upcoming"}, headers=_auth(wtok))
-    client.put(f"/bookings/{b['id']}", json={"status": "completed"}, headers=_auth(wtok))
+    b = complete_booking_work_report_to_awaiting_payment(ctok, wtok, wid, client)
 
     urls = [_url(i) for i in range(5)]
     r = client.post(
         "/reviews/",
-        json={"worker_id": wid, "rating": 5, "review_text": "five photos", "review_images": urls},
+        json={"worker_id": wid, "booking_id": b["id"], "rating": 5, "review_text": "five photos", "review_images": urls},
         headers=_auth(ctok),
     )
     assert r.status_code == 200, r.text
@@ -191,16 +190,15 @@ def test_review_accepts_five_images_and_keeps_legacy_field_synced():
 
 
 def test_review_rejects_more_than_five_images():
+    """Six photos in review_images are rejected."""
     cid, ctok = _register_and_login("user")
     wid, wtok = _available_worker()
-    b = _booking(ctok, wid)
-    client.put(f"/bookings/{b['id']}", json={"status": "upcoming"}, headers=_auth(wtok))
-    client.put(f"/bookings/{b['id']}", json={"status": "completed"}, headers=_auth(wtok))
+    b = complete_booking_work_report_to_awaiting_payment(ctok, wtok, wid, client)
 
     six_urls = [_url(i) for i in range(6)]
     r = client.post(
         "/reviews/",
-        json={"worker_id": wid, "rating": 5, "review_text": "six photos", "review_images": six_urls},
+        json={"worker_id": wid, "booking_id": b["id"], "rating": 5, "review_text": "six photos", "review_images": six_urls},
         headers=_auth(ctok),
     )
     assert r.status_code in (400, 422), r.text
@@ -211,16 +209,16 @@ def test_review_rejects_more_than_five_images():
 
 
 def test_review_multi_image_urls_must_be_http():
+    """A non-HTTP URL in review_images is rejected."""
     cid, ctok = _register_and_login("user")
     wid, wtok = _available_worker()
-    b = _booking(ctok, wid)
-    client.put(f"/bookings/{b['id']}", json={"status": "upcoming"}, headers=_auth(wtok))
-    client.put(f"/bookings/{b['id']}", json={"status": "completed"}, headers=_auth(wtok))
+    b = complete_booking_work_report_to_awaiting_payment(ctok, wtok, wid, client)
 
     r = client.post(
         "/reviews/",
         json={
             "worker_id": wid,
+            "booking_id": b["id"],
             "rating": 3,
             "review_text": "bad array entry",
             "review_images": [_url(0), "file:///etc/passwd"],

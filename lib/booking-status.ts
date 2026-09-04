@@ -1,8 +1,12 @@
 /**
  * Canonical booking status lifecycle.
  *
- *   pending -> upcoming -> completed
- *       \--------> rejected
+ *   pending -> upcoming -> awaiting_payment -> completed
+ *       \------------> rejected
+ *   awaiting_payment -> unpaid   (worker reports non-payment)
+ *
+ * The worker's work report moves a job to awaiting_payment; the client then
+ * pays (Razorpay) and submits a review, which auto-completes the booking.
  *
  * The statuses, legacy aliases, and active set are defined ONCE in
  * shared/booking-status.json and consumed by both this module and
@@ -23,7 +27,7 @@ export function normalizeBookingStatus(raw: unknown): BookingStatus {
   return (LEGACY_MAP[s] ?? (BOOKING_STATUSES.includes(s as BookingStatus) ? (s as BookingStatus) : 'pending'));
 }
 
-/** True when the booking is still active (not completed/rejected). */
+/** True when the booking is still active (not completed/rejected/unpaid). */
 export function isActiveStatus(status: BookingStatus): boolean {
   return ACTIVE_SET.has(status);
 }
@@ -32,3 +36,9 @@ export function isActiveStatus(status: BookingStatus): boolean {
 export function isCompletedStatus(status: BookingStatus): boolean {
   return status === 'completed';
 }
+
+/** True when the work report is in and the client's payment is open. */
+export function isAwaitingPaymentStatus(status: BookingStatus): boolean {
+  return status === 'awaiting_payment';
+}
+

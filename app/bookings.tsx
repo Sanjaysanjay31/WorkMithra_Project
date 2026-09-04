@@ -1,21 +1,35 @@
 import Avatar from '@/components/avatar';
 import BottomNav from '@/components/bottom-nav';
 import FrameModal from '@/components/frame-modal';
-import { authFetch, expectJson } from '@/lib/api';
+import RazorpayCheckout from '@/components/RazorpayCheckout';
+import { authFetch, expectJson, readApiError } from '@/lib/api';
 import { BookingStatus, isActiveStatus, normalizeBookingStatus } from '@/lib/booking-status';
 import { formatBookingDateTime, isBookingDateTimePast } from '@/lib/format';
+import { pickImageNative, pickImageWeb } from '@/lib/image-picker';
 import { platformShadow } from '@/lib/shadow';
 import { storage } from '@/lib/storage';
+import { UploadFilePart, uploadMultipart } from '@/lib/upload';
 import { ensureSocket, onBookingStatusChanged } from '@/lib/socket';
-import { BookingResponse, ReviewResponse, WorkerBrief } from '@/lib/types';
+import {
+    BookingResponse,
+    PaymentOrderResponse,
+    PaymentResponse,
+    RazorpaySuccessPayload,
+    ReviewResponse,
+    WorkerBrief,
+    WorkReportResponse
+} from '@/lib/types';
 import { Ionicons } from '@expo/vector-icons';
 import { Stack, useFocusEffect, useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
     ActivityIndicator,
-    RefreshControl,
     Alert,
+    Image,
     KeyboardAvoidingView,
+    Modal,
+    Platform,
+    RefreshControl,
     ScrollView,
     StyleSheet,
     Text,
@@ -39,14 +53,30 @@ type Booking = {
   date: string;
 };
 
-function statusColor(s: BookingStatus, isPast: boolean) {
+function statusColor(s: BookingStatus, isPast: boolean, paymentResult?: string) {
   if (s === 'completed') return { bg: '#dcfce7', fg: '#166534', label: '✓ Completed' };
   if (s === 'rejected') return { bg: '#fee2e2', fg: '#991b1b', label: '✗ Rejected' };
+  if (s === 'unpaid') return { bg: '#fee2e2', fg: '#991b1b', label: '⚠ Unpaid' };
+  if (s === 'not_completed') return { bg: '#fee2e2', fg: '#991b1b', label: '⏱ Not completed' };
+  if (s === 'client_not_completed') return { bg: '#fee2e2', fg: '#991b1b', label: '⏱ Not completed' };
+  // Flagged as not done — stays in Present (amber) until the review closes it.
+  if (s === 'not_completed_pending_review') return { bg: '#ffedd5', fg: '#9a3412', label: '⏱ Not completed · review pending' };
+  if (s === 'work_completed') return { bg: '#dbeafe', fg: '#1e40af', label: '🔧 Work marked complete' };
+  if (s === 'work_reported') return { bg: '#ede9fe', fg: '#5b21b6', label: '📋 Work report submitted' };
+  if (s === 'client_confirmed') return { bg: '#fef3c7', fg: '#92400e', label: '👁 Work confirmed' };
+  // Work report is in, payment open — stays in Present until paid + reviewed
+  // (completed) or reported unpaid.
+  if (s === 'payment_completed') {
+    if (paymentResult === 'success') return { bg: '#d1fae5', fg: '#065f46', label: '💰 Payment done' };
+    return { bg: '#d1fae5', fg: '#065f46', label: '💰 Payment completed' };
+  }
+  if (s === 'payment_proof_submitted') return { bg: '#d1fae5', fg: '#065f46', label: '📤 Proof submitted' };
+  if (s === 'awaiting_payment') {
+    if (paymentResult === 'success') return { bg: '#dcfce7', fg: '#166534', label: '✅ Paid' };
+    if (paymentResult === 'failed') return { bg: '#fee2e2', fg: '#991b1b', label: '❌ Payment failed' };
+    return { bg: '#fef3c7', fg: '#92400e', label: '💳 Pay pending' };
+  }
   if (isPast) {
-    // In the Past tab the slot has already gone, so describe the OUTCOME rather
-    // than a still-open state: a request nobody accepted is "Not accepted", and
-    // an accepted job that was never finished is "Not completed". "Pending" and
-    // "Upcoming" only make sense for future bookings in the Present tab.
     if (s === 'pending') return { bg: '#f3f4f6', fg: '#6b7280', label: '✗ Not accepted' };
     return { bg: '#ffedd5', fg: '#9a3412', label: '⏱ Not completed' };
   }
@@ -91,6 +121,29 @@ export default function BookingsPage() {
   const [reviewedBookings, setReviewedBookings] = useState<Set<string>>(new Set());
   const [priceFor, setPriceFor] = useState<Booking | null>(null);
   const [priceAmount, setPriceAmount] = useState('');
+  // Payment chain state for awaiting_payment bookings (ids as strings):
+  // which ones are already PAID, and the worker's work report per booking.
+  const [paidBookings, setPaidBookings] = useState<Set<string>>(new Set());
+  const [workReports, setWorkReports] = useState<Record<string, WorkReportResponse>>({});
+  // Set while the Razorpay checkout modal is open (order came from
+  // POST /payments/order); cleared on success/dismiss.
+  const [checkoutFor, setCheckoutFor] = useState<{ booking: Booking; order: PaymentOrderResponse } | null>(null);
+  // Booking id currently opening checkout / verifying — drives the spinner.
+  const [payingId, setPayingId] = useState<string>('');
+  // Payment-success receipt shown after verify. It STAYS on screen with the
+  // transaction id until the user explicitly continues or closes it, so they
+  // can take a screenshot for their records (Expo Go cannot capture the
+  // screen programmatically, so persistence replaces auto-capture).
+  const [paymentReceipt, setPaymentReceipt] = useState<{
+    booking: Booking; amount: number; txnId: string;
+  } | null>(null);
+  // Per-booking payment result: 'success' | 'failed' | null
+  const [paymentResults, setPaymentResults] = useState<Record<string, 'success' | 'failed' | 'not_completed'>>({});
+  // Full-screen image viewer for work-report / review photos
+  const [viewImage, setViewImage] = useState<string | null>(null);
+  // Payment proof images (client uploads after successful payment)
+  const [proofImages, setProofImages] = useState<Record<string, { url: string; preview: string }[]>>({});
+  const [uploadingProof, setUploadingProof] = useState(false);
   // Session id kept in a ref so the realtime handler below can scope
   // incoming bookings without re-subscribing.
   const uidRef = useRef(0);
@@ -106,6 +159,19 @@ export default function BookingsPage() {
     const item = toBookingItem(b, Number(b.user_id))!;
     setPresent((rs) => rs.map((x) => (x.id === item.id ? item : x)));
     setPast((rs) => rs.map((x) => (x.id === item.id ? item : x)));
+  }
+
+  /** Fetch ONE booking's work report (worker-submitted proof photos + note)
+   * and merge it into state — used by the realtime handler so newly submitted
+   * reports appear without a manual refresh. Missing report (404) is fine. */
+  async function fetchWorkReport(bookingId: string) {
+    try {
+      const rep: WorkReportResponse = await expectJson(
+        await authFetch(`/bookings/${bookingId}/work-report`),
+        'Could not load the work report',
+      );
+      if (rep) setWorkReports((prev) => ({ ...prev, [bookingId]: rep }));
+    } catch {}
   }
 
   /** Merge a STATUS change: active bookings stay in Present, terminal ones
@@ -130,44 +196,203 @@ export default function BookingsPage() {
     });
   }
 
-  /** Client-side completion — either participant may confirm the job is done. */
-  function markCompleted(b: Booking) {
+  /** Step 3: Client confirms work after reviewing the report.
+   * Moves the booking to client_confirmed, which unlocks the payment. */
+  async function confirmWork(b: Booking) {
+    if (actionRef.current) return;
+    actionRef.current = true;
+    try {
+      const updated: BookingResponse = await expectJson(
+        await authFetch(`/bookings/${b.id}/confirm-work`, { method: 'POST' }),
+        'Could not confirm the work',
+      );
+      applyUpdate(updated);
+    } catch (e: any) {
+      Alert.alert('Could not confirm', e?.message || 'Please try again.');
+    } finally {
+      actionRef.current = false;
+    }
+  }
+
+  /** Open Razorpay checkout (test mode) for an awaiting_payment booking.
+   * The backend opens the order for the locked final_price — the client
+   * never chooses the amount. */
+  async function startPayment(b: Booking) {
+    if (actionRef.current) return;
+    actionRef.current = true;
+    setPayingId(b.id);
+    try {
+      const order: PaymentOrderResponse = await expectJson(
+        await authFetch('/payments/order', {
+          method: 'POST',
+          json: { booking_id: Number(b.id) },
+        }),
+        'Could not start the payment',
+      );
+      setCheckoutFor({ booking: b, order });
+    } catch (e: any) {
+      Alert.alert('Payment unavailable', e?.message || 'Please try again.');
+    } finally {
+      actionRef.current = false;
+      setPayingId('');
+    }
+  }
+
+  /** Pick + upload a payment proof image; the returned URL is stored against the booking. */
+  async function uploadProofImage(bookingId: string) {
+    if (uploadingProof) return;
+    if ((proofImages[bookingId]?.length ?? 0) >= 3) {
+      Alert.alert('Limit reached', 'You can attach up to 3 payment proof images.');
+      return;
+    }
+    setUploadingProof(true);
+    try {
+      // Uploads go through uploadMultipart (XHR): global fetch rejects
+      // { uri, name, type } parts on native with "Unsupported FormDataPart".
+      let part: UploadFilePart;
+      let preview = '';
+      if (Platform.OS === 'web') {
+        const file = await pickImageWeb();
+        if (!file) { setUploadingProof(false); return; }
+        part = file;
+        preview = URL.createObjectURL(file);
+      } else {
+        const asset = await pickImageNative();
+        if (!asset) { setUploadingProof(false); return; }
+        const name = asset.fileName || asset.uri.split('/').pop() || 'proof.jpg';
+        const ext = (name.split('.').pop() || 'jpg').toLowerCase();
+        const mime = asset.mimeType || (ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg');
+        part = { uri: asset.uri, name, type: mime };
+        preview = asset.uri;
+      }
+      const data = await uploadMultipart<{ url: string }>('/upload-review-image', part);
+      setProofImages((prev) => ({
+        ...prev,
+        [bookingId]: [...(prev[bookingId] ?? []), { url: data.url, preview }],
+      }));
+    } catch (e: any) {
+      Alert.alert('Upload failed', e?.message || 'Could not upload the proof image');
+    } finally {
+      setUploadingProof(false);
+    }
+  }
+
+  /** Submit payment proof images to the backend after successful payment.
+   * On success, refetch the booking so the status moves to
+   * `payment_proof_submitted` and the "Rate worker to complete" button
+   * becomes active (the rate button is gated on that exact status — without
+   * the refetch, the screen would still show the proof-upload UI and the
+   * rate action would never appear). */
+  async function submitPaymentProof(bookingId: string) {
+    const images = proofImages[bookingId];
+    if (!images || images.length === 0) return;
+    try {
+      for (const img of images) {
+        await authFetch(`/payments/${bookingId}/proof`, {
+          method: 'PATCH',
+          json: { payment_proof_image: img.url },
+        });
+      }
+      // Mark the proof as accepted locally so the success branch of the
+      // rate-panel renders immediately, even before the refetch returns.
+      setPaymentResults((prev) => ({ ...prev, [bookingId]: 'success' }));
+      try {
+        const res = await authFetch(`/bookings/${bookingId}`);
+        if (res.ok) {
+          const fresh: BookingResponse = await res.json();
+          applyUpdate(fresh);
+        }
+      } catch {}
+      Alert.alert('Proof uploaded', 'Your payment proof has been submitted.');
+    } catch (e: any) {
+      Alert.alert('Upload failed', e?.message || 'Could not save payment proof.');
+    }
+  }
+
+  /** Razorpay Checkout succeeded — verify the signature server-side before
+   * celebrating; only the backend can accept the payment. */
+  async function handlePaymentSuccess(payload: RazorpaySuccessPayload) {
+    const ctx = checkoutFor;
+    setCheckoutFor(null);
+    if (!ctx) return;
+    setPayingId(ctx.booking.id);
+    try {
+      const payment: PaymentResponse = await expectJson(
+        await authFetch('/payments/verify', {
+          method: 'POST',
+          json: { booking_id: Number(ctx.booking.id), ...payload },
+        }),
+        'Could not confirm the payment',
+      );
+      setPaidBookings((s) => new Set(s).add(ctx.booking.id));
+      setPaymentResults((prev) => ({ ...prev, [ctx.booking.id]: 'success' }));
+      // Persistent receipt (not an auto-dismissing alert): shows the verified
+      // transaction id and stays until the user continues or closes it.
+      setPaymentReceipt({
+        booking: ctx.booking,
+        amount: Number(payment.amount ?? ctx.booking.final_price ?? ctx.booking.amount ?? 0),
+        txnId: payment.transaction_id || payment.razorpay_payment_id || payload.razorpay_payment_id || '',
+      });
+    } catch (e: any) {
+      setPaymentResults((prev) => ({ ...prev, [ctx.booking.id]: 'failed' }));
+      Alert.alert(
+        'Payment verification failed',
+        `${e?.message || 'Please try again.'} If any amount was deducted, Razorpay refunds failed test payments automatically.`,
+      );
+    } finally {
+      setPayingId('');
+    }
+  }
+
+  async function markNotCompleted(id: string) {
     Alert.alert(
-      'Mark job completed?',
-      `Confirm that ${b.worker.full_name || 'the worker'} finished the job (${b.date}).`,
+      'Mark as not completed?',
+      'The worker will be notified. You then submit your review (photos optional) — the booking moves to Past once the review is done.',
       [
         { text: 'Cancel', style: 'cancel' },
         {
-          text: 'Yes, completed',
-          onPress: () => void (async () => {
-            if (actionRef.current) return;
-            actionRef.current = true;
+          text: 'Confirm',
+          style: 'destructive',
+          onPress: async () => {
             try {
-              const updated: BookingResponse = await expectJson(
-                await authFetch(`/bookings/${b.id}`, {
-                  method: 'PUT',
-                  json: { status: 'completed' },
-                }),
-                'Could not mark the job completed',
-              );
-              mergeStatusUpdate(updated);
-              Alert.alert(
-                'Job completed 🎉',
-                'Thanks for confirming! You can now leave a review for the worker.',
-                [
-                  {
-                    text: 'Review now',
-                    onPress: () => router.push({ pathname: '/worker_info', params: { id: String(b.worker.id), tab: 'reviews', booking: b.id } }),
-                  },
-                  { text: 'Later' },
-                ],
-              );
+              // work_reported -> use confirm-not-completed (client reviewed report, not happy)
+              // other statuses -> use mark-incomplete
+              const b = present.find((x) => x.id === id) || past.find((x) => x.id === id);
+              const endpoint = b?.status === 'work_reported'
+                ? `/bookings/${id}/confirm-not-completed`
+                : `/bookings/${id}/mark-incomplete`;
+              const res = await authFetch(endpoint, { method: 'POST' });
+              if (res.ok) {
+                setPaymentResults((p) => ({ ...p, [id]: 'not_completed' }));
+                void loadBookings(false);
+                // The booking is now pending-review (still in Present) — walk
+                // the client straight into the review form, which finalizes it.
+                Alert.alert(
+                  'Marked as not completed ⏱',
+                  'Submit your review to finish — the booking moves to Past once the review is done.',
+                  [
+                    { text: 'Later', style: 'cancel' },
+                    {
+                      text: 'Review to finish',
+                      onPress: () => {
+                        if (b) {
+                          router.push({
+                            pathname: '/worker_info',
+                            params: { id: String(b.worker.id), tab: 'reviews', booking: id },
+                          });
+                        }
+                      },
+                    },
+                  ],
+                );
+              } else {
+                const data = await res.json().catch(() => ({}));
+                Alert.alert('Error', data?.detail || 'Could not mark as not completed.');
+              }
             } catch (e: any) {
-              Alert.alert('Could not complete', e?.message || 'Please try again.');
-            } finally {
-              actionRef.current = false;
+              Alert.alert('Error', e?.message || 'Something went wrong.');
             }
-          })(),
+          },
         },
       ],
     );
@@ -255,7 +480,7 @@ export default function BookingsPage() {
         // Past = the scheduled time has passed OR it reached a terminal
         // state. We keep the real status label (pending/upcoming/rejected/
         // completed) so a never-accepted booking still shows as Pending.
-        const isPast = isBookingDateTimePast(b.booking_date, b.booking_time) || !isActiveStatus(bookingItem.status);
+        const isPast = !isActiveStatus(bookingItem.status);
         if (isPast) {
           realPast.push(bookingItem);
         } else {
@@ -278,6 +503,36 @@ export default function BookingsPage() {
           new Set(myReviews.map((r) => (r.booking_id != null ? String(r.booking_id) : '')).filter(Boolean)),
         );
       } catch {}
+
+      // Payment state + work reports for jobs in the workflow where the client
+      // needs to take action — PLUS terminal states (completed/rated/…) so the
+      // worker's work-proof photos stay visible in Past, not just in Present.
+      // Failures only cost the pay panel (it re-loads on the next
+      // focus/refresh), so they must not fail the bookings load.
+      const actionStatuses = ['work_completed', 'work_reported', 'client_confirmed', 'payment_completed', 'payment_proof_submitted', 'awaiting_payment', 'rated', 'completed', 'not_completed', 'client_not_completed', 'not_completed_pending_review'];
+      const needsAction = bookingsList.filter((b) => actionStatuses.includes(normalizeBookingStatus(b.status)));
+      const paidSet = new Set<string>();
+      const reports: Record<string, WorkReportResponse> = {};
+      await Promise.all(
+        needsAction.map(async (b) => {
+          try {
+            const pay: PaymentResponse | null = await expectJson(
+              await authFetch(`/payments/booking/${b.id}`),
+              'Could not load payment status',
+            );
+            if (pay && pay.payment_status === 'paid') paidSet.add(String(b.id));
+          } catch {}
+          try {
+            const rep: WorkReportResponse = await expectJson(
+              await authFetch(`/bookings/${b.id}/work-report`),
+              'Could not load the work report',
+            );
+            if (rep) reports[String(b.id)] = rep;
+          } catch {}
+        }),
+      );
+      setPaidBookings(paidSet);
+      setWorkReports(reports);
     } catch (e: any) {
       console.warn('Failed to fetch bookings', e);
       setLoadError(e?.message || 'Could not load your bookings.');
@@ -324,6 +579,9 @@ export default function BookingsPage() {
               'Could not refresh the booking',
             );
             mergeStatusUpdate(updated);
+            // The worker just submitted/updated the work report — pull its
+            // photos so the client sees them immediately.
+            void fetchWorkReport(String(data.booking_id));
           } catch {}
         })();
       });
@@ -413,8 +671,189 @@ export default function BookingsPage() {
     );
   }
 
+  /** Worker's work-proof box — ALL submitted photos + full note. Every photo
+   * is tappable for the full-screen viewer. Rendered in Present (payment
+   * panel) AND in Past cards so the client can always review what was done. */
+  function renderReportBox(b: Booking) {
+    const report = workReports[b.id];
+    if (!report || (report.images.length === 0 && !report.note)) return null;
+    return (
+      <View style={styles.reportBox}>
+        <View style={styles.reportHead}>
+          <Ionicons name="camera-outline" size={13} color="#6F42C1" />
+          <Text style={styles.reportHeadText} numberOfLines={1}>
+            Work photos from {b.worker.full_name || 'worker'}
+            {report.images.length > 0 ? ` (${report.images.length})` : ''}
+          </Text>
+        </View>
+        {report.images.length > 0 && (
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.reportImages}>
+            {report.images.map((u, i) => (
+              <TouchableOpacity
+                key={`${u}-${i}`}
+                activeOpacity={0.8}
+                onPress={(e) => { e.stopPropagation?.(); setViewImage(u); }}
+              >
+                <Image source={{ uri: u }} style={styles.reportImage} />
+              </TouchableOpacity>
+            ))}
+          </ScrollView>
+        )}
+        {report.images.length > 0 && (
+          <Text style={styles.reportHint}>Tap a photo to view it full-screen</Text>
+        )}
+        {!!report.note && (
+          <Text style={styles.reportNote}>{report.note}</Text>
+        )}
+      </View>
+    );
+  }
+
+  /** Payment panel: shows the worker's work report and the appropriate action
+   * based on the booking's sequential workflow status:
+   * - work_reported: "Confirm Work" button
+   * - client_confirmed: Pay button (unlocked after confirm)
+   * - payment_completed: proof upload
+   * - payment_proof_submitted: "Rate to Complete"
+   * - awaiting_payment: (legacy) Pay button for old flow */
+  function renderPaymentPanel(b: Booking) {
+    const paid = paidBookings.has(b.id);
+    const proofResult = paymentResults[b.id];
+    const proofs = proofImages[b.id] ?? [];
+    const status = b.status;
+
+    return (
+      <View style={styles.payPanel}>
+        {renderReportBox(b)}
+
+        {/* Step 3: Client reviews work report — choose Complete or Not Completed */}
+        {status === 'work_reported' && (
+          <View>
+            <Text style={styles.payTitle}>Review the work report</Text>
+            <TouchableOpacity
+              style={styles.payBtn}
+              activeOpacity={0.8}
+              onPress={(e) => { e.stopPropagation?.(); void confirmWork(b); }}
+            >
+              <Ionicons name="checkmark-circle" size={15} color="#fff" />
+              <Text style={styles.payText}>✅ Mark as Complete &amp; Pay</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.notCompleteBtn}
+              activeOpacity={0.8}
+              onPress={(e) => { e.stopPropagation?.(); void markNotCompleted(b.id); }}
+            >
+              <Ionicons name="warning-outline" size={14} color="#991b1b" />
+              <Text style={styles.notCompleteText}>Not Completed</Text>
+            </TouchableOpacity>
+            <Text style={styles.proofRequiredNote}>Choosing Not Completed means no payment is needed.</Text>
+          </View>
+        )}
+
+        {/* Step 4: Client pays (unlocked after confirm-work) */}
+        {(status === 'client_confirmed' || status === 'awaiting_payment') && !paid && (
+          <TouchableOpacity
+            style={styles.payBtn}
+            activeOpacity={0.8}
+            disabled={payingId === b.id}
+            onPress={(e) => { e.stopPropagation?.(); void startPayment(b); }}
+          >
+            {payingId === b.id
+              ? <ActivityIndicator size="small" color="#fff" />
+              : <Ionicons name="card-outline" size={15} color="#fff" />}
+            <Text style={styles.payText}>Pay ₹{b.final_price || b.amount} with Razorpay</Text>
+          </TouchableOpacity>
+        )}
+
+        {/* Legacy awaiting_payment flow: retry on failure */}
+        {(status === 'client_confirmed' || status === 'awaiting_payment') && paid && proofResult === 'failed' && (
+          <View style={styles.failedBox}>
+            <Ionicons name="warning" size={16} color="#991b1b" />
+            <Text style={styles.failedText}>Payment failed. Please try again.</Text>
+            <TouchableOpacity
+              style={styles.payBtn}
+              activeOpacity={0.8}
+              disabled={payingId === b.id}
+              onPress={(e) => { e.stopPropagation?.(); void startPayment(b); }}
+            >
+              {payingId === b.id
+                ? <ActivityIndicator size="small" color="#fff" />
+                : <Ionicons name="card-outline" size={15} color="#fff" />}
+              <Text style={styles.payText}>Retry payment</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+
+        {/* Step 5: Proof upload (after payment) — proof is MANDATORY: the client
+            must attach and submit it before the rating step unlocks. */}
+        {(status === 'payment_completed' || (paid && status !== 'payment_proof_submitted')) && proofResult !== 'success' && (
+          <View style={styles.proofSection}>
+            <Text style={styles.proofTitle}>💳 Payment proof (required)</Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.proofImagesRow}>
+              {proofs.map((p, i) => (
+                <TouchableOpacity key={p.url} activeOpacity={0.8} onPress={() => setViewImage(p.url)}>
+                  <Image source={{ uri: p.preview || p.url }} style={styles.proofThumb} />
+                </TouchableOpacity>
+              ))}
+              {proofs.length < 3 && (
+                <TouchableOpacity
+                  style={styles.proofAddBtn}
+                  onPress={() => void uploadProofImage(b.id)}
+                  disabled={uploadingProof}
+                >
+                  {uploadingProof
+                    ? <ActivityIndicator size="small" color="#6F42C1" />
+                    : <Ionicons name="add" size={22} color="#6F42C1" />}
+                </TouchableOpacity>
+              )}
+            </ScrollView>
+            {proofs.length > 0 ? (
+              <TouchableOpacity
+                style={styles.proofSubmitBtn}
+                onPress={() => void submitPaymentProof(b.id)}
+              >
+                <Text style={styles.proofSubmitText}>Submit proof</Text>
+              </TouchableOpacity>
+            ) : (
+              <Text style={styles.proofRequiredNote}>
+                Add at least one proof screenshot and submit it — rating unlocks after the proof is submitted.
+              </Text>
+            )}
+          </View>
+        )}
+
+        {/* Step 6: Rate to complete (after proof submitted) */}
+        {(status === 'payment_proof_submitted' || proofResult === 'success') && (
+          <View style={styles.proofSection}>
+            {proofResult === 'success' && (
+              <Text style={{ fontSize: 11, color: '#065f46', marginBottom: 6 }}>✅ Payment proof submitted</Text>
+            )}
+            <TouchableOpacity
+              style={styles.rateBtn}
+              activeOpacity={0.8}
+              onPress={(e) => { e.stopPropagation?.(); router.push({ pathname: '/worker_info', params: { id: String(b.worker.id), tab: 'reviews', booking: b.id } }); }}
+            >
+              <Ionicons name={reviewedBookings.has(b.id) ? 'eye-outline' : 'star'} size={15} color="#FFB800" />
+              <Text style={styles.rateText}>{reviewedBookings.has(b.id) ? 'View my rating' : '⭐ Rate worker to complete booking'}</Text>
+            </TouchableOpacity>
+            {!reviewedBookings.has(b.id) && (
+              <TouchableOpacity
+                style={styles.notCompleteBtn}
+                activeOpacity={0.8}
+                onPress={(e) => { e.stopPropagation?.(); void markNotCompleted(b.id); }}
+              >
+                <Ionicons name="warning-outline" size={14} color="#991b1b" />
+                <Text style={styles.notCompleteText}>Mark as not completed</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+        )}
+      </View>
+    );
+  }
+
   const renderCard = (b: Booking) => {
-    const sc = statusColor(b.status, tab === 'past');
+    const sc = statusColor(b.status, tab === 'past', paymentResults[b.id]);
     return (
       <TouchableOpacity
         key={b.id}
@@ -441,12 +880,37 @@ export default function BookingsPage() {
             </Text>
           </View>
           {tab === 'present' && b.status !== 'rejected' && renderPricePanel(b)}
-          {tab === 'present' && b.status === 'upcoming' && (
-            <TouchableOpacity style={styles.completeBtn} activeOpacity={0.8} onPress={() => markCompleted(b)}>
-              <Ionicons name="checkmark-circle-outline" size={15} color="#166534" />
-              <Text style={styles.completeText}>Mark Completed</Text>
+          {tab === 'present' && (b.status === 'upcoming' || b.status === 'work_completed') && (
+            <TouchableOpacity
+              style={styles.notCompleteBtn}
+              activeOpacity={0.8}
+              onPress={(e) => { e.stopPropagation?.(); void markNotCompleted(b.id); }}
+            >
+              <Ionicons name="warning-outline" size={14} color="#991b1b" />
+              <Text style={styles.notCompleteText}>Mark as not completed</Text>
             </TouchableOpacity>
           )}
+          {/* Flagged as not done — stays in Present until the review closes it. */}
+          {tab === 'present' && b.status === 'not_completed_pending_review' && (
+            <View>
+              {renderReportBox(b)}
+              <Text style={styles.proofRequiredNote}>
+                Job marked not completed — your review (photos optional) closes it.
+              </Text>
+              <TouchableOpacity
+                style={styles.rateBtn}
+                activeOpacity={0.8}
+                onPress={(e) => { e.stopPropagation?.(); router.push({ pathname: '/worker_info', params: { id: String(b.worker.id), tab: 'reviews', booking: b.id } }); }}
+              >
+                <Ionicons name={reviewedBookings.has(b.id) ? 'eye-outline' : 'star'} size={15} color="#FFB800" />
+                <Text style={styles.rateText}>{reviewedBookings.has(b.id) ? 'View my rating' : '⭐ Rate worker to finish'}</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+          {tab === 'present' && (b.status === 'work_reported' || b.status === 'client_confirmed' || b.status === 'payment_completed' || b.status === 'payment_proof_submitted' || b.status === 'awaiting_payment') && renderPaymentPanel(b)}
+          {/* Past: always show the worker's work photos when they exist, so the
+              client can review every submitted proof image even after completion. */}
+          {tab === 'past' && renderReportBox(b)}
           {tab === 'past' && b.status === 'completed' && (
             <TouchableOpacity
               style={styles.rateBtn}
@@ -456,6 +920,113 @@ export default function BookingsPage() {
               <Ionicons name={reviewedBookings.has(b.id) ? 'eye-outline' : 'star'} size={15} color="#FFB800" />
               <Text style={styles.rateText}>{reviewedBookings.has(b.id) ? 'View my rating' : 'Rate worker'}</Text>
             </TouchableOpacity>
+          )}
+          {tab === 'past' && b.status === 'not_completed' && (
+            <TouchableOpacity
+              style={styles.rateBtn}
+              activeOpacity={0.8}
+              onPress={(e) => { e.stopPropagation?.(); router.push({ pathname: '/worker_info', params: { id: String(b.worker.id), tab: 'reviews', booking: b.id } }); }}
+            >
+              <Ionicons name={reviewedBookings.has(b.id) ? 'eye-outline' : 'star'} size={15} color="#FFB800" />
+              <Text style={styles.rateText}>{reviewedBookings.has(b.id) ? 'View my rating' : 'Rate worker'}</Text>
+            </TouchableOpacity>
+          )}
+          {tab === 'past' && b.status === 'client_not_completed' && (
+            <TouchableOpacity
+              style={styles.rateBtn}
+              activeOpacity={0.8}
+              onPress={(e) => { e.stopPropagation?.(); router.push({ pathname: '/worker_info', params: { id: String(b.worker.id), tab: 'reviews', booking: b.id } }); }}
+            >
+              <Ionicons name={reviewedBookings.has(b.id) ? 'eye-outline' : 'star'} size={15} color="#FFB800" />
+              <Text style={styles.rateText}>{reviewedBookings.has(b.id) ? 'View my rating' : 'Rate worker'}</Text>
+            </TouchableOpacity>
+          )}
+          {/* Past tab: work_reported means client never confirmed — show Complete + Not Completed */}
+          {tab === 'past' && b.status === 'work_reported' && (
+            <>
+              <TouchableOpacity
+                style={styles.payBtn}
+                activeOpacity={0.8}
+                onPress={(e) => { e.stopPropagation?.(); void confirmWork(b); }}
+              >
+                <Ionicons name="checkmark-circle" size={15} color="#fff" />
+                <Text style={styles.payText}>✅ Mark as Complete &amp; Pay</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.notCompleteBtn}
+                activeOpacity={0.8}
+                onPress={(e) => { e.stopPropagation?.(); void markNotCompleted(b.id); }}
+              >
+                <Ionicons name="warning-outline" size={14} color="#991b1b" />
+                <Text style={styles.notCompleteText}>Not Completed</Text>
+              </TouchableOpacity>
+            </>
+          )}
+          {/* Past tab: client_confirmed but not paid — pay button */}
+          {tab === 'past' && b.status === 'client_confirmed' && (
+            <TouchableOpacity
+              style={styles.payBtn}
+              activeOpacity={0.8}
+              onPress={(e) => { e.stopPropagation?.(); void startPayment(b); }}
+            >
+              <Ionicons name="card-outline" size={15} color="#fff" />
+              <Text style={styles.payText}>Pay ₹{b.final_price || b.amount}</Text>
+            </TouchableOpacity>
+          )}
+          {/* Past tab: payment_completed but proof not submitted */}
+          {tab === 'past' && b.status === 'payment_completed' && (
+            <TouchableOpacity
+              style={styles.notCompleteBtn}
+              activeOpacity={0.8}
+              onPress={(e) => { e.stopPropagation?.(); void markNotCompleted(b.id); }}
+            >
+              <Ionicons name="warning-outline" size={14} color="#991b1b" />
+              <Text style={styles.notCompleteText}>Mark as not completed</Text>
+            </TouchableOpacity>
+          )}
+          {/* Past tab: payment_proof_submitted but not rated */}
+          {tab === 'past' && b.status === 'payment_proof_submitted' && (
+            <>
+              <TouchableOpacity
+                style={styles.rateBtn}
+                activeOpacity={0.8}
+                onPress={(e) => { e.stopPropagation?.(); router.push({ pathname: '/worker_info', params: { id: String(b.worker.id), tab: 'reviews', booking: b.id } }); }}
+              >
+                <Ionicons name={reviewedBookings.has(b.id) ? 'eye-outline' : 'star'} size={15} color="#FFB800" />
+                <Text style={styles.rateText}>{reviewedBookings.has(b.id) ? 'View my rating' : 'Rate worker to complete'}</Text>
+              </TouchableOpacity>
+              {!reviewedBookings.has(b.id) && (
+                <TouchableOpacity
+                  style={styles.notCompleteBtn}
+                  activeOpacity={0.8}
+                  onPress={(e) => { e.stopPropagation?.(); void markNotCompleted(b.id); }}
+                >
+                  <Ionicons name="warning-outline" size={14} color="#991b1b" />
+                  <Text style={styles.notCompleteText}>Mark as not completed</Text>
+                </TouchableOpacity>
+              )}
+            </>
+          )}
+          {/* Legacy: awaiting_payment in past with payment success */}
+          {tab === 'past' && b.status === 'awaiting_payment' && paymentResults[b.id] === 'success' && (
+            <>
+              <TouchableOpacity
+                style={styles.rateBtn}
+                activeOpacity={0.8}
+                onPress={(e) => { e.stopPropagation?.(); router.push({ pathname: '/worker_info', params: { id: String(b.worker.id), tab: 'reviews', booking: b.id } }); }}
+              >
+                <Ionicons name={reviewedBookings.has(b.id) ? 'eye-outline' : 'star'} size={15} color="#FFB800" />
+                <Text style={styles.rateText}>{reviewedBookings.has(b.id) ? 'View my rating' : 'Rate worker'}</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.notCompleteBtn}
+                activeOpacity={0.8}
+                onPress={(e) => { e.stopPropagation?.(); void markNotCompleted(b.id); }}
+              >
+                <Ionicons name="warning-outline" size={14} color="#991b1b" />
+                <Text style={styles.notCompleteText}>Mark as not completed</Text>
+              </TouchableOpacity>
+            </>
           )}
         </View>
       </TouchableOpacity>
@@ -505,6 +1076,7 @@ export default function BookingsPage() {
       </View>
       <FrameModal visible={!!priceFor} animationType="fade" onRequestClose={() => setPriceFor(null)}>
         <View style={styles.modalBackdrop}>
+          {/* Inside a Modal the window pans (same as ai-assistant) — 'padding' lifts the card exactly above the keyboard. */}
           <KeyboardAvoidingView behavior="padding" style={styles.priceKav}>
             <View style={styles.modalCard}>
             <Text style={styles.modalTitle}>{priceModalTitle}</Text>
@@ -541,6 +1113,80 @@ export default function BookingsPage() {
           </KeyboardAvoidingView>
         </View>
       </FrameModal>
+
+      {checkoutFor && (
+        <RazorpayCheckout
+          order={checkoutFor.order}
+          description={`Booking #${checkoutFor.booking.id} · ${checkoutFor.booking.worker.full_name || 'worker'}`}
+          onSuccess={(p) => void handlePaymentSuccess(p)}
+          onDismiss={(reason) => {
+            setCheckoutFor(null);
+            if (reason) Alert.alert('Payment not completed', reason);
+          }}
+        />
+      )}
+
+      {/* Payment-success receipt — stays on screen with the transaction id
+          until the user continues or closes it, so they can screenshot it. */}
+      <FrameModal visible={!!paymentReceipt} animationType="fade" onRequestClose={() => setPaymentReceipt(null)}>
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalCard}>
+            <Ionicons name="checkmark-circle" size={44} color="#10b981" style={{ textAlign: 'center' }} />
+            <Text style={styles.modalTitle}>Payment successful ✓</Text>
+            {paymentReceipt && (
+              <>
+                <Text style={styles.receiptAmount}>₹{paymentReceipt.amount}</Text>
+                <Text style={styles.modalSub}>
+                  Booking #{paymentReceipt.booking.id} · {paymentReceipt.booking.worker.full_name || 'worker'}
+                </Text>
+                {!!paymentReceipt.txnId && (
+                  <View style={styles.receiptTxnBox}>
+                    <Text style={styles.receiptTxnLabel}>Transaction ID</Text>
+                    <Text style={styles.receiptTxnId} selectable>{paymentReceipt.txnId}</Text>
+                  </View>
+                )}
+                <Text style={styles.receiptNote}>
+                  Take a screenshot for your records. Next: submit your payment proof screenshot, then rate the worker to complete the booking.
+                </Text>
+              </>
+            )}
+            <View style={styles.modalActions}>
+              <TouchableOpacity style={[styles.modalBtn, styles.modalCancel]} onPress={() => setPaymentReceipt(null)}>
+                <Text style={styles.modalCancelText}>Close</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.modalBtn, styles.modalSave]}
+                onPress={() => {
+                  const r = paymentReceipt;
+                  setPaymentReceipt(null);
+                  if (r) {
+                    router.push({
+                      pathname: '/worker_info',
+                      params: { id: String(r.booking.worker.id), tab: 'reviews', booking: r.booking.id },
+                    });
+                  }
+                }}
+              >
+                <Text style={styles.modalSaveText}>Add proof + Review</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </FrameModal>
+
+      {/* Full-screen image viewer */}
+      <Modal visible={!!viewImage} transparent animationType="fade" onRequestClose={() => setViewImage(null)}>
+        <TouchableOpacity style={styles.imageModalBackdrop} activeOpacity={1} onPress={() => setViewImage(null)}>
+          {viewImage ? (
+            <Image source={{ uri: viewImage }} style={styles.imageModalImg} resizeMode="contain" />
+          ) : null}
+          <View style={styles.imageModalCloseRow}>
+            <TouchableOpacity style={styles.imageModalClose} onPress={() => setViewImage(null)}>
+              <Ionicons name="close" size={22} color="#fff" />
+            </TouchableOpacity>
+          </View>
+        </TouchableOpacity>
+      </Modal>
 
       <BottomNav currentRoute="bookings" />
     </View>
@@ -599,10 +1245,22 @@ const styles = StyleSheet.create({
   waitingText: { color: '#b45309', fontWeight: '700', fontSize: 11, flex: 1 },
   priceBtn: { marginTop: 8, flexDirection: 'row', paddingVertical: 7, borderRadius: 8, borderWidth: 1, borderColor: '#6F42C1', backgroundColor: '#f5f0fb', alignItems: 'center', justifyContent: 'center', gap: 4 },
   priceBtnText: { color: '#6F42C1', fontWeight: '800', fontSize: 11 },
-  completeBtn: { marginTop: 8, flexDirection: 'row', paddingVertical: 8, borderRadius: 8, borderWidth: 1, borderColor: '#16a34a', backgroundColor: '#f0fdf4', alignItems: 'center', justifyContent: 'center', gap: 5 },
-  completeText: { color: '#166534', fontWeight: '800', fontSize: 12 },
-  rateBtn: { marginTop: 8, flexDirection: 'row', paddingVertical: 8, borderRadius: 8, borderWidth: 1, borderColor: '#FFB800', backgroundColor: '#fffbeb', alignItems: 'center', justifyContent: 'center', gap: 5 },
-  rateText: { color: '#92400e', fontWeight: '800', fontSize: 12 },
+
+  // --- payment panel (awaiting_payment) ---
+  payPanel: { marginTop: 8 },
+  payTitle: { fontSize: 13, fontWeight: '700', color: '#374151', marginBottom: 6, textAlign: 'center' },
+  reportBox: { backgroundColor: '#f5f0fb', borderRadius: 10, padding: 8, borderWidth: 1, borderColor: '#e6dbf5' },
+  reportHead: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  reportHeadText: { fontSize: 12, fontWeight: '700', color: '#4c1d95', flex: 1 },
+  reportImages: { marginTop: 6 },
+  reportImage: { width: 64, height: 64, borderRadius: 8, marginRight: 6, backgroundColor: '#e9ecef' },
+  reportHint: { fontSize: 10, color: '#6F42C1', marginTop: 4, fontWeight: '600' },
+  reportNote: { fontSize: 11, color: '#555', marginTop: 6 },
+  payBtn: { marginTop: 8, flexDirection: 'row', paddingVertical: 9, paddingHorizontal: 8, borderRadius: 8, backgroundColor: '#6F42C1', alignItems: 'center', justifyContent: 'center', gap: 6 },
+  // Button labels shrink + wrap instead of overflowing the narrow card column.
+  payText: { color: '#fff', fontWeight: '800', fontSize: 12, flexShrink: 1, textAlign: 'center' },
+  rateBtn: { marginTop: 8, flexDirection: 'row', paddingVertical: 8, paddingHorizontal: 8, borderRadius: 8, borderWidth: 1, borderColor: '#FFB800', backgroundColor: '#fffbeb', alignItems: 'center', justifyContent: 'center', gap: 5 },
+  rateText: { color: '#92400e', fontWeight: '800', fontSize: 12, flexShrink: 1, textAlign: 'center' },
 
   modalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'center', alignItems: 'center', padding: 24 },
   priceKav: { width: '100%', maxWidth: 320, justifyContent: 'center' },
@@ -619,4 +1277,42 @@ const styles = StyleSheet.create({
   modalCancelText: { color: '#666', fontWeight: '700', fontSize: 13 },
   modalSave: { backgroundColor: '#6F42C1' },
   modalSaveText: { color: '#fff', fontWeight: '800', fontSize: 13 },
+
+  // --- payment-success receipt (stays until dismissed for screenshot) ---
+  receiptAmount: { fontSize: 28, fontWeight: '800', color: '#10b981', textAlign: 'center', marginTop: 6 },
+  receiptTxnBox: { marginTop: 12, backgroundColor: '#f8f8f8', borderRadius: 10, padding: 10, borderWidth: 1, borderColor: '#eee' },
+  receiptTxnLabel: { fontSize: 11, fontWeight: '700', color: '#888', textAlign: 'center' },
+  receiptTxnId: { fontSize: 13, fontWeight: '800', color: '#333', textAlign: 'center', marginTop: 4 },
+  receiptNote: { fontSize: 11, color: '#666', textAlign: 'center', marginTop: 12, lineHeight: 16 },
+
+  // --- payment proof & result ---
+  proofSection: { marginTop: 8 },
+  proofTitle: { fontSize: 12, fontWeight: '700', color: '#555', marginBottom: 6 },
+  proofImagesRow: { flexDirection: 'row', gap: 6 },
+  proofThumb: { width: 56, height: 56, borderRadius: 8, backgroundColor: '#e9ecef' },
+  proofAddBtn: { width: 56, height: 56, borderRadius: 8, borderWidth: 1.5, borderColor: '#6F42C1', borderStyle: 'dashed', alignItems: 'center', justifyContent: 'center' },
+  proofSubmitBtn: { marginTop: 8, paddingVertical: 7, borderRadius: 8, borderWidth: 1, borderColor: '#6F42C1', alignItems: 'center' },
+  proofSubmitText: { color: '#6F42C1', fontWeight: '800', fontSize: 12 },
+  proofRequiredNote: { marginTop: 8, fontSize: 11, color: '#b45309', lineHeight: 16 },
+  failedBox: { marginTop: 8, flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#fee2e2', borderRadius: 8, padding: 10 },
+  failedText: { flex: 1, fontSize: 12, color: '#991b1b', fontWeight: '600' },
+  notCompleteBtn: {
+    marginTop: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1.5,
+    borderColor: '#991b1b',
+    borderRadius: 10,
+    paddingVertical: 9,
+    paddingHorizontal: 8,
+    gap: 6,
+  },
+  notCompleteText: { color: '#991b1b', fontWeight: '800', fontSize: 12, flexShrink: 1, textAlign: 'center' },
+
+  // --- full-screen image viewer ---
+  imageModalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.92)', justifyContent: 'center', alignItems: 'center' },
+  imageModalImg: { width: '95%', height: '80%' },
+  imageModalCloseRow: { position: 'absolute', top: 0, left: 0, right: 0, flexDirection: 'row', justifyContent: 'flex-end', padding: 16, paddingTop: 48 },
+  imageModalClose: { backgroundColor: 'rgba(255,255,255,0.15)', borderRadius: 20, padding: 8 },
 });

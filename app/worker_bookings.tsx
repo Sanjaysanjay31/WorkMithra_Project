@@ -1,17 +1,19 @@
 import Avatar from '@/components/avatar';
 import BottomNav from '@/components/bottom-nav';
 import FrameModal from '@/components/frame-modal';
-import { authFetch, expectJson } from '@/lib/api';
+import { authFetch, expectJson, readApiError } from '@/lib/api';
 import { BookingStatus, isActiveStatus, normalizeBookingStatus } from '@/lib/booking-status';
 import { formatBookingDateTime, isBookingDateTimePast } from '@/lib/format';
+import { pickImageNative, pickImageWeb } from '@/lib/image-picker';
 import { platformShadow } from '@/lib/shadow';
 import { storage } from '@/lib/storage';
-import { ensureSocket, onBookingRequest, onBookingStatusChanged } from '@/lib/socket';
+import { UploadFilePart, uploadMultipart } from '@/lib/upload';
+import { ensureSocket, onBookingRequest, onBookingStatusChanged, onPaymentReceived } from '@/lib/socket';
 import { BookingResponse, ReviewResponse } from '@/lib/types';
 import { Ionicons } from '@expo/vector-icons';
 import { Stack, useFocusEffect, useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, KeyboardAvoidingView, RefreshControl, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Alert, Image, KeyboardAvoidingView, Modal, Platform, RefreshControl, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 
 // Same Present/Past split as the client's bookings screen: Present holds
 // actionable requests, Past is the history with completed/not-completed
@@ -34,8 +36,10 @@ type Request = {
   price_proposed_by: 'user' | 'worker' | null;
   /** Canonical lifecycle status from the server. */
   canonical: BookingStatus;
-  /** UI action state for present requests: pending or accepted (upcoming). */
-  status: 'pending' | 'accepted';
+  /** UI action state for present requests, following the sequential workflow:
+   * pending -> accepted (upcoming) -> work_completed -> work_reported ->
+   * client_confirmed -> payment_completed -> payment_proof_submitted -> completed */
+  status: 'pending' | 'accepted' | 'work_completed' | 'work_reported' | 'proof_submitted' | 'awaiting_payment';
 };
 
 /** Shape server bookings into request rows (the full list — Present/Past
@@ -62,23 +66,49 @@ function mapRequests(data: BookingResponse[]): Request[] {
       price_proposed_by: b.price_proposed_by ?? null,
       price: final || estimated,
       canonical: status,
-      status: (status === 'upcoming' ? 'accepted' : 'pending') as 'pending' | 'accepted',
+      status: (status === 'upcoming'
+        ? 'accepted'
+        : status === 'work_completed'
+          ? 'work_completed'
+          : status === 'work_reported'
+            ? 'work_reported'
+            : status === 'payment_proof_submitted'
+              ? 'proof_submitted'
+              : status === 'awaiting_payment'
+                ? 'awaiting_payment'
+                : 'pending') as 'pending' | 'accepted' | 'work_completed' | 'work_reported' | 'proof_submitted' | 'awaiting_payment',
     };
   });
 }
 
 /** Same Present/Past rule as the client's bookings: a request is past once
- * its slot has gone by OR it reached a terminal state. */
+ * it reached a terminal state. Datetime expiry is ignored — workflow completion
+ * is what matters, not the scheduled slot. */
 function isPastRequest(r: Request): boolean {
-  return !isActiveStatus(r.canonical) || isBookingDateTimePast(r.booking_date, r.booking_time);
+  return !isActiveStatus(r.canonical);
 }
 
 /** Status pill colors/labels — mirrors the client's bookings screen, phrased
  * from the worker's side. The Past tab describes OUTCOMES ("Not completed",
  * "Not accepted") rather than still-open states. */
-function statusColor(r: Request, isPast: boolean) {
+function statusColor(r: Request, isPast: boolean, paid?: Set<string>) {
   if (r.canonical === 'completed') return { bg: '#dcfce7', fg: '#166534', label: '✓ Completed' };
   if (r.canonical === 'rejected') return { bg: '#fee2e2', fg: '#991b1b', label: '✗ Rejected' };
+  if (r.canonical === 'unpaid') return { bg: '#fee2e2', fg: '#991b1b', label: '⚠ Unpaid' };
+  if (r.canonical === 'not_completed') return { bg: '#fee2e2', fg: '#991b1b', label: '⏱ Not completed' };
+  if (r.canonical === 'client_not_completed') return { bg: '#fee2e2', fg: '#991b1b', label: '⏱ Not completed' };
+  // Flagged as not done — stays in Present (amber) until the review closes it.
+  if (r.canonical === 'not_completed_pending_review') return { bg: '#ffedd5', fg: '#9a3412', label: '⏱ Not completed · review pending' };
+  if (r.canonical === 'work_completed') return { bg: '#dbeafe', fg: '#1e40af', label: '🔧 Work marked complete' };
+  if (r.canonical === 'work_reported') return { bg: '#ede9fe', fg: '#5b21b6', label: '📋 Report submitted' };
+  if (r.canonical === 'client_confirmed') return { bg: '#fef3c7', fg: '#92400e', label: '👁 Client confirmed' };
+  if (r.canonical === 'payment_completed') return { bg: '#d1fae5', fg: '#065f46', label: '💰 Payment done' };
+  if (r.canonical === 'payment_proof_submitted') return { bg: '#d1fae5', fg: '#065f46', label: '📤 Proof submitted' };
+  if (r.canonical === 'awaiting_payment') {
+    return paid?.has(r.id)
+      ? { bg: '#dcfce7', fg: '#166534', label: '💰 Paid ✓' }
+      : { bg: '#fef3c7', fg: '#92400e', label: '💳 Awaiting payment' };
+  }
   if (isPast) {
     if (r.canonical === 'pending') return { bg: '#f3f4f6', fg: '#6b7280', label: '✗ Not accepted' };
     return { bg: '#ffedd5', fg: '#9a3412', label: '⏱ Not completed' };
@@ -97,6 +127,22 @@ export default function WorkerBookings() {
   const [refreshing, setRefreshing] = useState(false);
   const [quoteFor, setQuoteFor] = useState<Request | null>(null);
   const [quoteAmount, setQuoteAmount] = useState('');
+  // Work-report modal state (the "Work Done" flow): photos of the finished
+  // job + optional note + the amount when the price was never agreed.
+  const [reportFor, setReportFor] = useState<Request | null>(null);
+  const [reportNote, setReportNote] = useState('');
+  const [reportAmount, setReportAmount] = useState('');
+  const [reportImages, setReportImages] = useState<{ url: string; preview: string }[]>([]);
+  const [uploadingReportImage, setUploadingReportImage] = useState(false);
+  const [submittingReport, setSubmittingReport] = useState(false);
+  // Booking ids the client has PAID — flipped live by the 'payment_received'
+  // socket event so the awaiting-payment card shows "Paid ✓" immediately.
+  const [paidBookings, setPaidBookings] = useState<Set<string>>(new Set());
+  // Payment proof image URL per booking (the client submits it after paying).
+  // The worker previews it to confirm the payment actually happened.
+  const [paymentProofs, setPaymentProofs] = useState<Record<string, string>>({});
+  // Full-screen viewer for the payment-proof / report image.
+  const [viewImage, setViewImage] = useState<string | null>(null);
   // Ref-based double-submit guard — state lags a re-render, so rapid taps
   // could fire duplicate PUTs before any `busy` flag renders.
   const actionRef = useRef(false);
@@ -148,6 +194,33 @@ export default function WorkerBookings() {
           new Set(myReviews.map((r) => (r.booking_id != null ? String(r.booking_id) : '')).filter(Boolean)),
         );
       } catch {}
+
+      // Payment state + payment-proof images for jobs in the payment chain —
+      // the socket event flips the "Paid ✓" badge live, but a worker reopening
+      // after the client paid / submitted proof (event missed while offline)
+      // still needs the fresh state and the proof image.
+      const payChain = data.filter((b) => {
+        const s = normalizeBookingStatus(b.status);
+        // Include completed/rated too so the proof stays visible in Past
+        // after the booking finishes — the worker can still open it full-screen.
+        return s === 'awaiting_payment' || s === 'payment_completed' || s === 'payment_proof_submitted' || s === 'completed' || s === 'rated';
+      });
+      const paidSet = new Set<string>();
+      const proofMap: Record<string, string> = {};
+      await Promise.all(
+        payChain.map(async (b) => {
+          try {
+            const pay: { payment_status?: string | null; payment_proof_image?: string | null } | null = await expectJson(
+              await authFetch(`/payments/booking/${b.id}`),
+              'Could not load payment status',
+            );
+            if (pay && pay.payment_status === 'paid') paidSet.add(String(b.id));
+            if (pay && pay.payment_proof_image) proofMap[String(b.id)] = pay.payment_proof_image;
+          } catch {}
+        }),
+      );
+      setPaidBookings(paidSet);
+      setPaymentProofs(proofMap);
     } catch (e: any) {
       console.warn('Failed to fetch requests', e);
       // Only a loud failure sets the error state; silent (realtime) refreshes
@@ -187,6 +260,7 @@ export default function WorkerBookings() {
     let cancelled = false;
     let offRequest: (() => void) | undefined;
     let offStatus: (() => void) | undefined;
+    let offPayment: (() => void) | undefined;
     (async () => {
       // ensureSocket() is async — listeners can only be registered after
       // the socket exists, otherwise they silently no-op.
@@ -203,14 +277,24 @@ export default function WorkerBookings() {
               'Could not refresh the booking',
             );
             mergeBooking(updated);
+            // The client just submitted their payment proof — fetch the image
+            // right away so the card previews it without a manual refresh.
+            if (normalizeBookingStatus(updated.status) === 'payment_proof_submitted') {
+              void fetchPaymentProof(String(data.booking_id));
+            }
           } catch {}
         })();
+      });
+      // The client paid via Razorpay — flip the card to "Paid ✓" live.
+      offPayment = onPaymentReceived((data) => {
+        setPaidBookings((s) => new Set(s).add(String(data.booking_id)));
       });
     })();
     return () => {
       cancelled = true;
       offRequest?.();
       offStatus?.();
+      offPayment?.();
     };
   }, [loadRequests, uid]);
 
@@ -220,6 +304,22 @@ export default function WorkerBookings() {
     // Newest first in the history tab.
     .sort((a, b) => (b.booking_date || '').localeCompare(a.booking_date || ''));
   const filtered = tab === 'present' ? present : past;
+
+  /** Fetch the client's payment-proof image for ONE booking and store it, so
+ * the card shows the proof the moment it arrives (socket event) without
+ * waiting for the next focus refresh. */
+  async function fetchPaymentProof(bookingId: string) {
+    try {
+      const pay: { payment_proof_image?: string | null } | null = await expectJson(
+        await authFetch(`/payments/booking/${bookingId}`),
+        'Could not load payment status',
+      );
+      if (pay && pay.payment_proof_image) {
+        const url = pay.payment_proof_image;
+        setPaymentProofs((prev) => (prev[bookingId] === url ? prev : { ...prev, [bookingId]: url }));
+      }
+    } catch {}
+  }
 
   /** Merge a full server booking into the list (adds it if new). */
   function mergeBooking(b: BookingResponse) {
@@ -245,20 +345,17 @@ export default function WorkerBookings() {
     );
   }
 
-  async function updateStatus(id: string, action: 'accepted' | 'declined' | 'completed') {
+  async function updateStatus(id: string, action: 'accepted' | 'declined') {
     if (actionRef.current) return;
     const r = requests.find((x) => x.id === id);
     if (!r) return;
     actionRef.current = true;
 
-    const backendStatus =
-      action === 'accepted' ? 'upcoming' : action === 'completed' ? 'completed' : 'rejected';
+    const backendStatus = action === 'accepted' ? 'upcoming' : 'rejected';
     const errLabel =
       action === 'accepted'
         ? 'Could not accept the booking'
-        : action === 'completed'
-          ? 'Could not mark the job completed'
-          : 'Could not decline the booking';
+        : 'Could not decline the booking';
     try {
       await expectJson(
         await authFetch(`/bookings/${id}`, {
@@ -275,42 +372,221 @@ export default function WorkerBookings() {
     }
 
     // Update the UI only after the server confirmed the change. Accepting
-    // flips the action state; declining/completing updates the canonical
-    // status, which moves the card out of Present into the Past tab (the
-    // split is derived from status — completed work stays visible there with
-    // its outcome, and on the dashboard history).
+    // flips the action state; declining updates the canonical status, which
+    // moves the card out of Present into the Past tab (the split is derived
+    // from status).
     if (action === 'accepted') {
       setRequests((rs) => rs.map((x) => (x.id === id ? { ...x, status: 'accepted', canonical: 'upcoming' } : x)));
     } else {
-      const canonical: BookingStatus = action === 'completed' ? 'completed' : 'rejected';
-      setRequests((rs) => rs.map((x) => (x.id === id ? { ...x, canonical } : x)));
-    }
-
-    if (action === 'completed') {
-      // The backend settles the final price, records job history, bumps the
-      // worker's stats, and notifies the client ("Leave a review") — the
-      // review itself is written on the client's profile page.
-      Alert.alert(
-        'Job completed 🎉',
-        `${r.client} can now leave you a review — and you can review ${r.client} too.`,
-        [
-          {
-            text: 'Review client',
-            onPress: () =>
-              router.push({
-                pathname: '/user_profile',
-                params: { clientId: r.client_id, clientName: r.client, tab: 'reviews', bookingId: r.id },
-              }),
-          },
-          { text: 'Later' },
-        ],
-      );
+      setRequests((rs) => rs.map((x) => (x.id === id ? { ...x, canonical: 'rejected' } : x)));
     }
 
     // No client-side notification POST here: the backend persists and pushes
-    // the accepted/declined/completed notification itself, so it also reaches
-    // a client who was offline at this moment (and can't be double-sent if
-    // this app is killed right after the tap).
+    // the accepted/declined notification itself, so it also reaches a client
+    // who was offline at this moment.
+  }
+
+  /** Open the work-report modal ("Work Done"). The amount field is only
+   * needed when the price was never agreed during negotiation. */
+  function openReportModal(r: Request) {
+    setReportNote('');
+    setReportImages([]);
+    setReportAmount(r.final_price > 0 ? String(r.final_price) : r.estimated_price > 0 ? String(r.estimated_price) : '');
+    setReportFor(r);
+  }
+
+  /** Pick + upload a work photo; the returned URL joins the report set.
+   * Same upload endpoint/pattern as review photos. */
+  async function attachReportImage() {
+    if (uploadingReportImage) return;
+    if (reportImages.length >= 5) {
+      Alert.alert('Photo limit', 'You can attach up to 5 photos to the work report.');
+      return;
+    }
+    setUploadingReportImage(true);
+    try {
+      // Uploads go through uploadMultipart (XHR): global fetch rejects
+      // { uri, name, type } parts on native with "Unsupported FormDataPart".
+      let part: UploadFilePart;
+      let preview = '';
+      if (Platform.OS === 'web') {
+        const file = await pickImageWeb();
+        if (!file) { setUploadingReportImage(false); return; }
+        part = file;
+        preview = URL.createObjectURL(file);
+      } else {
+        const asset = await pickImageNative();
+        if (!asset) { setUploadingReportImage(false); return; }
+        const name = asset.fileName || asset.uri.split('/').pop() || 'photo.jpg';
+        const ext = (name.split('.').pop() || 'jpg').toLowerCase();
+        const mime = asset.mimeType || (ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg');
+        part = { uri: asset.uri, name, type: mime };
+        preview = asset.uri;
+      }
+      const data = await uploadMultipart<{ url: string }>('/upload-review-image', part);
+      setReportImages((imgs) => [...imgs, { url: data.url, preview }]);
+    } catch (e: any) {
+      Alert.alert('Upload failed', e?.message || 'Could not upload the photo');
+    } finally {
+      setUploadingReportImage(false);
+    }
+  }
+
+  /** Submit the work report — moves the booking to awaiting_payment and
+   * opens the client's Razorpay payment. */
+  async function submitWorkReport() {
+    if (!reportFor || submittingReport) return;
+    if (uploadingReportImage) {
+      Alert.alert('Photo still uploading', 'Wait for the photo upload to finish, or remove it.');
+      return;
+    }
+    const r = reportFor;
+    // The amount is only REQUIRED when no price was agreed yet; when it is
+    // agreed the backend keeps the locked final_price regardless.
+    const needsPrice = r.final_price <= 0;
+    const amt = Number(reportAmount);
+    if (needsPrice && (!amt || amt <= 0)) {
+      Alert.alert('Amount required', 'The price was not agreed yet — enter the amount the client should pay.');
+      return;
+    }
+    setSubmittingReport(true);
+    try {
+      await expectJson(
+        await authFetch(`/bookings/${r.id}/work-report`, {
+          method: 'POST',
+          json: {
+            note: reportNote.trim() || undefined,
+            images: reportImages.map((i) => i.url),
+            final_price: needsPrice ? amt : undefined,
+          },
+        }),
+        'Could not submit the work report',
+      );
+      setRequests((rs) =>
+        rs.map((x) => (x.id === r.id ? { ...x, canonical: 'work_reported', status: 'work_reported', final_price: needsPrice ? amt : x.final_price, price: needsPrice ? amt : x.price } : x)),
+      );
+      setReportFor(null);
+      Alert.alert(
+        'Work report submitted ✓',
+        `${r.client} will now review your report and confirm the work. Once they pay and review, the booking completes automatically.`,
+      );
+    } catch (e: any) {
+      Alert.alert('Submit failed', e?.message || 'Could not submit the work report. Please try again.');
+    } finally {
+      setSubmittingReport(false);
+    }
+  }
+
+  /** Escalate an unpaid job: booking -> unpaid and a negative review is
+   * posted on the client automatically (backend does both). */
+  function reportNonPayment(r: Request) {
+    if (actionRef.current) return;
+    Alert.alert(
+      'Report non-payment?',
+      `${r.client} has not paid for this job. Reporting marks the booking as unpaid and posts a negative review on their account with your work photos. This cannot be undone.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Yes, report',
+          style: 'destructive',
+          onPress: () => void (async () => {
+            actionRef.current = true;
+            try {
+              const updated: BookingResponse = await expectJson(
+                await authFetch(`/bookings/${r.id}/report-nonpayment`, { method: 'POST' }),
+                'Could not report non-payment',
+              );
+              mergeBooking(updated);
+              Alert.alert('Reported', 'The booking is marked unpaid and the client has been notified.');
+            } catch (e: any) {
+              Alert.alert('Report failed', e?.message || 'Please try again.');
+            } finally {
+              actionRef.current = false;
+            }
+          })(),
+        },
+      ],
+    );
+  }
+
+  /** Step 1: Worker marks work as complete. Moves booking to work_completed. */
+  function markWorkComplete(r: Request) {
+    if (actionRef.current) return;
+    Alert.alert(
+      'Mark work as complete?',
+      'This tells the client that the work is done. You will then submit the work report.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Confirm',
+          onPress: () => void (async () => {
+            actionRef.current = true;
+            try {
+              const updated: BookingResponse = await expectJson(
+                await authFetch(`/bookings/${r.id}/mark-work-complete`, { method: 'POST' }),
+                'Could not mark work as complete',
+              );
+              mergeBooking(updated);
+            } catch (e: any) {
+              Alert.alert('Failed', e?.message || 'Please try again.');
+            } finally {
+              actionRef.current = false;
+            }
+          })(),
+        },
+      ],
+    );
+  }
+
+  /** Flag a job as not completed — the client is notified and the booking
+   * enters the pending-review state (NO auto review). The worker is then
+   * prompted to review the client; the review submission finalizes it to
+   * terminal 'not_completed', which moves it to Past on both sides. */
+  function markNotCompleted(r: Request) {
+    if (actionRef.current) return;
+    Alert.alert(
+      'Mark as not completed?',
+      `${r.client} will be notified. You then submit your review to finish — the request moves to Past once the review is done.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Confirm',
+          style: 'destructive',
+          onPress: () => void (async () => {
+            actionRef.current = true;
+            try {
+              const updated: BookingResponse = await expectJson(
+                await authFetch(`/bookings/${r.id}/mark-incomplete`, { method: 'POST' }),
+                'Could not mark as not completed',
+              );
+              mergeBooking(updated);
+              // Pending-review state — walk the worker straight into the
+              // client-review form, which finalizes the booking.
+              Alert.alert(
+                'Marked as not completed ⏱',
+                'Submit your review to finish — the request moves to Past once the review is done.',
+                [
+                  { text: 'Later', style: 'cancel' },
+                  {
+                    text: 'Review client to finish',
+                    onPress: () => {
+                      router.push({
+                        pathname: '/user_profile',
+                        params: { clientId: r.client_id, clientName: r.client, tab: 'reviews', bookingId: r.id },
+                      });
+                    },
+                  },
+                ],
+              );
+            } catch (e: any) {
+              Alert.alert('Failed', e?.message || 'Please try again.');
+            } finally {
+              actionRef.current = false;
+            }
+          })(),
+        },
+      ],
+    );
   }
 
   async function acceptPrice(r: Request) {
@@ -475,7 +751,7 @@ export default function WorkerBookings() {
           ) : (
             filtered.map((r) => {
               const isPast = isPastRequest(r);
-              const sc = statusColor(r, isPast);
+              const sc = statusColor(r, isPast, paidBookings);
               return (
               <TouchableOpacity key={r.id} style={styles.card} activeOpacity={0.85} onPress={() => openClient(r)}>
                 <View style={styles.leftCol}>
@@ -499,7 +775,11 @@ export default function WorkerBookings() {
 
                   {!isPast && renderPricePanel(r)}
 
-                  {!isPast && r.status === 'pending' && (
+                  {/* Gate on the CANONICAL status, not the UI action state: the
+                      action state falls back to 'pending' for workflow stages
+                      like client_confirmed / payment_completed, which wrongly
+                      showed Accept/Decline on paid bookings. */}
+                  {!isPast && r.canonical === 'pending' && (
                     <View style={styles.actions}>
                       <TouchableOpacity
                         style={[styles.actionBtn, styles.acceptBtn, r.price <= 0 && { opacity: 0.5 }]}
@@ -519,35 +799,343 @@ export default function WorkerBookings() {
                     </View>
                   )}
                   {!isPast && r.status === 'accepted' && (
-                    <View style={styles.acceptedActions}>
+                    <View style={styles.acceptedActionsColumn}>
                       <View style={styles.acceptedRow}>
                         <Ionicons name="checkmark-circle" size={13} color="#10b981" />
                         <Text style={styles.acceptedTag}>Accepted</Text>
                       </View>
+                      {/* Each action on its own full-width row so nothing
+                          squeezes/clips on narrow phone widths. */}
                       <TouchableOpacity
-                        style={styles.completeBtn}
-                        onPress={(e) => { e.stopPropagation?.(); updateStatus(r.id, 'completed'); }}
+                        style={styles.completeBtnFull}
+                        onPress={(e) => { e.stopPropagation?.(); void markWorkComplete(r); }}
                       >
-                        <Ionicons name="checkmark-done" size={13} color="#fff" />
-                        <Text style={styles.completeText}>Mark Completed</Text>
+                        <Ionicons name="checkmark-circle-outline" size={13} color="#fff" />
+                        <Text style={styles.completeText}>Mark Work Complete</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        style={styles.notCompleteRowBtn}
+                        onPress={(e) => { e.stopPropagation?.(); markNotCompleted(r); }}
+                      >
+                        <Ionicons name="warning-outline" size={13} color="#991b1b" />
+                        <Text style={styles.notCompleteSmallText}>Mark not complete</Text>
                       </TouchableOpacity>
                     </View>
                   )}
+                  {!isPast && r.status === 'work_completed' && (
+                    <View style={styles.acceptedActionsColumn}>
+                      <View style={styles.acceptedRow}>
+                        <Ionicons name="checkmark-circle" size={13} color="#10b981" />
+                        <Text style={styles.acceptedTag}>Work marked complete</Text>
+                      </View>
+                      <TouchableOpacity
+                        style={styles.completeBtnFull}
+                        onPress={(e) => { e.stopPropagation?.(); openReportModal(r); }}
+                      >
+                        <Ionicons name="camera-outline" size={13} color="#fff" />
+                        <Text style={styles.completeText}>Submit Work Report</Text>
+                      </TouchableOpacity>
+                    </View>
+                  )}
+                  {!isPast && r.status === 'work_completed' && (
+                    <View style={styles.awaitingActions}>
+                      <TouchableOpacity
+                        style={styles.nonPayBtn}
+                        onPress={(e) => { e.stopPropagation?.(); reportNonPayment(r); }}
+                      >
+                        <Ionicons name="warning-outline" size={13} color="#991b1b" />
+                        <Text style={styles.nonPayText}>Report non-payment</Text>
+                      </TouchableOpacity>
+                    </View>
+                  )}
+                  {!isPast && r.status === 'work_reported' && (
+                    <View style={styles.awaitingBox}>
+                      <View style={styles.acceptedRow}>
+                        <Ionicons name="hourglass-outline" size={13} color="#b45309" />
+                        <Text style={[styles.awaitingTag, { color: '#b45309' }]}>
+                          Waiting for client to preview &amp; confirm
+                        </Text>
+                      </View>
+                      <View style={styles.awaitingActions}>
+                        <TouchableOpacity
+                          style={styles.nonPayBtn}
+                          onPress={(e) => { e.stopPropagation?.(); reportNonPayment(r); }}
+                        >
+                          <Ionicons name="warning-outline" size={13} color="#991b1b" />
+                          <Text style={styles.nonPayText}>Report non-payment</Text>
+                        </TouchableOpacity>
+                      </View>
+                    </View>
+                  )}
+                  {!isPast && r.canonical === 'client_confirmed' && (
+                    <View style={styles.awaitingBox}>
+                      <View style={styles.acceptedRow}>
+                        <Ionicons name="checkmark-circle" size={13} color="#10b981" />
+                        <Text style={[styles.awaitingTag, { color: '#10b981' }]}>
+                          Client confirmed · waiting for payment
+                        </Text>
+                      </View>
+                      <View style={styles.awaitingActions}>
+                        <TouchableOpacity
+                          style={styles.nonPayBtn}
+                          onPress={(e) => { e.stopPropagation?.(); reportNonPayment(r); }}
+                        >
+                          <Ionicons name="warning-outline" size={13} color="#991b1b" />
+                          <Text style={styles.nonPayText}>Report non-payment</Text>
+                        </TouchableOpacity>
+                      </View>
+                    </View>
+                  )}
+                  {/* Flagged as not done (by either side) — stays in Present
+                      until a review is submitted, which moves it to Past. */}
+                  {!isPast && r.canonical === 'not_completed_pending_review' && (
+                    <View style={styles.awaitingBox}>
+                      <View style={styles.acceptedRow}>
+                        <Ionicons name="hourglass-outline" size={13} color="#b45309" />
+                        <Text style={[styles.awaitingTag, { color: '#b45309' }]}>
+                          Job marked not completed · review pending
+                        </Text>
+                      </View>
+                      <View style={styles.awaitingActions}>
+                        <TouchableOpacity
+                          style={styles.reviewClientSmallBtn}
+                          onPress={(e) => {
+                            e.stopPropagation?.();
+                            router.push({
+                              pathname: '/user_profile',
+                              params: { clientId: r.client_id, clientName: r.client, tab: 'reviews', bookingId: r.id },
+                            });
+                          }}
+                        >
+                          <Ionicons name={reviewedBookings.has(r.id) ? 'eye-outline' : 'star'} size={13} color="#FFB800" />
+                          <Text style={styles.reviewClientSmallText}>
+                            {reviewedBookings.has(r.id) ? 'View my rating' : 'Review client to finish'}
+                          </Text>
+                        </TouchableOpacity>
+                      </View>
+                    </View>
+                  )}
+                  {!isPast && r.canonical === 'payment_completed' && (
+                    <View style={styles.awaitingBox}>
+                      <View style={styles.acceptedRow}>
+                        <Ionicons name="checkmark-circle" size={13} color="#10b981" />
+                        <Text style={[styles.awaitingTag, { color: '#10b981' }]}>
+                          Payment received · waiting for proof
+                        </Text>
+                      </View>
+                    </View>
+                  )}
+                  {!isPast && r.canonical === 'payment_proof_submitted' && (
+                    <View style={styles.awaitingBox}>
+                      <View style={styles.acceptedRow}>
+                        <Ionicons name="checkmark-circle" size={13} color="#10b981" />
+                        <Text style={[styles.awaitingTag, { color: '#10b981' }]}>
+                          Proof submitted · waiting for review
+                        </Text>
+                      </View>
+                      {paymentProofs[r.id] ? (
+                        <TouchableOpacity
+                          style={styles.proofImageWrap}
+                          activeOpacity={0.85}
+                          onPress={(e) => { e.stopPropagation?.(); setViewImage(paymentProofs[r.id]); }}
+                        >
+                          <Image source={{ uri: paymentProofs[r.id] }} style={styles.proofImageThumb} resizeMode="cover" />
+                          <Text style={styles.proofImageLabel}>
+                            <Ionicons name="expand-outline" size={11} color="#6F42C1" /> Tap to view full payment proof
+                          </Text>
+                        </TouchableOpacity>
+                      ) : (
+                        <Text style={styles.proofImageNone}>No payment proof image uploaded</Text>
+                      )}
+                      <View style={styles.awaitingActions}>
+                        <TouchableOpacity
+                          style={styles.reviewClientSmallBtn}
+                          onPress={(e) => {
+                            e.stopPropagation?.();
+                            router.push({
+                              pathname: '/user_profile',
+                              params: { clientId: r.client_id, clientName: r.client, tab: 'reviews', bookingId: r.id },
+                            });
+                          }}
+                        >
+                          <Ionicons name={reviewedBookings.has(r.id) ? 'eye-outline' : 'star'} size={13} color="#FFB800" />
+                          <Text style={styles.reviewClientSmallText}>{reviewedBookings.has(r.id) ? 'View my rating' : 'Review client'}</Text>
+                        </TouchableOpacity>
+                      </View>
+                    </View>
+                  )}
+                  {!isPast && r.status === 'awaiting_payment' && (
+                    <View style={styles.awaitingBox}>
+                      <View style={styles.acceptedRow}>
+                        <Ionicons
+                          name={paidBookings.has(r.id) ? 'checkmark-circle' : 'hourglass-outline'}
+                          size={13}
+                          color={paidBookings.has(r.id) ? '#10b981' : '#b45309'}
+                        />
+                        <Text style={[styles.awaitingTag, paidBookings.has(r.id) && { color: '#10b981' }]}>
+                          {paidBookings.has(r.id) ? 'Paid ✓ by client' : `Waiting for payment · ₹${r.final_price || r.price}`}
+                        </Text>
+                      </View>
+                      {paidBookings.has(r.id) ? (
+                        <View style={styles.awaitingActionsColumn}>
+                          <TouchableOpacity
+                            style={styles.reviewClientSmallBtn}
+                            onPress={(e) => {
+                              e.stopPropagation?.();
+                              router.push({
+                                pathname: '/user_profile',
+                                params: { clientId: r.client_id, clientName: r.client, tab: 'reviews', bookingId: r.id },
+                              });
+                            }}
+                          >
+                            <Ionicons name={reviewedBookings.has(r.id) ? 'eye-outline' : 'star'} size={13} color="#FFB800" />
+                            <Text style={styles.reviewClientSmallText}>{reviewedBookings.has(r.id) ? 'View my rating' : 'Review client'}</Text>
+                          </TouchableOpacity>
+                          {/* Mark-not-complete on its own full-width row below —
+                              side-by-side it clips on narrow phone widths. */}
+                          <TouchableOpacity
+                            style={styles.nonPayBtnFull}
+                            onPress={(e) => { e.stopPropagation?.(); markNotCompleted(r); }}
+                          >
+                            <Ionicons name="warning-outline" size={13} color="#991b1b" />
+                            <Text style={styles.nonPayText}>Mark not complete</Text>
+                          </TouchableOpacity>
+                        </View>
+                      ) : (
+                        <View style={styles.awaitingActions}>
+                          <TouchableOpacity
+                            style={styles.nonPayBtn}
+                            onPress={(e) => { e.stopPropagation?.(); reportNonPayment(r); }}
+                          >
+                            <Ionicons name="warning-outline" size={13} color="#991b1b" />
+                            <Text style={styles.nonPayText}>Report non-payment</Text>
+                          </TouchableOpacity>
+                        </View>
+                      )}
+                    </View>
+                  )}
+                  {isPast && r.canonical === 'not_completed' && (
+                    <View>
+                      <Text style={{ fontSize: 11, color: '#991b1b', fontWeight: '600' }}>⏱ Not completed</Text>
+                      {!reviewedBookings.has(r.id) && (
+                        <TouchableOpacity
+                          style={styles.reviewClientBtn}
+                          activeOpacity={0.8}
+                          onPress={(e) => {
+                            e.stopPropagation?.();
+                            router.push({
+                              pathname: '/user_profile',
+                              params: { clientId: r.client_id, clientName: r.client, tab: 'reviews', bookingId: r.id },
+                            });
+                          }}
+                        >
+                          <Ionicons name="star" size={15} color="#FFB800" />
+                          <Text style={styles.reviewClientText}>Review client</Text>
+                        </TouchableOpacity>
+                      )}
+                    </View>
+                  )}
+                  {isPast && r.canonical === 'client_not_completed' && (
+                    <View>
+                      <Text style={{ fontSize: 11, color: '#991b1b', fontWeight: '600' }}>⏱ Not completed</Text>
+                      {!reviewedBookings.has(r.id) && (
+                        <TouchableOpacity
+                          style={styles.reviewClientBtn}
+                          activeOpacity={0.8}
+                          onPress={(e) => {
+                            e.stopPropagation?.();
+                            router.push({
+                              pathname: '/user_profile',
+                              params: { clientId: r.client_id, clientName: r.client, tab: 'reviews', bookingId: r.id },
+                            });
+                          }}
+                        >
+                          <Ionicons name="star" size={15} color="#FFB800" />
+                          <Text style={styles.reviewClientText}>Review client</Text>
+                        </TouchableOpacity>
+                      )}
+                    </View>
+                  )}
+                  {/* Past tab: awaiting_payment bookings — same actions as present tab */}
+                  {isPast && r.canonical === 'awaiting_payment' && (
+                    <View style={styles.awaitingBox}>
+                      <View style={styles.acceptedRow}>
+                        <Ionicons
+                          name={paidBookings.has(r.id) ? 'checkmark-circle' : 'hourglass-outline'}
+                          size={13}
+                          color={paidBookings.has(r.id) ? '#10b981' : '#b45309'}
+                        />
+                        <Text style={[styles.awaitingTag, paidBookings.has(r.id) && { color: '#10b981' }]}>
+                          {paidBookings.has(r.id) ? 'Paid ✓ by client' : `Payment not received · ₹${r.final_price || r.price}`}
+                        </Text>
+                      </View>
+                      {paidBookings.has(r.id) ? (
+                        <View style={styles.awaitingActionsColumn}>
+                          <TouchableOpacity
+                            style={styles.reviewClientSmallBtn}
+                            onPress={(e) => {
+                              e.stopPropagation?.();
+                              router.push({
+                                pathname: '/user_profile',
+                                params: { clientId: r.client_id, clientName: r.client, tab: 'reviews', bookingId: r.id },
+                              });
+                            }}
+                          >
+                            <Ionicons name={reviewedBookings.has(r.id) ? 'eye-outline' : 'star'} size={13} color="#FFB800" />
+                            <Text style={styles.reviewClientSmallText}>{reviewedBookings.has(r.id) ? 'View my rating' : 'Review client'}</Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity
+                            style={styles.nonPayBtnFull}
+                            onPress={(e) => { e.stopPropagation?.(); markNotCompleted(r); }}
+                          >
+                            <Ionicons name="warning-outline" size={13} color="#991b1b" />
+                            <Text style={styles.nonPayText}>Mark not complete</Text>
+                          </TouchableOpacity>
+                        </View>
+                      ) : (
+                        <View style={styles.awaitingActions}>
+                          <TouchableOpacity
+                            style={styles.nonPayBtn}
+                            onPress={(e) => { e.stopPropagation?.(); reportNonPayment(r); }}
+                          >
+                            <Ionicons name="warning-outline" size={13} color="#991b1b" />
+                            <Text style={styles.nonPayText}>Report non-payment</Text>
+                          </TouchableOpacity>
+                        </View>
+                      )}
+                    </View>
+                  )}
                   {isPast && r.canonical === 'completed' && (
-                    <TouchableOpacity
-                      style={styles.reviewClientBtn}
-                      activeOpacity={0.8}
-                      onPress={(e) => {
-                        e.stopPropagation?.();
-                        router.push({
-                          pathname: '/user_profile',
-                          params: { clientId: r.client_id, clientName: r.client, tab: 'reviews', bookingId: r.id },
-                        });
-                      }}
-                    >
-                      <Ionicons name={reviewedBookings.has(r.id) ? 'eye-outline' : 'star'} size={15} color="#FFB800" />
-                      <Text style={styles.reviewClientText}>{reviewedBookings.has(r.id) ? 'View my rating' : 'Review client'}</Text>
-                    </TouchableOpacity>
+                    <View>
+                      {/* Client's payment proof stays viewable after completion —
+                          tap the thumbnail for the full-screen image. */}
+                      {paymentProofs[r.id] ? (
+                        <TouchableOpacity
+                          style={styles.proofImageWrap}
+                          activeOpacity={0.85}
+                          onPress={(e) => { e.stopPropagation?.(); setViewImage(paymentProofs[r.id]); }}
+                        >
+                          <Image source={{ uri: paymentProofs[r.id] }} style={styles.proofImageThumb} resizeMode="cover" />
+                          <Text style={styles.proofImageLabel}>
+                            <Ionicons name="expand-outline" size={11} color="#6F42C1" /> Tap to view full payment proof
+                          </Text>
+                        </TouchableOpacity>
+                      ) : null}
+                      <TouchableOpacity
+                        style={styles.reviewClientBtn}
+                        activeOpacity={0.8}
+                        onPress={(e) => {
+                          e.stopPropagation?.();
+                          router.push({
+                            pathname: '/user_profile',
+                            params: { clientId: r.client_id, clientName: r.client, tab: 'reviews', bookingId: r.id },
+                          });
+                        }}
+                      >
+                        <Ionicons name={reviewedBookings.has(r.id) ? 'eye-outline' : 'star'} size={15} color="#FFB800" />
+                        <Text style={styles.reviewClientText}>{reviewedBookings.has(r.id) ? 'View my rating' : 'Review client'}</Text>
+                      </TouchableOpacity>
+                    </View>
                   )}
                 </View>
               </TouchableOpacity>
@@ -558,6 +1146,7 @@ export default function WorkerBookings() {
       </View>
       <FrameModal visible={!!quoteFor} animationType="fade" onRequestClose={() => setQuoteFor(null)}>
         <View style={styles.modalBackdrop}>
+          {/* Inside a Modal the window pans (same as ai-assistant) — 'padding' lifts the card exactly above the keyboard. */}
           <KeyboardAvoidingView behavior="padding" style={styles.quoteKav}>
             <View style={styles.modalCard}>
             <Text style={styles.modalTitle}>{quoteModalTitle}</Text>
@@ -595,6 +1184,105 @@ export default function WorkerBookings() {
         </View>
       </FrameModal>
 
+      <FrameModal visible={!!reportFor} animationType="fade" onRequestClose={() => !submittingReport && setReportFor(null)}>
+        <View style={styles.modalBackdrop}>
+          {/* Inside a Modal the window pans (same as ai-assistant) — 'padding' lifts the card exactly above the keyboard. */}
+          <KeyboardAvoidingView behavior="padding" style={styles.quoteKav}>
+            <ScrollView contentContainerStyle={{ alignItems: 'center' }}>
+              <View style={styles.modalCard}>
+                <Text style={styles.modalTitle}>Work Done — Submit Report</Text>
+                {reportFor && (
+                  <Text style={styles.modalSub}>For {reportFor.client} · {reportFor.job}</Text>
+                )}
+                <Text style={styles.reportHint}>
+                  Add photos of the finished work. The client pays through the app after seeing this report — once they pay and review, the booking completes automatically.
+                </Text>
+
+                <TouchableOpacity style={styles.reportAddPhoto} onPress={attachReportImage} disabled={uploadingReportImage}>
+                  {uploadingReportImage
+                    ? <ActivityIndicator size="small" color="#6F42C1" />
+                    : <Ionicons name="camera-outline" size={16} color="#6F42C1" />}
+                  <Text style={styles.reportAddPhotoText}>{uploadingReportImage ? 'Uploading…' : `Add work photos (${reportImages.length}/5)`}</Text>
+                </TouchableOpacity>
+                {reportImages.length > 0 && (
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.reportPreviews}>
+                    {reportImages.map((img, i) => (
+                      <View key={`${img.url}-${i}`} style={styles.reportPreviewWrap}>
+                        <Image source={{ uri: img.preview }} style={styles.reportPreview} />
+                        <TouchableOpacity
+                          style={styles.reportPreviewRemove}
+                          onPress={() => setReportImages((imgs) => imgs.filter((_, j) => j !== i))}
+                        >
+                          <Ionicons name="close" size={12} color="#fff" />
+                        </TouchableOpacity>
+                      </View>
+                    ))}
+                  </ScrollView>
+                )}
+
+                <TextInput
+                  style={styles.reportNoteInput}
+                  placeholder="Note for the client (optional) — what was done, parts used…"
+                  placeholderTextColor="#bbb"
+                  value={reportNote}
+                  onChangeText={setReportNote}
+                  multiline
+                />
+
+                {reportFor && reportFor.final_price <= 0 && (
+                  <View style={styles.reportAmountBlock}>
+                    <Text style={styles.reportAmountLabel}>Amount to collect (₹) — price was not agreed yet</Text>
+                    <View style={styles.amountRow}>
+                      <Text style={styles.rupee}>₹</Text>
+                      <TextInput
+                        style={styles.amountInput}
+                        keyboardType="numeric"
+                        placeholder="0"
+                        placeholderTextColor="#bbb"
+                        value={reportAmount}
+                        onChangeText={setReportAmount}
+                      />
+                    </View>
+                  </View>
+                )}
+
+                <View style={styles.modalActions}>
+                  <TouchableOpacity
+                    style={[styles.modalBtn, styles.modalCancel]}
+                    disabled={submittingReport}
+                    onPress={() => setReportFor(null)}
+                  >
+                    <Text style={styles.modalCancelText}>Cancel</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.modalBtn, styles.modalSend, submittingReport && { opacity: 0.6 }]}
+                    disabled={submittingReport}
+                    onPress={submitWorkReport}
+                  >
+                    {submittingReport
+                      ? <ActivityIndicator size="small" color="#fff" />
+                      : <Text style={styles.modalSendText}>Submit Report</Text>}
+                  </TouchableOpacity>
+                </View>
+              </View>
+            </ScrollView>
+          </KeyboardAvoidingView>
+        </View>
+      </FrameModal>
+
+      <Modal visible={!!viewImage} transparent animationType="fade" onRequestClose={() => setViewImage(null)}>
+        <TouchableOpacity style={styles.imageModalBackdrop} activeOpacity={1} onPress={() => setViewImage(null)}>
+          {viewImage ? (
+            <Image source={{ uri: viewImage }} style={styles.imageModalImg} resizeMode="contain" />
+          ) : null}
+          <View style={styles.imageModalCloseRow}>
+            <TouchableOpacity style={styles.imageModalClose} onPress={() => setViewImage(null)}>
+              <Ionicons name="close" size={20} color="#fff" />
+            </TouchableOpacity>
+          </View>
+        </TouchableOpacity>
+      </Modal>
+
       <BottomNav currentRoute="requests" role="worker" />
     </View>
   );
@@ -631,12 +1319,54 @@ const styles = StyleSheet.create({
   declineBtn: { backgroundColor: '#f0f0f0' },
   declineText: { color: '#666', fontWeight: '700', fontSize: 11 },
   acceptedActions: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginTop: 8 },
+  // Column layout — each action gets its own full-width row so nothing
+  // squeezes or clips on narrow phone widths.
+  acceptedActionsColumn: { marginTop: 8, gap: 6 },
   acceptedRow: { flexDirection: 'row', alignItems: 'center', gap: 4 },
   acceptedTag: { color: '#10b981', fontWeight: '800', fontSize: 12 },
+  acceptedBtnRow: { flexDirection: 'row', gap: 6 },
   completeBtn: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingVertical: 6, paddingHorizontal: 10, borderRadius: 8, backgroundColor: '#6F42C1' },
+  completeBtnFull: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4, paddingVertical: 8, paddingHorizontal: 10, borderRadius: 8, backgroundColor: '#6F42C1' },
   completeText: { color: '#fff', fontWeight: '800', fontSize: 11 },
+  notCompleteSmallBtn: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingVertical: 6, paddingHorizontal: 10, borderRadius: 8, borderWidth: 1, borderColor: '#fecaca', backgroundColor: '#fff' },
+  notCompleteSmallText: { color: '#991b1b', fontWeight: '800', fontSize: 11 },
+  // Full-width "Mark not complete" on its own row (fits on narrow screens).
+  notCompleteRowBtn: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4, paddingVertical: 7, borderRadius: 8, borderWidth: 1, borderColor: '#fecaca', backgroundColor: '#fff' },
   reviewClientBtn: { marginTop: 8, flexDirection: 'row', paddingVertical: 8, borderRadius: 8, borderWidth: 1, borderColor: '#FFB800', backgroundColor: '#fffbeb', alignItems: 'center', justifyContent: 'center', gap: 5 },
   reviewClientText: { color: '#92400e', fontWeight: '800', fontSize: 12 },
+
+  // --- awaiting payment panel ---
+  awaitingBox: { marginTop: 8, backgroundColor: '#fffbeb', borderRadius: 10, padding: 8, borderWidth: 1, borderColor: '#fde68a' },
+  awaitingTag: { color: '#b45309', fontWeight: '800', fontSize: 12 },
+  awaitingActions: { flexDirection: 'row', gap: 8, marginTop: 8 },
+  // Stacked variant — Review on first row, Mark-not-complete on its own
+  // full-width row below (fits narrow phones).
+  awaitingActionsColumn: { gap: 6, marginTop: 8 },
+  reviewClientSmallBtn: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4, paddingVertical: 7, borderRadius: 8, borderWidth: 1, borderColor: '#FFB800', backgroundColor: '#fff' },
+  reviewClientSmallText: { color: '#92400e', fontWeight: '800', fontSize: 11 },
+  nonPayBtn: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4, paddingVertical: 7, borderRadius: 8, borderWidth: 1, borderColor: '#fecaca', backgroundColor: '#fff' },
+  nonPayBtnFull: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4, paddingVertical: 7, borderRadius: 8, borderWidth: 1, borderColor: '#fecaca', backgroundColor: '#fff' },
+  nonPayText: { color: '#991b1b', fontWeight: '800', fontSize: 11 },
+  proofImageWrap: { marginTop: 8, flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#f5f0fb', borderRadius: 10, padding: 8, borderWidth: 1, borderColor: '#e6dbf5' },
+  proofImageThumb: { width: 60, height: 60, borderRadius: 8, backgroundColor: '#e9ecef' },
+  proofImageLabel: { flex: 1, color: '#6F42C1', fontWeight: '700', fontSize: 11 },
+  proofImageNone: { marginTop: 8, fontSize: 11, color: '#999', fontStyle: 'italic' },
+  imageModalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.92)', justifyContent: 'center', alignItems: 'center' },
+  imageModalImg: { width: '95%', height: '80%' },
+  imageModalCloseRow: { position: 'absolute', top: 0, left: 0, right: 0, flexDirection: 'row', justifyContent: 'flex-end', padding: 16, paddingTop: 48 },
+  imageModalClose: { backgroundColor: 'rgba(255,255,255,0.15)', borderRadius: 20, padding: 8 },
+
+  // --- work report modal ---
+  reportHint: { fontSize: 11, color: '#666', textAlign: 'center', marginTop: 8, lineHeight: 16 },
+  reportAddPhoto: { marginTop: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingVertical: 9, borderRadius: 8, borderWidth: 1, borderColor: '#6F42C1', backgroundColor: '#f5f0fb' },
+  reportAddPhotoText: { color: '#6F42C1', fontWeight: '800', fontSize: 12 },
+  reportPreviews: { marginTop: 8 },
+  reportPreviewWrap: { marginRight: 6 },
+  reportPreview: { width: 60, height: 60, borderRadius: 8, backgroundColor: '#e9ecef' },
+  reportPreviewRemove: { position: 'absolute', top: -5, right: -5, width: 18, height: 18, borderRadius: 9, backgroundColor: '#991b1b', alignItems: 'center', justifyContent: 'center' },
+  reportNoteInput: { marginTop: 10, minHeight: 60, maxHeight: 100, backgroundColor: '#f8f8f8', borderRadius: 10, borderWidth: 1, borderColor: '#eee', paddingHorizontal: 10, paddingTop: 8, fontSize: 12, color: '#333', textAlignVertical: 'top' },
+  reportAmountBlock: { marginTop: 10 },
+  reportAmountLabel: { fontSize: 11, fontWeight: '700', color: '#6F42C1', marginBottom: 4 },
   empty: { fontSize: 13, color: '#999', textAlign: 'center', marginTop: 24 },
   errorBox: { alignItems: 'center', paddingVertical: 40 },
   errorText: { marginTop: 10, fontSize: 13, fontWeight: '700', color: '#b91c1c', textAlign: 'center' },

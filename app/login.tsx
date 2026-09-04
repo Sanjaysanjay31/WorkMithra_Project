@@ -1,5 +1,6 @@
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
+import { BASE_URL } from '@/lib/api';
 import { loginRequest } from '@/lib/auth-api';
 import { ensurePushSetup } from '@/lib/push';
 import { platformNoShadow, platformShadow } from '@/lib/shadow';
@@ -88,6 +89,11 @@ export default function LoginScreen() {
       }
     } catch (error: any) {
       setLoading(false);
+      // Always log the URL the phone actually tried — it appears in the Metro
+      // terminal and instantly shows stale-env problems (e.g. 127.0.0.1 baked
+      // into the bundle means Metro was started before the .env fix, from the
+      // wrong folder, or without cache clear).
+      console.warn('Login request failed', { url: `${BASE_URL}/login`, error: String(error?.message || error) });
       if (error?.name === 'AuthApiError') {
         notify('Login failed', error.message);
       } else {
@@ -99,8 +105,9 @@ export default function LoginScreen() {
   return (
     <ThemedView style={styles.container}>
       <Stack.Screen options={{ title: 'Login', headerShown: false }} />
+      {/* Same as ai-assistant: window pans, KAV 'padding' lifts inputs above the keyboard. */}
       <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        behavior="padding"
         style={{ flex: 1 }}
       >
         <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>

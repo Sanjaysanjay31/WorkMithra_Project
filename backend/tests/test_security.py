@@ -7,12 +7,11 @@ SQLite database configured in conftest.py — never the production database.
 import sys
 import os
 import uuid
-
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from fastapi.testclient import TestClient
 from main import app
-from conftest import issue_verify_token
+from conftest import issue_verify_token, complete_booking_via_work_report, complete_booking_work_report_to_awaiting_payment
 
 client = TestClient(app)
 
@@ -145,6 +144,9 @@ def test_client_cannot_self_complete_booking():
 
 
 def test_worker_accept_then_complete():
+    """The worker can accept a booking (pending → upcoming) but cannot manually
+    mark it completed — that happens automatically when the client pays and
+    submits a review."""
     cid, ctok, _ = _register_and_login("user")
     wid, wtok, _ = _available_worker()
     booking_id = _create_booking(ctok, wid).json()["id"]
@@ -154,10 +156,28 @@ def test_worker_accept_then_complete():
     assert r.status_code == 200, r.text
     assert r.json()["status"] == "upcoming"
 
-    # Worker completes (upcoming -> completed)
+    # Worker CANNOT manually complete (upcoming → completed is not allowed)
     r = client.put(f"/bookings/{booking_id}", json={"status": "completed"}, headers=_auth(wtok))
+    assert r.status_code == 400, r.text
+
+    # But via the proper chain: mark-work-complete → work report → confirm → payment → review → auto-complete
+    # First: worker marks work complete (upcoming -> work_completed)
+    r = client.post(f"/bookings/{booking_id}/mark-work-complete", headers=_auth(wtok))
     assert r.status_code == 200, r.text
-    assert r.json()["status"] == "completed"
+    assert r.json()["status"] == "work_completed"
+
+    # Then work report transitions to work_reported
+    r = client.post(
+        f"/bookings/{booking_id}/work-report",
+        json={"note": "Done", "final_price": 500},
+        headers=_auth(wtok),
+    )
+    assert r.status_code == 200, r.text
+
+    # Verify booking transitioned to work_reported
+    r = client.get(f"/bookings/{booking_id}", headers=_auth(ctok))
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "work_reported"
 
 
 def test_invalid_transition_rejected():
@@ -171,12 +191,16 @@ def test_invalid_transition_rejected():
 
 
 def test_cannot_modify_completed_booking():
+    """Once completed (via the payment chain), a booking's fields are frozen."""
     cid, ctok, _ = _register_and_login("user")
     wid, wtok, _ = _available_worker()
     booking_id = _create_booking(ctok, wid).json()["id"]
     client.put(f"/bookings/{booking_id}", json={"status": "upcoming"}, headers=_auth(wtok))
-    client.put(f"/bookings/{booking_id}", json={"status": "completed"}, headers=_auth(wtok))
 
+    # Complete via the proper chain on this booking
+    complete_booking_via_work_report(ctok, wtok, wid, client, booking_id=booking_id)
+
+    # Any modification attempt is refused
     r = client.put(f"/bookings/{booking_id}", json={"estimated_price": 999}, headers=_auth(wtok))
     assert r.status_code == 400, r.text
 
@@ -195,11 +219,20 @@ def test_stranger_cannot_view_booking():
 # Reviews
 # ---------------------------------------------------------------------------
 
-def _completed_booking(ctok, wtok, wid):
+def _completed_booking_for_security(ctok, wtok, wid):
+    """Create a booking and run it to completed via work-report → payment → review.
+    Used by tests that need a completed booking but do not need to submit reviews themselves."""
     booking_id = _create_booking(ctok, wid).json()["id"]
     client.put(f"/bookings/{booking_id}", json={"status": "upcoming"}, headers=_auth(wtok))
-    client.put(f"/bookings/{booking_id}", json={"status": "completed"}, headers=_auth(wtok))
-    return booking_id
+    return complete_booking_via_work_report(ctok, wtok, wid, client, booking_id=booking_id)
+
+
+def _booking_at_awaiting_payment(ctok, wtok, wid):
+    """Create a booking at awaiting_payment with payment verified (no review submitted).
+    Used by tests that need to submit reviews themselves."""
+    booking_id = _create_booking(ctok, wid).json()["id"]
+    client.put(f"/bookings/{booking_id}", json={"status": "upcoming"}, headers=_auth(wtok))
+    return complete_booking_work_report_to_awaiting_payment(ctok, wtok, wid, client, booking_id=booking_id)
 
 
 def test_review_requires_completed_booking():
@@ -213,21 +246,23 @@ def test_review_requires_completed_booking():
 def test_review_allowed_after_completion_and_once_per_booking():
     cid, ctok, _ = _register_and_login("user")
     wid, wtok, _ = _available_worker()
-    booking_id = _completed_booking(ctok, wtok, wid)
+    # Helper stops at awaiting_payment (paid) so the test submits the review.
+    b = _booking_at_awaiting_payment(ctok, wtok, wid)
 
-    r = client.post("/reviews/", json={"worker_id": wid, "booking_id": booking_id, "rating": 4}, headers=_auth(ctok))
+    # First review succeeds and auto-completes the booking.
+    r = client.post("/reviews/", json={"worker_id": wid, "booking_id": b["id"], "rating": 4}, headers=_auth(ctok))
     assert r.status_code == 200, r.text
 
     # Second review for the same booking is rejected.
-    r = client.post("/reviews/", json={"worker_id": wid, "booking_id": booking_id, "rating": 5}, headers=_auth(ctok))
+    r = client.post("/reviews/", json={"worker_id": wid, "booking_id": b["id"], "rating": 5}, headers=_auth(ctok))
     assert r.status_code == 400, r.text
 
 
 def test_review_rating_bounds():
     cid, ctok, _ = _register_and_login("user")
     wid, wtok, _ = _available_worker()
-    booking_id = _completed_booking(ctok, wtok, wid)
-    r = client.post("/reviews/", json={"worker_id": wid, "booking_id": booking_id, "rating": 9}, headers=_auth(ctok))
+    b = _booking_at_awaiting_payment(ctok, wtok, wid)
+    r = client.post("/reviews/", json={"worker_id": wid, "booking_id": b["id"], "rating": 9}, headers=_auth(ctok))
     assert r.status_code == 400, r.text
 
 
@@ -253,7 +288,7 @@ def test_job_history_worker_cannot_claim_others_booking():
     cid, ctok, _ = _register_and_login("user")
     wid, wtok, _ = _available_worker()
     _, other_wtok, _ = _register_and_login("worker")
-    booking_id = _completed_booking(ctok, wtok, wid)
+    booking_id = _completed_booking_for_security(ctok, wtok, wid)["id"]
 
     r = client.post("/job-history/", json={"worker_id": wid, "booking_id": booking_id}, headers=_auth(other_wtok))
     assert r.status_code == 403, r.text

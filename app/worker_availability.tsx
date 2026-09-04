@@ -296,7 +296,7 @@ export default function WorkerAvailabilityPage() {
         />
       )}
 
-      <BottomNav currentRoute="hours" role="worker" />
+      <BottomNav currentRoute="profile_worker" role="worker" />
     </View>
   );
 }

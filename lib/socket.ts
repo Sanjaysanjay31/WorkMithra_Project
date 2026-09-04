@@ -309,6 +309,31 @@ export function onBookingStatusChanged(
   };
 }
 
+/**
+ * Listen for verified payments (workers) — the client paid for a job via
+ * Razorpay, so the request card can flip to "Paid" without waiting for a
+ * refetch.
+ */
+export function onPaymentReceived(
+  callback: (data: {
+    booking_id: number;
+    payment_id: number;
+    amount: number;
+    timestamp: string;
+  }) => void
+): () => void {
+  if (!socket) {
+    console.error('Socket not initialized');
+    return () => {};
+  }
+
+  socket.on('payment_received', callback);
+
+  return () => {
+    socket?.off('payment_received', callback);
+  };
+}
+
 // ============================================
 // NOTIFICATION FUNCTIONS
 // ============================================

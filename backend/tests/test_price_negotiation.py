@@ -4,16 +4,17 @@ Locks in the quote → counter → accept lifecycle:
   estimated_price holds the latest proposal, price_proposed_by says who made
   it, and acceptance copies it into final_price — after which the price is
   locked against unilateral changes from either side.
+
+Completion now happens via work-report → payment → client review → auto-complete.
 """
 import sys
 import os
 import uuid
-
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from fastapi.testclient import TestClient
 from main import app
-from conftest import issue_verify_token
+from conftest import issue_verify_token, complete_booking_via_work_report, complete_booking_work_report_to_awaiting_payment
 
 client = TestClient(app)
 
@@ -175,35 +176,42 @@ def test_invalid_amounts_rejected():
 
 
 def test_terminal_booking_price_frozen():
+    """Once a booking is completed (via the payment chain), its price is locked
+    and neither side can propose a new amount."""
     cid, ctok = _register_and_login("user")
     wid, wtok = _available_worker()
     b = _booking(ctok, wid)
 
-    # Full lifecycle: quote → accept price → accept job → complete.
+    # Full lifecycle: quote → accept price → accept job → work report → pay → review
     client.post(f"/bookings/{b['id']}/propose-price", json={"amount": 500}, headers=_auth(wtok))
     client.post(f"/bookings/{b['id']}/accept-price", headers=_auth(ctok))
     client.put(f"/bookings/{b['id']}", json={"status": "upcoming"}, headers=_auth(wtok))
-    r = client.put(f"/bookings/{b['id']}", json={"status": "completed"}, headers=_auth(wtok))
-    assert r.status_code == 200, r.text
-    # Completion settles the agreed price as final.
-    assert r.json()["final_price"] == 500
 
+    # Complete via the proper chain (work report → payment → review → auto-complete)
+    # Use the test's booking, not a helper-created one.
+    b = complete_booking_via_work_report(ctok, wtok, wid, client, booking_id=b["id"])
+    assert b["final_price"] == 500
+
+    # Price is locked after completion.
     r = client.post(f"/bookings/{b['id']}/propose-price", json={"amount": 700}, headers=_auth(ctok))
     assert r.status_code == 400, r.text
 
 
 def test_completion_settles_unagreed_price():
+    """When a booking completes without an explicit price agreement, the last
+    number on the table (here the client's budget) becomes the final price."""
     cid, ctok = _register_and_login("user")
     wid, wtok = _available_worker()
     b = _booking(ctok, wid)
 
-    # Job finishes without explicit agreement — the last number on the table
-    # (here a worker quote) becomes the final price.
-    client.post(f"/bookings/{b['id']}/propose-price", json={"amount": 450}, headers=_auth(wtok))
+    # Client sets a budget (proposal) at booking time
+    client.post(f"/bookings/{b['id']}/propose-price", json={"amount": 450}, headers=_auth(ctok))
     client.put(f"/bookings/{b['id']}", json={"status": "upcoming"}, headers=_auth(wtok))
-    r = client.put(f"/bookings/{b['id']}", json={"status": "completed"}, headers=_auth(wtok))
-    assert r.status_code == 200, r.text
-    assert r.json()["final_price"] == 450
+
+    # Complete via the work report chain — final_price is the client's budget
+    # Use the test's booking so the agreed budget is preserved.
+    b = complete_booking_via_work_report(ctok, wtok, wid, client, booking_id=b["id"])
+    assert b["final_price"] == 450
 
 
 def test_price_events_create_notifications():

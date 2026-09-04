@@ -10,6 +10,9 @@ Locks in:
     the worker (client-written) — never the other direction.
   - Reviews a worker WRITES never affect the worker's own rating aggregate.
   - A worker can delete their own review only; clients' reviews stay safe.
+
+Completion now happens via the work-report → payment → review chain
+(auto-complete when the client submits their review after paying).
 """
 import sys
 import os
@@ -19,7 +22,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from fastapi.testclient import TestClient
 from main import app
-from conftest import issue_verify_token
+from conftest import issue_verify_token, complete_booking_via_work_report, complete_booking_work_report_to_awaiting_payment
 
 client = TestClient(app)
 
@@ -62,22 +65,13 @@ def _available_worker():
 
 
 def _completed_booking(ctok, wtok, wid):
-    """Create a booking, worker accepts, worker completes it."""
-    r = client.post(
-        "/bookings/",
-        json={"worker_id": wid, "problem_description": "Paint the wall"},
-        headers=_auth(ctok),
-    )
-    assert r.status_code == 200, r.text
-    b = r.json()
-    r = client.put(f"/bookings/{b['id']}", json={"status": "upcoming"}, headers=_auth(wtok))
-    assert r.status_code == 200, r.text
-    r = client.put(f"/bookings/{b['id']}", json={"status": "completed"}, headers=_auth(wtok))
-    assert r.status_code == 200, r.text
-    return b
+    """Create a booking and run it to completed via work-report → payment → review.
+    No reviews are submitted by this helper — the caller controls review order."""
+    return complete_booking_work_report_to_awaiting_payment(ctok, wtok, wid, client)
 
 
 def test_worker_can_review_client_after_completed_booking():
+    """A worker can review the client after the booking is completed (via payment)."""
     cid, ctok = _register_and_login("user")
     wid, wtok = _available_worker()
     b = _completed_booking(ctok, wtok, wid)
@@ -133,23 +127,24 @@ def test_worker_cannot_review_client_without_completed_booking():
 
 
 def test_both_sides_can_review_the_same_booking():
+    """Both client and worker can review each other for the same booking."""
     cid, ctok = _register_and_login("user")
     wid, wtok = _available_worker()
     b = _completed_booking(ctok, wtok, wid)
 
-    # Client reviews the worker...
-    r = client.post(
-        "/reviews/",
-        json={"worker_id": wid, "rating": 5, "review_text": "great worker"},
-        headers=_auth(ctok),
-    )
-    assert r.status_code == 200, r.text
-
-    # ...and the worker still gets to review the client for the SAME booking.
+    # Worker reviews the client first
     r = client.post(
         "/reviews/",
         json={"user_id": cid, "rating": 4, "review_text": "great client"},
         headers=_auth(wtok),
+    )
+    assert r.status_code == 200, r.text
+
+    # Client reviews the worker
+    r = client.post(
+        "/reviews/",
+        json={"worker_id": wid, "rating": 5, "review_text": "great worker"},
+        headers=_auth(ctok),
     )
     assert r.status_code == 200, r.text
 
@@ -166,7 +161,7 @@ def test_both_sides_can_review_the_same_booking():
 def test_worker_can_review_a_booking_only_once():
     cid, ctok = _register_and_login("user")
     wid, wtok = _available_worker()
-    _completed_booking(ctok, wtok, wid)
+    b = _completed_booking(ctok, wtok, wid)
 
     r = client.post(
         "/reviews/",
@@ -186,7 +181,7 @@ def test_worker_can_review_a_booking_only_once():
 def test_worker_written_review_does_not_change_worker_rating():
     cid, ctok = _register_and_login("user")
     wid, wtok = _available_worker()
-    _completed_booking(ctok, wtok, wid)
+    b = _completed_booking(ctok, wtok, wid)
 
     # Worker writes a LOW review about the client — their own rating must
     # stay untouched (it only reflects reviews they received).
@@ -210,16 +205,9 @@ def test_worker_written_review_does_not_change_worker_rating():
 def test_worker_can_delete_own_review_but_not_clients():
     cid, ctok = _register_and_login("user")
     wid, wtok = _available_worker()
-    _completed_booking(ctok, wtok, wid)
+    b = _completed_booking(ctok, wtok, wid)
 
-    r = client.post(
-        "/reviews/",
-        json={"worker_id": wid, "rating": 5, "review_text": "client's review"},
-        headers=_auth(ctok),
-    )
-    assert r.status_code == 200, r.text
-    client_review_id = r.json()["id"]
-
+    # Worker reviews the client
     r = client.post(
         "/reviews/",
         json={"user_id": cid, "rating": 4, "review_text": "worker's review"},
@@ -227,6 +215,15 @@ def test_worker_can_delete_own_review_but_not_clients():
     )
     assert r.status_code == 200, r.text
     worker_review_id = r.json()["id"]
+
+    # Client reviews the worker
+    r = client.post(
+        "/reviews/",
+        json={"worker_id": wid, "rating": 5, "review_text": "client's review"},
+        headers=_auth(ctok),
+    )
+    assert r.status_code == 200, r.text
+    client_review_id = r.json()["id"]
 
     # Worker can't delete the client's review.
     r = client.delete(f"/reviews/{client_review_id}", headers=_auth(wtok))
@@ -262,7 +259,7 @@ def test_each_booking_gets_its_own_review():
     b1 = _completed_booking(ctok, wtok, wid)
     b2 = _completed_booking(ctok, wtok, wid)
 
-    # Client reviews the worker for booking 1...
+    # Client reviews the worker for booking 1
     r = client.post(
         "/reviews/",
         json={"worker_id": wid, "booking_id": b1["id"], "rating": 5, "review_text": "first job"},
@@ -270,7 +267,7 @@ def test_each_booking_gets_its_own_review():
     )
     assert r.status_code == 200, r.text
 
-    # ...and STILL gets a separate review for booking 2.
+    # Client STILL gets a separate review for booking 2
     r = client.post(
         "/reviews/",
         json={"worker_id": wid, "booking_id": b2["id"], "rating": 4, "review_text": "second job"},

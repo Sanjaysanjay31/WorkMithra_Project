@@ -86,4 +86,12 @@ describe('BookingsPage component', () => {
     const { findByText } = render(<BookingsPage />);
     expect(await findByText('Propose your price')).toBeTruthy();
   });
+
+  it('shows Mark as not completed right after the worker accepts', async () => {
+    seedBookings([booking({ status: 'upcoming', final_price: 500 })]);
+    const { findByText, queryByText } = render(<BookingsPage />);
+    expect(await findByText('Mark as not completed')).toBeTruthy();
+    // Still an active job — must NOT be in the Past/history tab.
+    expect(queryByText('Not accepted')).toBeNull();
+  });
 });

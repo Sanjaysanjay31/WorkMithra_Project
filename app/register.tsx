@@ -211,7 +211,8 @@ export default function RegisterScreen() {
   return (
     <ThemedView style={styles.container}>
       <Stack.Screen options={{ title: '', headerShown: false }} />
-      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={{ flex: 1 }}>
+      {/* Same as ai-assistant: window pans, KAV 'padding' lifts inputs above the keyboard. */}
+      <KeyboardAvoidingView behavior="padding" style={{ flex: 1 }}>
         <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
           <View style={styles.header}>
             <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
