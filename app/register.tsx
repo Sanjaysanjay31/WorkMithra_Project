@@ -385,6 +385,9 @@ export default function RegisterScreen() {
                     value={formData.confirmPassword} 
                     onChangeText={(text) => setFormData({ ...formData, confirmPassword: text })} 
                   />
+                  <TouchableOpacity onPress={() => setShowPassword(!showPassword)} style={styles.eyeIcon}>
+                    <Ionicons name={showPassword ? "eye-off-outline" : "eye-outline"} size={20} color="#6c757d" />
+                  </TouchableOpacity>
                 </View>
                 {errors.confirmPassword ? <Text style={styles.fieldError}>{errors.confirmPassword}</Text> : null}
               </View>

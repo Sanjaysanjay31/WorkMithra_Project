@@ -44,16 +44,26 @@ let setupBlocked = false;
 // bridge call can throw even after a successful require in Expo Go.
 if (Notifications) {
   try {
-    Notifications.setNotificationHandler({
-      handleNotification: async () => ({
-        shouldShowBanner: true,
-        shouldShowList: true,
-        shouldPlaySound: true,
-        shouldSetBadge: false,
-      }),
-    });
+    if (typeof Notifications.setNotificationHandler === 'function') {
+      Notifications.setNotificationHandler({
+        handleNotification: async () => ({
+          shouldShowBanner: true,
+          shouldShowList: true,
+          shouldPlaySound: true,
+          shouldSetBadge: false,
+        }),
+      });
+    }
+    if (Platform.OS === 'android' && typeof Notifications.setNotificationChannelAsync === 'function') {
+      Notifications.setNotificationChannelAsync('default', {
+        name: 'Default',
+        importance: Notifications.AndroidImportance?.MAX ?? 4,
+        vibrationPattern: [0, 250, 250, 250],
+        lightColor: '#6F42C1',
+      }).catch(() => {});
+    }
   } catch {
-    // setNotificationHandler not supported in this runtime — skip.
+    // setNotificationHandler or channel creation not supported in this runtime — skip.
   }
 }
 
