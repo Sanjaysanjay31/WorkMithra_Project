@@ -9,7 +9,6 @@
 [![Pytest](https://img.shields.io/badge/Pytest-158_Passed_(100%25)-4E9A06?style=for-the-badge&logo=pytest)](https://pytest.org)
 [![Jest](https://img.shields.io/badge/Jest-57_Passed_(100%25)-C21325?style=for-the-badge&logo=jest)](https://jestjs.io)
 
-
 > **WorkMithra** ("Work Friend") is a production-grade, hyper-local, two-sided marketplace connecting verified blue-collar service professionals (plumbers, electricians, carpenters, painters, appliance technicians) with residential and business clients. 
 >
 > It breaks India's linguistic, literacy, and trust barriers through **real-time multilingual AI chat translation**, a **floating hands-free voice assistant**, **deterministic 8-stage booking state machines**, **Razorpay escrow payment workflows with automated server-to-server webhook reconciliation**, and **offline-first cache hydration**.
@@ -34,7 +33,6 @@
 - [11. Environment Variables Reference](#11-environment-variables-reference)
 - [12. Running & Testing Locally](#12-running--testing-locally)
 - [13. Comprehensive Verification & Test Suites](#13-comprehensive-verification--test-suites)
-- [14. Hackathon Evaluation Rubric & Scorecard](#14-hackathon-evaluation-rubric--scorecard)
 
 ---
 
@@ -529,19 +527,6 @@ Snapshots:   0 total
 Time:        13.507 s
 Ran all test suites.
 ```
-
----
-
-## 14. Hackathon Evaluation Rubric & Scorecard
-
-| Evaluation Dimension | Weight | Initial Audit | Wave 1 Fixes | Final Wave 2 Fixes | Highlights & Audit Rationale |
-|---|---|:---:|:---:|:---:|---|
-| **Innovation & Problem Fit** | 20% | 18 / 20 | 19 / 20 | **20 / 20** | Dual-language Indic voice interface, AI multi-model failover, hyper-local blue-collar economic empowerment. |
-| **System Architecture & Robustness** | 25% | 20 / 25 | 24 / 25 | **25 / 25** | Server-to-server webhook reconciliation, SQLite FK enforcement, pessimistic locks, SQL aggregations. |
-| **Code Quality & Automated Testing** | 20% | 15 / 20 | 19 / 20 | **20 / 20** | 158 Pytest tests + 57 Jest tests passing (215 total tests, 100% pass rate, 0 warnings). |
-| **Security & Production Readiness** | 20% | 16 / 20 | 19 / 20 | **20 / 20** | Role-scoped chat/notifications, OTP cooldown rate limits, ghost token pruning, secret rotation runbooks. |
-| **UX, Offline & Frontend Polish** | 15% | 15 / 15 | 15 / 15 | **15 / 15** | Instant offline cache hydration, modular status badges, seamless realtime Socket.IO synchronization. |
-| **Total Evaluation Score** | **100%** | **84 / 100** | **96 / 100** | **100 / 100** | **Flawless / Grand Prize Caliber** |
 
 ---
 
