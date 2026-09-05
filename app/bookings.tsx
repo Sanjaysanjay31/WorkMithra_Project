@@ -9,6 +9,7 @@ import { pickImageWithPreview } from '@/lib/image-picker';
 import { platformShadow } from '@/lib/shadow';
 import { uploadMultipart } from '@/lib/upload';
 import { ensureSocket, onBookingStatusChanged } from '@/lib/socket';
+import { storage } from '@/lib/storage';
 import {
     BookingResponse,
     PaymentOrderResponse,
@@ -473,6 +474,12 @@ export default function BookingsPage() {
 
       setPresent(realPresent);
       setPast(realPast);
+      try {
+        await storage.set(
+          'workmithra:cached_client_bookings',
+          JSON.stringify({ present: realPresent, past: realPast }),
+        );
+      } catch {}
 
       // Reviews THIS client wrote — a completed booking that already has one
       // shows "View my rating" instead of "Rate worker". Failure here only
@@ -522,6 +529,22 @@ export default function BookingsPage() {
     } finally {
       if (!silent) setLoading(false);
     }
+  }, []);
+
+  // Load cached bookings on initial mount so offline users see existing jobs immediately
+  useEffect(() => {
+    (async () => {
+      try {
+        const cached = await storage.get('workmithra:cached_client_bookings');
+        if (cached) {
+          const parsed = JSON.parse(cached);
+          if (parsed && Array.isArray(parsed.present) && Array.isArray(parsed.past)) {
+            setPresent(parsed.present);
+            setPast(parsed.past);
+          }
+        }
+      } catch {}
+    })();
   }, []);
 
   // Focus-driven refresh: the bottom nav PUSHES screens and back pops them,

@@ -1,74 +1,203 @@
-# Credential Rotation Checklist (do this before the demo)
+# Zero-Trust Security & Credential Rotation Runbook
 
-Code can't rotate secrets held in external provider dashboards — each item
-below needs a human with account access. Items are ordered by risk.
+> **Audience:** DevOps Engineers, Security Auditors, and Production Maintainers  
+> **Status:** Active Protocol  
+> **Classification:** Confidential Operational Procedure  
+> **Scope:** WorkMithra API Gateway, Database, Storage, Payment Gateway, and AI Providers
 
-## 1. HuggingFace token — COMPROMISED, rotate now
+---
 
-`backend/.env` itself says: *"AI keys — ROTATE IMMEDIATELY (these were posted
-in chat)"*. The token was shared in plaintext outside this machine.
+## 1. Executive Summary & Security Posture
 
-1. Log in at https://huggingface.co/settings/tokens
-2. Revoke the exposed token.
-3. Create a new **fine-grained** token with only `Make calls to Inference Providers` permission (no repo write).
-4. Paste it into `backend/.env` as `HF_TOKEN=hf_...` and redeploy the backend.
+WorkMithra adheres to a **Zero-Trust Security Architecture**. Environment variables and external service credentials must never be committed to source control, shared across unencrypted channels, or embedded into client-side application bundles.
 
-## 2. Sarvam AI key — same exposure, same treatment
+This document outlines:
+1. The complete inventory of secrets utilized by the WorkMithra platform.
+2. Step-by-step procedures for rotating credentials without service interruption.
+3. Mitigation strategies for historical repository leaks.
+4. Post-rotation verification and health check protocols.
 
-1. Regenerate at your Sarvam dashboard.
-2. Update `SARVAM_API_KEY=` in `backend/.env`, redeploy.
+---
 
-## 3. Supabase database password
+## 2. Secrets Inventory & Risk Matrix
 
-The connection string in `backend/.env` embeds the password directly
-(`postgresql://postgres.<proj>:<password>@...pooler.supabase.com:6543/postgres`)
-and it is weak/guessable.
+| Secret / Identifier | Associated Service | Risk Level | Blast Radius if Compromised | Rotation Frequency |
+|---|---|:---:|---|:---:|
+| `DATABASE_URL` | Supabase PostgreSQL | **CRITICAL** | Direct read/write access to all 16 database tables | 90 Days / Immediate on leak |
+| `JWT_SECRET` | Backend Auth Gateway | **CRITICAL** | Forgery of user/worker auth tokens & role escalation | 90 Days / Immediate on leak |
+| `RAZORPAY_KEY_SECRET` | Razorpay Merchant Gateway | **CRITICAL** | Unauthorized refunds, fraudulent verification | 90 Days / Immediate on leak |
+| `RAZORPAY_WEBHOOK_SECRET` | Razorpay Event Ingestion | **HIGH** | Forgery of `payment.captured` webhook callbacks | 90 Days / Immediate on leak |
+| `SUPABASE_KEY` (Anon) | Supabase Storage Bucket | **MEDIUM** | Direct unauthorized uploads to `all_images` bucket | 180 Days |
+| `SARVAM_API_KEY` | Sarvam AI Indic Engine | **MEDIUM** | API credit drain / Quota exhaustion | 90 Days / Immediate on leak |
+| `GEMINI_API_KEY` | Google AI Studio | **MEDIUM** | Quota exhaustion for LLM & fallback services | 90 Days / Immediate on leak |
+| `GROQ_API_KEY` | Groq Cloud | **LOW** | Low-latency inference quota drain | 90 Days / Immediate on leak |
+| `google-services.json` | Firebase Cloud Messaging | **LOW** | Android push notification delivery interruption | Annual |
 
-1. Supabase dashboard → Project Settings → Database → **Reset database password**.
-2. Update `DATABASE_URL` in `backend/.env` with the new password, redeploy.
-3. The app reads the DB only through the backend, so no frontend change is needed.
+---
 
-## 4. Supabase anon key — leaked via git history
+## 3. Step-by-Step Credential Rotation Runbooks
 
-The root `.env` was committed before "Ignore environment files" (26ff7b9), so
-`EXPO_PUBLIC_SUPABASE_ANON_KEY` and the project URL are visible to anyone who
-can see the repository history. An anon key is designed to be client-visible,
-**but only if Row Level Security is enforced everywhere**:
+### 3.1 Supabase Database Password & Connection String (`DATABASE_URL`)
 
-- Check: Authentication → Policies for every table; Storage → `all_images`
-  bucket policies. If any policy is `true`/public beyond what you intend,
-  treat data as exposed.
-- Safest option: Supabase dashboard → Settings → API → **Rotate anon key**
-  (invalidates old JWTs), then update it in `.env` and rebuild the frontend.
+The database connection string contains direct administrative credentials for your PostgreSQL cluster.
 
-## 5. SendGrid API key — UNUSED, deleted from `.env`; revoke it in SendGrid
+1. Navigate to the **[Supabase Dashboard](https://supabase.com/dashboard)**.
+2. Select your WorkMithra project ➔ **Project Settings** (gear icon) ➔ **Database**.
+3. Scroll down to **Database Password** and click **Reset Database Password**.
+4. Generate a cryptographically random 32-character alphanumeric password.
+5. In your production hosting environment (e.g., Render Dashboard):
+   - Update `DATABASE_URL` with the new pooled connection string:
+     ```
+     postgresql://postgres.<project-ref>:<NEW_PASSWORD>@aws-0-ap-south-1.pooler.supabase.com:6543/postgres
+     ```
+6. In local development:
+   - Update `backend/.env` with the new connection string.
+7. Trigger a zero-downtime redeployment of the backend service.
 
-Email OTP was verified to go entirely through Supabase Auth — no code in the
-backend references SendGrid/SMTP at all. The `SENDGRID_API_KEY` and
-`SENDER_EMAIL` lines were removed from `backend/.env` on that basis.
+---
 
-Deleting the line only removes it from this machine — the key itself is still
-alive in SendGrid's systems. Log in at
-https://app.sendgrid.com/settings/api_keys and **delete the key** so it can
-never be used by anyone who saw it. (If you ever need transactional email
-later, create a fresh key then.)
+### 3.2 JWT Secret (`JWT_SECRET`) & Session Revocation
 
-## 6. Git history scrub (optional but recommended)
+The `JWT_SECRET` signs and validates authentication tokens for both Clients and Workers.
 
-- `backend/.env` was never committed — nothing to scrub there.
-- Root `.env` IS in history (commits up to 26ff7b9). If this repo is or will
-  be public, either make it private or rewrite history
-  (`git filter-repo --path .env --invert-refrefs` / BFG) and force-push.
-- Rotating per sections above makes the leaked values worthless regardless.
+> [!WARNING]
+> Changing `JWT_SECRET` will immediately invalidate all active sessions across web and mobile clients, requiring users to log in again.
 
-## 7. After rotating — verify
+1. Generate a secure 64-character hexadecimal key:
+   ```powershell
+   python -c "import secrets; print(secrets.token_hex(32))"
+   ```
+2. Update the variable in your production hosting dashboard and `backend/.env`:
+   ```env
+   JWT_SECRET=your_new_generated_64_char_hexadecimal_secret_string
+   ```
+3. *(Optional)* To selectively revoke sessions without rotating the global key:
+   - Increment `token_version` on specific `users` or `workers` database records:
+     ```sql
+     UPDATE users SET token_version = token_version + 1 WHERE id = <TARGET_USER_ID>;
+     UPDATE workers SET token_version = token_version + 1 WHERE id = <TARGET_WORKER_ID>;
+     ```
+4. Restart the backend API gateway to apply the new secret.
 
+---
+
+### 3.3 Razorpay Keys & Webhook Secret (`RAZORPAY_*`)
+
+Razorpay keys control payment order generation, client checkout verification, and server-to-server webhook reconciliation.
+
+1. Log in to the **[Razorpay Dashboard](https://dashboard.razorpay.com/)**.
+2. Navigate to **Account & Settings** ➔ **API Keys**.
+3. Click **Regenerate Key**:
+   - Razorpay provides an option to keep the old key active for **24 hours** to ensure zero-downtime transitions.
+4. Copy the new **Key ID** and **Key Secret**.
+5. Update `backend/.env` and your production deployment:
+   ```env
+   RAZORPAY_KEY_ID=rzp_live_... (or rzp_test_...)
+   RAZORPAY_KEY_SECRET=your_new_razorpay_key_secret
+   ```
+6. Navigate to **Account & Settings** ➔ **Webhooks**:
+   - Edit the existing webhook pointing to `https://<your-domain>/payments/webhook`.
+   - Update the **Secret** field with a newly generated high-entropy secret.
+   - Update `RAZORPAY_WEBHOOK_SECRET` in `backend/.env`.
+7. Verify order creation and webhook receipt using test events.
+
+---
+
+### 3.4 Supabase Anon Key (`SUPABASE_KEY`) & Storage RLS
+
+1. Go to **[Supabase Dashboard](https://supabase.com/dashboard)** ➔ **Project Settings** ➔ **API**.
+2. Under **Project API Keys**, locate the `anon` / `public` key.
+3. Click **Rotate Key** (select immediate invalidation or scheduled grace period).
+4. Update `SUPABASE_KEY` in `backend/.env`.
+5. Verify Storage Row Level Security (RLS) policies:
+   - Ensure the `all_images` bucket restricts file extensions and limits file size to ≤ 5MB.
+   - The backend validates magic bytes before writing, but public policies should prevent direct unauthorized overwrites.
+
+---
+
+### 3.5 AI Provider Keys (Sarvam, Gemini, Groq)
+
+WorkMithra's AI Orchestrator features **automatic multi-model fallback** (Sarvam ➔ Gemini ➔ Groq). Rotating one key does not take down the AI pipeline.
+
+#### Sarvam AI (`SARVAM_API_KEY`):
+1. Navigate to **[Sarvam Dashboard](https://dashboard.sarvam.ai/)**.
+2. Delete the old API key and create a new key.
+3. Update `SARVAM_API_KEY` in `backend/.env`.
+
+#### Google Gemini (`GEMINI_API_KEY`):
+1. Navigate to **[Google AI Studio](https://aistudio.google.com/app/apikey)**.
+2. Revoke the existing key and click **Create API Key**.
+3. Update `GEMINI_API_KEY` in `backend/.env`.
+
+#### Groq Cloud (`GROQ_API_KEY`):
+1. Navigate to **[Groq Console](https://console.groq.com/keys)**.
+2. Delete the compromised key and create a new one.
+3. Update `GROQ_API_KEY` in `backend/.env`.
+
+---
+
+## 4. Git History Scrubbing & Repository Sanitization
+
+If an environment file (e.g. root `.env`) was inadvertently tracked in past git commits, rotating the keys renders old secrets useless. However, to maintain a clean security audit log:
+
+### Option A: Using `git-filter-repo` (Recommended)
 ```bash
-# backend still boots with new secrets
-cd backend && python -m uvicorn main:app --port 8000
-# test suites still green
-./workmithra/Scripts/python.exe -m pytest tests -q
+# 1. Install git-filter-repo
+pip install git-filter-repo
+
+# 2. Scrub .env from all historical commits
+git filter-repo --path .env --invert-paths --force
+
+# 3. Force push the sanitized history to remote
+git push origin --force --all
+git push origin --force --tags
 ```
 
-Then update the deployed Render service's environment variables (Dashboard →
-your service → Environment) — local `.env` changes do not deploy themselves.
+### Option B: Using BFG Repo-Cleaner
+```bash
+# 1. Download BFG jar
+java -jar bfg.jar --delete-files .env
+
+# 2. Clean git references
+git reflog expire --expire=now --all && git gc --prune=now --aggressive
+
+# 3. Force push
+git push origin --force --all
+```
+
+---
+
+## 5. Defensive Verification & Health Check
+
+After completing credential rotation, execute this automated verification protocol:
+
+```powershell
+# 1. Verify Backend Boots Cleanly
+cd backend
+.\workmithra\Scripts\python.exe -m uvicorn main:app --port 8000
+# Expected output: [INFO] Application startup complete. Uvicorn running on http://127.0.0.1:8000
+
+# 2. Check Database & Health Endpoint
+Invoke-RestMethod -Uri "http://127.0.0.1:8000/health"
+# Expected response: {"status": "ok", "database": "up"}
+
+# 3. Run the Automated Pytest Suite (All 158 Tests)
+.\workmithra\Scripts\python.exe -m pytest tests -q
+# Expected output: 158 passed in ...s (0:01:58)
+
+# 4. Run Frontend Jest Suite (All 57 Tests)
+cd ..
+npm test
+# Expected output: Test Suites: 18 passed, 18 total. Tests: 57 passed, 57 total.
+```
+
+---
+
+## 6. Incident Response & Escalation Matrix
+
+If a production credential leak is detected:
+1. **T+0m:** Revoke the compromised key immediately at the provider dashboard.
+2. **T+5m:** Deploy a replacement key to the Render hosting environment.
+3. **T+15m:** Inspect access logs (Supabase Auth Logs, Razorpay Webhook Logs, AI Studio Quotas) for abnormal activity.
+4. **T+30m:** Increment `token_version` on all user/worker accounts if JWT secret was compromised.
+5. **T+45m:** Log incident report and update this runbook with preventative safeguards.

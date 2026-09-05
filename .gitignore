@@ -42,11 +42,13 @@ app-example
 /ios
 /android
 
-# Backend API keys
-backend/.env
-
-# Frontend API keys
+# Environment variables & secret files (never commit)
 .env
+.env.*
+!.env.example
+backend/.env
+backend/.env.*
+!backend/.env.example
 
 # Firebase / push (contains project keys — never commit)
 # google-services.json is committed-safe client config, but kept out of git;

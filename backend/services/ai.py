@@ -77,10 +77,41 @@ def sarvam_stt(audio_bytes: bytes, filename: str = "audio.wav", lang: str = "unk
     return result
 
 
-def sarvam_translate(text: str, source_lang: str, target_lang: str) -> Dict[str, Any]:
-    if not os.getenv("SARVAM_API_KEY", ""):
-        raise RuntimeError("SARVAM_API_KEY is not set")
+_LANG_NAMES = {
+    "en-IN": "English", "hi-IN": "Hindi", "te-IN": "Telugu", "ta-IN": "Tamil",
+    "kn-IN": "Kannada", "ml-IN": "Malayalam", "mr-IN": "Marathi",
+    "bn-IN": "Bengali", "gu-IN": "Gujarati", "pa-IN": "Punjabi",
+    "or-IN": "Odia", "od-IN": "Odia", "as-IN": "Assamese", "ur-IN": "Urdu",
+}
 
+
+def llm_translate_fallback(text: str, source_lang: str, target_lang: str) -> Dict[str, Any]:
+    """Fallback translation when Sarvam API is unreachable, out of quota, or returns error.
+    Uses orchestrator.generate (Gemini -> Groq -> Sarvam) with a direct translation prompt."""
+    tgt_name = _LANG_NAMES.get(target_lang, target_lang)
+    prompt = (
+        f"You are an expert translator for Indian languages. Translate the following text into {tgt_name}.\n"
+        f"Context: The text is a home-services marketplace chat message between client and worker.\n"
+        f"Rules: Return ONLY the direct translation in the target language. "
+        f"Do NOT include notes, explanations, phonetic transliterations, or markdown.\n\n"
+        f"Text:\n{text}"
+    )
+    messages = [
+        {"role": "system", "content": "You are a professional translator for Indian languages. Return only the translated text."},
+        {"role": "user", "content": prompt}
+    ]
+    translated_text, provider = orchestrator.generate(messages, max_tokens=1024, temperature=0.1)
+    cleaned = (translated_text or "").strip().strip('"').strip("'")
+    print(f"[/ai/translate] fallback translation succeeded via {provider}")
+    return {
+        "translated_text": cleaned or text,
+        "source_language_code": source_lang,
+        "target_language_code": target_lang,
+        "provider": f"{provider}-fallback",
+    }
+
+
+def sarvam_translate(text: str, source_lang: str, target_lang: str) -> Dict[str, Any]:
     src = (source_lang or "").strip() or "auto"
     if src.lower() in ("unknown", ""):
         src = "auto"
@@ -90,25 +121,40 @@ def sarvam_translate(text: str, source_lang: str, target_lang: str) -> Dict[str,
     if src.lower() == tgt.lower():
         return {"translated_text": text, "source_language_code": src}
 
+    # If Sarvam key is missing, try LLM fallback immediately
+    if not os.getenv("SARVAM_API_KEY", ""):
+        try:
+            return llm_translate_fallback(text, src, tgt)
+        except Exception as fb_err:
+            print(f"[translate] LLM fallback failed: {fb_err}")
+            return {"translated_text": text, "source_language_code": src, "error": "Translation service unconfigured"}
+
     body = {
         "input": text,
         "source_language_code": src,
         "target_language_code": tgt,
     }
-    r = requests.post(
-        f"{SARVAM_BASE}/translate",
-        headers={
-            "api-subscription-key": os.getenv("SARVAM_API_KEY", ""),
-            "Content-Type": "application/json",
-        },
-        json=body,
-        timeout=30,
-    )
-    if r.status_code >= 400:
-        # Never log the user's text (PII) — status only.
-        print(f"[Sarvam translate] failed with status {r.status_code}")
-        raise RuntimeError(f"Sarvam translate failed with status {r.status_code}")
-    return r.json()
+    try:
+        r = requests.post(
+            f"{SARVAM_BASE}/translate",
+            headers={
+                "api-subscription-key": os.getenv("SARVAM_API_KEY", ""),
+                "Content-Type": "application/json",
+            },
+            json=body,
+            timeout=30,
+        )
+        if r.status_code >= 400:
+            print(f"[Sarvam translate] HTTP {r.status_code} — attempting LLM fallback")
+            return llm_translate_fallback(text, src, tgt)
+        return r.json()
+    except Exception as e:
+        print(f"[Sarvam translate] request failed: {e} — attempting LLM fallback")
+        try:
+            return llm_translate_fallback(text, src, tgt)
+        except Exception as fb_err:
+            print(f"[translate] fallback also failed: {fb_err}")
+            raise e
 
 
 def _fallback_lang_detection() -> Dict[str, Any]:

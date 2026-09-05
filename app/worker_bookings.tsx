@@ -8,6 +8,7 @@ import { pickImageWithPreview } from '@/lib/image-picker';
 import { platformShadow } from '@/lib/shadow';
 import { uploadMultipart } from '@/lib/upload';
 import { ensureSocket, onBookingRequest, onBookingStatusChanged, onPaymentReceived } from '@/lib/socket';
+import { storage } from '@/lib/storage';
 import { BookingResponse, ReviewResponse } from '@/lib/types';
 import { Ionicons } from '@expo/vector-icons';
 import { Stack, useFocusEffect, useRouter } from 'expo-router';
@@ -157,6 +158,11 @@ export default function WorkerBookings() {
       try {
         const auth = await getAuth();
         if (auth?.id) setUid(String(auth.id));
+        const cached = await storage.get('workmithra:cached_worker_bookings');
+        if (cached) {
+          const parsed = JSON.parse(cached);
+          if (Array.isArray(parsed)) setRequests(parsed);
+        }
       } catch {}
     })();
   }, []);
@@ -176,7 +182,11 @@ export default function WorkerBookings() {
         await authFetch('/bookings/?limit=100'),
         'Could not load booking requests',
       );
-      setRequests(mapRequests(data));
+      const mapped = mapRequests(data);
+      setRequests(mapped);
+      try {
+        await storage.set('workmithra:cached_worker_bookings', JSON.stringify(mapped));
+      } catch {}
       setLoadError(false);
 
       // Reviews THIS worker wrote — a completed job that already has one

@@ -12,12 +12,15 @@ os.environ["RATE_LIMITING"] = "0"
 # Point the app at a throwaway SQLite database BEFORE `database` is imported.
 # load_dotenv() never overrides existing env vars, so this wins over the
 # (production) DATABASE_URL in backend/.env — tests must never touch Supabase.
-_db_path = os.path.join(tempfile.gettempdir(), "workmithra_tests.db")
-if os.path.exists(_db_path):
-    os.remove(_db_path)
+_db_path = os.path.join(tempfile.gettempdir(), f"workmithra_tests_{os.getpid()}.db")
+try:
+    if os.path.exists(_db_path):
+        os.remove(_db_path)
+except OSError:
+    pass
 os.environ["DATABASE_URL"] = f"sqlite:///{_db_path}"
 
-os.environ.setdefault("JWT_SECRET", "test-secret-do-not-use-in-prod")
+os.environ.setdefault("JWT_SECRET", "test-secret-do-not-use-in-prod-32bytes-secure")
 
 # SQLite engines don't accept the pool_size/max_overflow args used for Postgres.
 import sqlalchemy

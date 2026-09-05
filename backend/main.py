@@ -98,6 +98,8 @@ _COLUMN_DDL = (
     "CREATE TABLE IF NOT EXISTS withdrawal_requests (id INTEGER PRIMARY KEY, worker_id INTEGER NOT NULL, amount NUMERIC(10, 2) NOT NULL, status VARCHAR(20) NOT NULL DEFAULT 'pending', admin_note VARCHAR(500), requested_at TIMESTAMP, processed_at TIMESTAMP)",
     # Worker bank account details for withdrawal disbursements.
     "CREATE TABLE IF NOT EXISTS worker_bank_accounts (id INTEGER PRIMARY KEY, worker_id INTEGER NOT NULL UNIQUE, bank_name VARCHAR(255), account_number VARCHAR(50), ifsc_code VARCHAR(20), upi_id VARCHAR(100), account_holder_name VARCHAR(255), updated_at TIMESTAMP)",
+    # Notification recipient role disambiguation for overlapping user/worker IDs.
+    "ALTER TABLE notifications ADD COLUMN IF NOT EXISTS user_role VARCHAR(20) DEFAULT 'user'",
 )
 try:
     with engine.begin() as _conn:
@@ -261,12 +263,30 @@ def health(db: Session = Depends(get_db)):
         print(f"[health] database check failed: {e}")
         raise HTTPException(status_code=503, detail={"status": "degraded", "database": "down"})
 
+_OTP_COOLDOWN_SECONDS = 60
+_email_otp_timestamps: Dict[str, float] = {}
+
+
 @app.post("/send-otp")
 @limiter.limit("5/minute")
 def send_otp(request: Request, data: schemas.OTPRequest):
-    """Send an OTP email via Supabase Auth."""
+    """Send an OTP email via Supabase Auth with per-email cooldown protection."""
     if not SUPABASE_URL or not SUPABASE_KEY:
         raise HTTPException(status_code=500, detail="Supabase not configured")
+
+    normalized_email = (data.email or "").strip().lower()
+    if not normalized_email:
+        raise HTTPException(status_code=422, detail="Email is required")
+
+    now_ts = time.time()
+    last_sent = _email_otp_timestamps.get(normalized_email, 0)
+    if now_ts - last_sent < _OTP_COOLDOWN_SECONDS:
+        remaining = int(_OTP_COOLDOWN_SECONDS - (now_ts - last_sent))
+        raise HTTPException(
+            status_code=429,
+            detail=f"Please wait {remaining} seconds before requesting another OTP",
+        )
+
     try:
         r = _requests.post(
             f"{SUPABASE_URL}/auth/v1/otp",
@@ -286,6 +306,8 @@ def send_otp(request: Request, data: schemas.OTPRequest):
     except Exception as e:
         print(f"[send-otp] failed: {e}")
         raise HTTPException(status_code=502, detail="Could not send the OTP — try again shortly")
+
+    _email_otp_timestamps[normalized_email] = now_ts
     return {"message": "OTP sent successfully"}
 
 

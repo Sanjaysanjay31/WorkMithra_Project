@@ -659,6 +659,102 @@ def test_booking_payment_endpoint_worker():
 
 
 # ---------------------------------------------------------------------------
+# Razorpay Webhook tests
+# ---------------------------------------------------------------------------
+
+def test_razorpay_webhook_valid_signature():
+    """Valid webhook payload updates payment to 'paid' and booking to 'payment_completed'."""
+    import json
+    secret = "test_webhook_secret_key_123"
+    os.environ["RAZORPAY_WEBHOOK_SECRET"] = secret
+    _ensure_razorpay_keys()
+
+    cid, ctok = _register_and_login("user")
+    wid, wtok = _available_worker()
+    b, _ = _create_booking_with_work_report(ctok, wid, wtok)
+
+    with patch("routers.payments.create_razorpay_order") as mock_order:
+        mock_order.return_value = {
+            "id": "order_webhook_test",
+            "amount": 250000,
+            "currency": "INR",
+            "receipt": "booking-wh",
+            "notes": {"booking_id": b["id"], "user_id": cid, "worker_id": wid},
+        }
+        r = client.post("/payments/order", json={"booking_id": b["id"]}, headers=_auth(ctok))
+        assert r.status_code == 200
+
+    payload_dict = {
+        "event": "payment.captured",
+        "payload": {
+            "payment": {
+                "entity": {
+                    "id": "pay_wh_captured_999",
+                    "order_id": "order_webhook_test",
+                    "amount": 250000,
+                    "status": "captured",
+                }
+            }
+        }
+    }
+    raw_body = json.dumps(payload_dict, separators=(',', ':')).encode("utf-8")
+    sig = hmac.new(secret.encode("utf-8"), raw_body, hashlib.sha256).hexdigest()
+
+    r = client.post(
+        "/payments/webhook",
+        content=raw_body,
+        headers={"X-Razorpay-Signature": sig, "Content-Type": "application/json"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "ok"
+
+    # Verify payment in DB is now 'paid'
+    r = client.get(f"/payments/booking/{b['id']}", headers=_auth(ctok))
+    assert r.status_code == 200
+    assert r.json()["payment_status"] == "paid"
+    assert r.json()["razorpay_payment_id"] == "pay_wh_captured_999"
+
+    # Verify booking in DB is now 'payment_completed'
+    r = client.get(f"/bookings/{b['id']}", headers=_auth(ctok))
+    assert r.status_code == 200
+    assert r.json()["status"] == "payment_completed"
+
+
+def test_razorpay_webhook_invalid_signature():
+    """Tampered or invalid signature returns 400."""
+    secret = "test_webhook_secret_key_123"
+    os.environ["RAZORPAY_WEBHOOK_SECRET"] = secret
+    raw_body = b'{"event": "payment.captured"}'
+
+    r = client.post(
+        "/payments/webhook",
+        content=raw_body,
+        headers={"X-Razorpay-Signature": "invalid_sig_abc123", "Content-Type": "application/json"},
+    )
+    assert r.status_code == 400
+    assert "Invalid webhook signature" in r.text
+
+
+def test_razorpay_webhook_not_configured():
+    """If webhook secret is not configured in env, endpoint returns 503."""
+    old_wh = os.environ.pop("RAZORPAY_WEBHOOK_SECRET", None)
+    old_key = os.environ.pop("RAZORPAY_KEY_SECRET", None)
+    try:
+        r = client.post(
+            "/payments/webhook",
+            content=b'{}',
+            headers={"X-Razorpay-Signature": "any_sig", "Content-Type": "application/json"},
+        )
+        assert r.status_code == 503
+        assert "Webhook not configured" in r.text
+    finally:
+        if old_wh:
+            os.environ["RAZORPAY_WEBHOOK_SECRET"] = old_wh
+        if old_key:
+            os.environ["RAZORPAY_KEY_SECRET"] = old_key
+
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 __all__ = [
@@ -673,4 +769,7 @@ __all__ = [
     "test_verify_payment_already_paid",
     "test_booking_payment_endpoint_client",
     "test_booking_payment_endpoint_worker",
+    "test_razorpay_webhook_valid_signature",
+    "test_razorpay_webhook_invalid_signature",
+    "test_razorpay_webhook_not_configured",
 ]

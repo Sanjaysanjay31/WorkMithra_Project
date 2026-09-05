@@ -22,12 +22,14 @@ Security notes:
 
 import hashlib
 import hmac
+import json
 import os
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 import requests
 from fastapi import APIRouter, Depends, HTTPException, Request
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 import database, models, schemas
@@ -47,6 +49,10 @@ def _key_id() -> str:
 
 def _key_secret() -> str:
     return os.getenv("RAZORPAY_KEY_SECRET", "").strip()
+
+
+def _webhook_secret() -> str:
+    return os.getenv("RAZORPAY_WEBHOOK_SECRET", "").strip() or _key_secret()
 
 
 def _require_configured() -> None:
@@ -294,6 +300,87 @@ def verify_payment(
     return payment
 
 
+@router.post("/webhook")
+async def razorpay_webhook(
+    request: Request,
+    db: Session = Depends(database.get_db),
+):
+    """Server-to-server Razorpay webhook listener. Reconciles payments if the mobile
+    client dropped connection or closed the app during checkout."""
+    secret = _webhook_secret()
+    if not secret:
+        raise HTTPException(status_code=503, detail="Webhook not configured")
+
+    signature = request.headers.get("X-Razorpay-Signature", "")
+    if not signature:
+        raise HTTPException(status_code=400, detail="Missing X-Razorpay-Signature header")
+
+    raw_body = await request.body()
+    expected = hmac.new(secret.encode("utf-8"), raw_body, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, signature):
+        raise HTTPException(status_code=400, detail="Invalid webhook signature")
+
+    try:
+        event_data = json.loads(raw_body.decode("utf-8"))
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    event_type = event_data.get("event")
+    if event_type in ("payment.captured", "order.paid"):
+        payload_data = event_data.get("payload", {})
+        entity = (
+            payload_data.get("payment", {}).get("entity")
+            or payload_data.get("order", {}).get("entity", {})
+        )
+        order_id = entity.get("order_id") or entity.get("id")
+        payment_id = entity.get("id") if entity.get("order_id") else None
+
+        payment = (
+            db.query(models.Payment)
+            .filter(models.Payment.razorpay_order_id == order_id)
+            .order_by(models.Payment.id.desc())
+            .first()
+        )
+        if payment and payment.payment_status != "paid":
+            payment.payment_status = "paid"
+            if payment_id:
+                payment.transaction_id = payment_id
+                payment.razorpay_payment_id = payment_id
+            payment.paid_at = datetime.utcnow()
+
+            booking = db.query(models.Booking).filter(models.Booking.id == payment.booking_id).first()
+            if booking and booking.status != "completed":
+                booking.status = "payment_completed"
+
+            notif = None
+            if payment.worker_id is not None:
+                notif = build_notification(
+                    db,
+                    payment.worker_id,
+                    "worker",
+                    "payment_received",
+                    "Payment received 💰",
+                    f"The client paid {_fmt_price(payment.amount)} for your job (verified via webhook).",
+                )
+            db.commit()
+            if notif is not None:
+                publish_notification(db, notif, "worker")
+            if payment.worker_id is not None:
+                emit_to_user(
+                    payment.worker_id,
+                    "payment_received",
+                    {
+                        "booking_id": payment.booking_id,
+                        "payment_id": payment.id,
+                        "amount": float(payment.amount),
+                        "timestamp": datetime.utcnow().isoformat(),
+                    },
+                    role="worker",
+                )
+
+    return {"status": "ok", "event": event_type}
+
+
 @router.patch("/{booking_id}/proof", response_model=schemas.PaymentResponse)
 def upload_payment_proof(
     booking_id: int,
@@ -373,20 +460,30 @@ def request_withdrawal(
 
     worker_id = _current_user_id(current)
 
-    # Compute total received from paid payments for this worker.
-    paid_rows = db.query(models.Payment).filter(
-        models.Payment.worker_id == worker_id,
-        models.Payment.payment_status == "paid",
-    ).all()
-    total_received = sum(float(p.amount or 0) for p in paid_rows)
+    # Pessimistic row lock to eliminate race conditions between concurrent withdrawal requests
+    worker = db.query(models.Worker).filter(models.Worker.id == worker_id).with_for_update().first()
+    if not worker:
+        raise HTTPException(status_code=404, detail="Worker not found")
 
-    # Subtract both successful AND pending withdrawals — pending is deducted from
-    # available balance immediately so the worker can't double-request the same funds.
-    all_withdrawals = db.query(models.WithdrawalRequest).filter(
-        models.WithdrawalRequest.worker_id == worker_id,
-        models.WithdrawalRequest.status.in_(["success", "pending"]),
-    ).all()
-    total_withdrawn = sum(float(w.amount or 0) for w in all_withdrawals)
+    # SQL-level aggregation instead of loading all payment rows into memory
+    total_received = float(
+        db.query(func.coalesce(func.sum(models.Payment.amount), 0))
+        .filter(
+            models.Payment.worker_id == worker_id,
+            models.Payment.payment_status == "paid",
+        )
+        .scalar() or 0.0
+    )
+
+    # Subtract both successful AND pending withdrawals (deducted immediately to avoid double-spend)
+    total_withdrawn = float(
+        db.query(func.coalesce(func.sum(models.WithdrawalRequest.amount), 0))
+        .filter(
+            models.WithdrawalRequest.worker_id == worker_id,
+            models.WithdrawalRequest.status.in_(["success", "pending"]),
+        )
+        .scalar() or 0.0
+    )
 
     available = total_received - total_withdrawn
     if payload.amount > available + 0.01:  # small float tolerance

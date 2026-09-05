@@ -139,6 +139,8 @@ export type AuthSession = {
 
   phone?: string;
 
+  email?: string;
+
   token?: string;
 
   role?: 'user' | 'worker';

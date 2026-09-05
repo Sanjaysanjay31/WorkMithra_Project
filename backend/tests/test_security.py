@@ -10,6 +10,7 @@ import uuid
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from fastapi.testclient import TestClient
+from unittest.mock import patch, MagicMock
 from main import app
 from conftest import issue_verify_token, complete_booking_via_work_report, complete_booking_work_report_to_awaiting_payment
 
@@ -415,3 +416,27 @@ def test_cannot_read_other_users_full_profile_fields():
     body = r.json()
     assert "hashed_password" not in body
     assert "password" not in body
+
+
+# ---------------------------------------------------------------------------
+# OTP Cooldown Rate Limiting
+# ---------------------------------------------------------------------------
+
+def test_send_otp_rate_limiting_cooldown():
+    """Repeated OTP requests for the same email within 60s return 429 Too Many Requests."""
+    email = f"cooldown-{_uniq()}@example.com"
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+
+    with patch("main.SUPABASE_URL", "https://fake.supabase.co"), \
+         patch("main.SUPABASE_KEY", "fake_key_secret"), \
+         patch("main._requests.post", return_value=mock_resp):
+        # First request succeeds
+        r1 = client.post("/send-otp", json={"email": email})
+        assert r1.status_code == 200, r1.text
+
+        # Second request immediately within cooldown period gets 429
+        r2 = client.post("/send-otp", json={"email": email})
+        assert r2.status_code == 429
+        assert "Please wait" in r2.json()["detail"]
+

@@ -341,6 +341,9 @@ class UserProfile(Base):
 
 class Notification(Base):
     __tablename__ = "notifications"
+    __table_args__ = (
+        Index("ix_notifications_user_audience", "user_id", "user_role"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     title = Column(String(255), nullable=True)
@@ -350,8 +353,9 @@ class Notification(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     # No FK: the recipient can be a user OR a worker (separate tables with
-    # overlapping id space). The FK to users(id) is dropped at startup.
+    # overlapping id space). user_role disambiguates whether user_id points to User or Worker.
     user_id = Column(Integer, nullable=True, index=True)
+    user_role = Column(String(20), default="user", nullable=True)
 
 
 class PushToken(Base):

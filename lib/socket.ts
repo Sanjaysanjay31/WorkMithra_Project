@@ -8,9 +8,10 @@ import { AppState } from 'react-native';
 import { getAuth, getBaseUrl, getToken } from '@/lib/api';
 
 let socket: Socket | null = null;
-// The user id the current socket authenticated as. Tracks account switches so
+// The user id and role the current socket authenticated as. Tracks account and role switches so
 // ensureSocket() reconnects instead of reusing a stale identity.
 let socketUserId: number | null = null;
+let socketUserRole: string | null = null;
 
 // Reconnect automatically when the app returns to the foreground. Registered
 // once at module load; ensureSocket() no-ops when logged out or already
@@ -29,9 +30,9 @@ function registerAppStateResume(): void {
 /**
  * Connect + authenticate the socket for the currently logged-in user, if any.
  * Safe to call repeatedly (e.g. on app mount): it no-ops when logged out or
- * when a socket already exists for the SAME user. If the account changed
- * (logout → login as someone else without a restart), the stale socket is
- * torn down and rebuilt so events authenticate as the new user.
+ * when a socket already exists for the SAME user and role. If the account or role changed
+ * (logout → login as someone else without a restart, or switching user ↔ worker), the stale socket is
+ * torn down and rebuilt so events authenticate as the new user and role.
  */
 export async function ensureSocket(): Promise<Socket | null> {
   registerAppStateResume();
@@ -39,11 +40,12 @@ export async function ensureSocket(): Promise<Socket | null> {
     const auth = await getAuth();
     if (!auth?.id) return null;
     const userId = Number(auth.id);
-    if (socket && socketUserId !== userId) {
+    const userRole = auth.role ? String(auth.role) : 'user';
+    if (socket && (socketUserId !== userId || socketUserRole !== userRole)) {
       disconnectSocket();
     }
     if (socket) return socket;
-    return initializeSocket(userId);
+    return initializeSocket(userId, userRole);
   } catch (e) {
     console.warn('ensureSocket failed:', e);
     return null;
@@ -53,9 +55,10 @@ export async function ensureSocket(): Promise<Socket | null> {
 /**
  * Initialize and connect to Socket.IO server
  * @param userId - The authenticated user ID
+ * @param userRole - The authenticated user role ('user' | 'worker')
  * @returns Socket instance
  */
-export function initializeSocket(userId: number): Socket {
+export function initializeSocket(userId: number, userRole: string = 'user'): Socket {
   if (socket && socket.connected) {
     return socket;
   }
@@ -82,6 +85,7 @@ export function initializeSocket(userId: number): Socket {
     // Remember the identity up-front so a second ensureSocket() for a
     // different user (before 'connect' fires) still triggers a rebuild.
     socketUserId = userId;
+    socketUserRole = userRole;
 
     // Handle connection
     socket.on('connect', async () => {
@@ -89,6 +93,7 @@ export function initializeSocket(userId: number): Socket {
       // rejects the socket if the token doesn't match the claimed user id.
       if (userId) {
         socketUserId = userId;
+        socketUserRole = userRole;
         const token = await getToken();
         socket?.emit('authenticate', { user_id: userId, token });
       }
@@ -143,6 +148,7 @@ export function disconnectSocket(): void {
     }
     socket = null;
     socketUserId = null;
+    socketUserRole = null;
   }
 }
 

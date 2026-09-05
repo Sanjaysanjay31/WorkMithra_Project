@@ -66,9 +66,13 @@ def _audience_filter(audience: str):
     _decode_type treats those as user notifications, so the user inbox must
     include them — otherwise they silently disappear forever."""
     prefixed = models.Notification.type.like(f"{audience}:%")
+    role_match = or_(
+        models.Notification.user_role == audience,
+        models.Notification.user_role.is_(None),
+    )
     if audience == "user":
-        return or_(prefixed, models.Notification.type.notlike("%:%"))
-    return prefixed
+        return role_match & or_(prefixed, models.Notification.type.notlike("%:%"))
+    return role_match & prefixed
 
 
 def _to_dict(n: models.Notification) -> Dict[str, Any]:
@@ -110,6 +114,7 @@ def build_notification(
     at a row that gets rolled back."""
     n = models.Notification(
         user_id=recipient_id,
+        user_role=audience,
         title=(title or "")[:255],
         message=(body or "")[:1000],
         type=_encode_type(audience, kind),
@@ -158,6 +163,19 @@ def _push_to_device(db: Session, n: models.Notification, audience: str) -> None:
     ).start()
 
 
+def _prune_dead_tokens(dead_tokens: List[str]) -> None:
+    if not dead_tokens:
+        return
+    db = database.SessionLocal()
+    try:
+        db.query(models.PushToken).filter(models.PushToken.token.in_(dead_tokens)).delete(synchronize_session=False)
+        db.commit()
+    except Exception:
+        db.rollback()
+    finally:
+        db.close()
+
+
 def _send_expo_push(tokens: List[str], title: str, body: str, data: Dict[str, Any]) -> None:
     messages = [
         {
@@ -171,7 +189,18 @@ def _send_expo_push(tokens: List[str], title: str, body: str, data: Dict[str, An
         for token in tokens
     ]
     try:
-        requests.post(EXPO_PUSH_URL, json=messages, timeout=5)
+        resp = requests.post(EXPO_PUSH_URL, json=messages, timeout=5)
+        if resp.ok:
+            tickets = (resp.json() or {}).get("data", [])
+            dead_tokens = []
+            for i, ticket in enumerate(tickets):
+                if ticket.get("status") == "error":
+                    details = ticket.get("details", {})
+                    if details.get("error") in ("DeviceNotRegistered", "DeviceUnregistered"):
+                        if i < len(tokens):
+                            dead_tokens.append(tokens[i])
+            if dead_tokens:
+                _prune_dead_tokens(dead_tokens)
     except Exception:
         # Push is best-effort — the in-app inbox still has the row.
         pass

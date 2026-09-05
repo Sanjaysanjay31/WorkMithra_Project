@@ -172,6 +172,7 @@ def get_user_messages(
 def get_conversation(
     user_id: int,
     other_user_id: int,
+    other_role: Optional[str] = Query(None, description="Role of the other participant ('user' or 'worker')"),
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
     db: Session = Depends(database.get_db),
@@ -180,7 +181,9 @@ def get_conversation(
     """Get conversation between two users. Caller must be one of the participants.
     The `user_id` path param is validated against the JWT, and the caller's
     role must also match — preventing a worker with a colliding numeric id
-    from reading a user's conversation."""
+    from reading a user's conversation.
+    If `other_role` is supplied, messages are strictly filtered to that counterpart's role,
+    preventing ID collisions between User #N and Worker #N."""
     uid = _current_user_id(current)
     role = current.get("role", "user")
     if uid not in (user_id, other_user_id):
@@ -190,13 +193,24 @@ def get_conversation(
     # different people who happen to share a numeric id.
     me_as_sender = (models.ChatMessage.sender_id == uid) & (models.ChatMessage.sender_role == role)
     me_as_receiver = (models.ChatMessage.receiver_id == uid) & (models.ChatMessage.receiver_role == role)
-    pair = (
-        ((models.ChatMessage.sender_id == user_id) & (models.ChatMessage.receiver_id == other_user_id)) |
-        ((models.ChatMessage.sender_id == other_user_id) & (models.ChatMessage.receiver_id == user_id))
-    )
-    messages = db.query(models.ChatMessage).filter(
-        pair & (me_as_sender | me_as_receiver)
-    ).order_by(
+
+    if other_role:
+        norm_other_role = other_role.strip().lower()
+        if norm_other_role not in ("user", "worker"):
+            raise HTTPException(status_code=400, detail="other_role must be 'user' or 'worker'")
+        other_filter = (
+            (me_as_sender & (models.ChatMessage.receiver_id == other_user_id) & (models.ChatMessage.receiver_role == norm_other_role)) |
+            (me_as_receiver & (models.ChatMessage.sender_id == other_user_id) & (models.ChatMessage.sender_role == norm_other_role))
+        )
+        query = db.query(models.ChatMessage).filter(other_filter)
+    else:
+        pair = (
+            ((models.ChatMessage.sender_id == user_id) & (models.ChatMessage.receiver_id == other_user_id)) |
+            ((models.ChatMessage.sender_id == other_user_id) & (models.ChatMessage.receiver_id == user_id))
+        )
+        query = db.query(models.ChatMessage).filter(pair & (me_as_sender | me_as_receiver))
+
+    messages = query.order_by(
         models.ChatMessage.sent_at.asc(), models.ChatMessage.id.asc()
     ).offset(skip).limit(limit).all()
     return messages

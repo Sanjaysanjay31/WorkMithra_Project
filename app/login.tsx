@@ -61,9 +61,11 @@ export default function LoginScreen() {
       // store a worker session.
       const serverRole = data.user.role === 'worker' ? 'worker' : 'user';
       try {
+        const isEmail = identifier.includes('@');
         const authData = {
            id: data.user.id,
-           phone: identifier,
+           phone: !isEmail ? identifier : (data.user.phone || undefined),
+           email: isEmail ? identifier : (data.user.email || undefined),
            token: data.access_token,
            role: serverRole,
         };

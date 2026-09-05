@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 from typing import Optional, List
 from datetime import date, time, datetime
 
@@ -52,8 +52,7 @@ class UserResponse(UserBase):
     id: int
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 # Backwards-compatible request/response models expected by existing code
@@ -130,8 +129,7 @@ class WorkerResponse(WorkerBase):
     aadhaar_verified: Optional[bool] = None
     created_at: Optional[datetime] = None
     preferred_language: Optional[str] = None
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class WorkerUpdate(BaseModel):
@@ -194,8 +192,7 @@ class ServiceUpdate(BaseModel):
 class ServiceResponse(ServiceBase):
     id: int
     created_at: Optional[datetime] = None
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class WorkerServiceBase(BaseModel):
@@ -262,8 +259,7 @@ class BookingResponse(BookingBase):
     price_proposed_by: Optional[str] = None
     user: Optional[UserBrief] = None
     worker: Optional[WorkerBrief] = None
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class PriceProposal(BaseModel):
@@ -303,8 +299,7 @@ class WithdrawalRequestResponse(BaseModel):
     requested_at: Optional[datetime] = None
     processed_at: Optional[datetime] = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class WorkerBankAccountBase(BaseModel):
@@ -320,8 +315,7 @@ class WorkerBankAccountResponse(WorkerBankAccountBase):
     worker_id: int
     updated_at: Optional[datetime] = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class PaymentResponse(PaymentBase):
@@ -329,8 +323,7 @@ class PaymentResponse(PaymentBase):
     razorpay_order_id: Optional[str] = None
     razorpay_payment_id: Optional[str] = None
     created_at: Optional[datetime] = None
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class PaymentOrderRequest(BaseModel):
@@ -376,8 +369,7 @@ class WorkReportResponse(BaseModel):
     note: Optional[str] = None
     images: List[str] = []
     created_at: Optional[datetime] = None
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class WorkerCreateResponse(BaseModel):
@@ -389,8 +381,7 @@ class WorkerCreateResponse(BaseModel):
     email: Optional[str] = None
     role: str = "worker"
     created_at: Optional[datetime] = None
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class RatingReviewBase(BaseModel):
@@ -427,8 +418,7 @@ class RatingReviewBase(BaseModel):
 class RatingReviewResponse(RatingReviewBase):
     id: int
     created_at: Optional[datetime] = None
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class NotificationBase(BaseModel):
@@ -461,8 +451,7 @@ class ChatMessageResponse(ChatMessageBase):
     # user #5.
     sender_role: Optional[str] = None
     receiver_role: Optional[str] = None
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class WorkerAvailabilityBase(BaseModel):
@@ -510,6 +499,5 @@ class AssistantMessageResponse(BaseModel):
     role: str
     text: str
     created_at: Optional[datetime] = None
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
