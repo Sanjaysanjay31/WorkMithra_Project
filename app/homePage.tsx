@@ -2,11 +2,10 @@ import Avatar from '@/components/avatar';
 import BottomNav from '@/components/bottom-nav';
 import FrameModal from '@/components/frame-modal';
 import { aiExtract, webSTTControlled } from '@/lib/ai';
-import { authFetch, expectJson } from '@/lib/api';
+import { authFetch, expectJson, getAuthId } from '@/lib/api';
 import { useI18n } from '@/lib/i18n';
 import { unreadCount } from '@/lib/notifications';
 import { ensureSocket, onNotificationCreated } from '@/lib/socket';
-import { storage } from '@/lib/storage';
 import { WorkerResponse } from '@/lib/types';
 import { Ionicons } from '@expo/vector-icons';
 import * as Location from 'expo-location';
@@ -47,11 +46,8 @@ export default function HomePage() {
   useEffect(() => {
     (async () => {
       try {
-        const authRaw = await storage.get('workmithra:auth');
-        if (authRaw) {
-          const auth = JSON.parse(authRaw);
-          if (auth.id) setUserId(String(auth.id));
-        }
+        const authId = await getAuthId();
+        if (authId) setUserId(authId);
       } catch {}
     })();
   }, []);

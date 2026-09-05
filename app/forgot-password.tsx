@@ -1,4 +1,5 @@
 import { resetPassword, sendOtp, verifyOtp } from '@/lib/auth-api';
+import { getAuth } from '@/lib/api';
 import { storage } from '@/lib/storage';
 import { Ionicons } from '@expo/vector-icons';
 import { Stack, useRouter } from 'expo-router';
@@ -85,13 +86,10 @@ export default function ForgotPasswordScreen() {
       // email exists locally, drop any stale cached password from it — never
       // write the new plaintext password to storage.
       try {
-        const raw = await storage.get('workmithra:auth');
-        if (raw) {
-          const auth = JSON.parse(raw);
-          if (auth && typeof auth === 'object' && 'password' in auth) {
-            delete auth.password;
-            await storage.set('workmithra:auth', JSON.stringify(auth));
-          }
+        const auth = await getAuth();
+        if (auth && 'password' in auth) {
+          delete (auth as Record<string, unknown>).password;
+          await storage.set('workmithra:auth', JSON.stringify(auth));
         }
       } catch {}
 

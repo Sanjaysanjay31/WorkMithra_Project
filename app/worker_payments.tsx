@@ -1,8 +1,7 @@
 import Avatar from '@/components/avatar';
 import BottomNav from '@/components/bottom-nav';
-import { authFetch, expectJson } from '@/lib/api';
+import { authFetch, expectJson, getAuth } from '@/lib/api';
 import { platformShadow } from '@/lib/shadow';
-import { storage } from '@/lib/storage';
 import { Ionicons } from '@expo/vector-icons';
 import { Stack, useRouter } from 'expo-router';
 import React, { useEffect, useState } from 'react';
@@ -12,7 +11,6 @@ import {
     Image,
     KeyboardAvoidingView,
     Modal,
-    Platform,
     ScrollView,
     StyleSheet,
     Text,
@@ -90,11 +88,8 @@ export default function WorkerPaymentsPage() {
     setLoading(true);
     let wid = 0;
     try {
-      const raw = await storage.get('workmithra:auth');
-      if (raw) {
-        const auth = JSON.parse(raw);
-        if (auth.id) wid = Number(auth.id);
-      }
+      const auth = await getAuth();
+      if (auth?.id) wid = Number(auth.id);
     } catch {}
     if (!wid) { setLoading(false); return; }
 

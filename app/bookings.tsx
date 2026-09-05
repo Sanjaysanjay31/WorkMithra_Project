@@ -2,13 +2,12 @@ import Avatar from '@/components/avatar';
 import BottomNav from '@/components/bottom-nav';
 import FrameModal from '@/components/frame-modal';
 import RazorpayCheckout from '@/components/RazorpayCheckout';
-import { authFetch, expectJson, readApiError } from '@/lib/api';
+import { authFetch, expectJson, getAuth, readApiError } from '@/lib/api';
 import { BookingStatus, isActiveStatus, normalizeBookingStatus } from '@/lib/booking-status';
 import { formatBookingDateTime, isBookingDateTimePast } from '@/lib/format';
-import { pickImageNative, pickImageWeb } from '@/lib/image-picker';
+import { pickImageWithPreview } from '@/lib/image-picker';
 import { platformShadow } from '@/lib/shadow';
-import { storage } from '@/lib/storage';
-import { UploadFilePart, uploadMultipart } from '@/lib/upload';
+import { uploadMultipart } from '@/lib/upload';
 import { ensureSocket, onBookingStatusChanged } from '@/lib/socket';
 import {
     BookingResponse,
@@ -28,7 +27,6 @@ import {
     Image,
     KeyboardAvoidingView,
     Modal,
-    Platform,
     RefreshControl,
     ScrollView,
     StyleSheet,
@@ -249,22 +247,10 @@ export default function BookingsPage() {
     try {
       // Uploads go through uploadMultipart (XHR): global fetch rejects
       // { uri, name, type } parts on native with "Unsupported FormDataPart".
-      let part: UploadFilePart;
-      let preview = '';
-      if (Platform.OS === 'web') {
-        const file = await pickImageWeb();
-        if (!file) { setUploadingProof(false); return; }
-        part = file;
-        preview = URL.createObjectURL(file);
-      } else {
-        const asset = await pickImageNative();
-        if (!asset) { setUploadingProof(false); return; }
-        const name = asset.fileName || asset.uri.split('/').pop() || 'proof.jpg';
-        const ext = (name.split('.').pop() || 'jpg').toLowerCase();
-        const mime = asset.mimeType || (ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg');
-        part = { uri: asset.uri, name, type: mime };
-        preview = asset.uri;
-      }
+      const picked = await pickImageWithPreview('proof.jpg');
+      if (!picked) { setUploadingProof(false); return; }
+      const part = picked.part;
+      const preview = picked.preview;
       const data = await uploadMultipart<{ url: string }>('/upload-review-image', part);
       setProofImages((prev) => ({
         ...prev,
@@ -452,11 +438,8 @@ export default function BookingsPage() {
     let uid = uidRef.current;
     if (!uid) {
       try {
-        const authRaw = await storage.get('workmithra:auth');
-        if (authRaw) {
-          const auth = JSON.parse(authRaw);
-          if (auth.id) uid = Number(auth.id);
-        }
+        const auth = await getAuth();
+        if (auth?.id) uid = Number(auth.id);
       } catch {}
       uidRef.current = uid;
     }

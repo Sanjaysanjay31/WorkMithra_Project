@@ -12,6 +12,15 @@ import { Platform } from 'react-native';
  *     ...platformShadow('0px 2px 8px rgba(0,0,0,0.12)', '#000', 0, 2, 0.12, 4, 3),
  *   }
  */
+export type ShadowStyle = {
+  boxShadow?: string;
+  shadowColor?: string;
+  shadowOffset?: { width: number; height: number };
+  shadowOpacity?: number;
+  shadowRadius?: number;
+  elevation?: number;
+};
+
 export function platformShadow(
   /** CSS box-shadow string used on web. */
   cssBoxShadow: string,
@@ -27,7 +36,7 @@ export function platformShadow(
   shadowRadius: number,
   /** Android elevation. */
   elevation: number = 4,
-): any {
+): ShadowStyle {
   if (Platform.OS === 'web') {
     return { boxShadow: cssBoxShadow };
   }
@@ -44,5 +53,5 @@ export function platformShadow(
  * Use this for "disabled" button states that must remove the shadow on web.
  * On native it zeroes shadowOpacity; on web it clears boxShadow.
  */
-export const platformNoShadow: any =
+export const platformNoShadow: ShadowStyle =
   Platform.OS === 'web' ? { boxShadow: 'none' } : { shadowOpacity: 0 };

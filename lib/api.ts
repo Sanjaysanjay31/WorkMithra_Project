@@ -66,11 +66,16 @@ function isLoopbackUrl(url: string): boolean {
  * reach this PC on :8000, so only plain IPv4 is accepted. */
 function metroLanHost(): string | null {
   try {
-    const cfg: any = (Constants as any)?.expoConfig;
+    const expoConstants = Constants as unknown as {
+      expoConfig?: { hostUri?: string };
+      manifest2?: { extra?: { expoClient?: { hostUri?: string } } };
+      manifest?: { debuggerHost?: string };
+    };
+    const cfg = expoConstants?.expoConfig;
     const raw: string =
       cfg?.hostUri ||
-      (Constants as any)?.manifest2?.extra?.expoClient?.hostUri ||
-      (Constants as any)?.manifest?.debuggerHost ||
+      expoConstants?.manifest2?.extra?.expoClient?.hostUri ||
+      expoConstants?.manifest?.debuggerHost ||
       '';
     const host = String(raw || '').split(':')[0].trim();
     if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host) && host !== '127.0.0.1') return host;
@@ -95,6 +100,11 @@ function resolveBaseUrl(): string {
 }
 
 export const BASE_URL = resolveBaseUrl();
+
+/** Re-resolve the backend address at call time (picks up Metro LAN host changes). */
+export function getBaseUrl(): string {
+  return resolveBaseUrl();
+}
 
 if (__DEV__) {
   // Printed once at startup in the Metro terminal — the first thing to check

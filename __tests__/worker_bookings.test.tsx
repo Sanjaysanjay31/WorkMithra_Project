@@ -1,7 +1,7 @@
 import React from 'react';
 import { render } from '@testing-library/react-native';
 import WorkerBookings from '../app/worker_bookings';
-import { authFetch, expectJson } from '@/lib/api';
+import { authFetch, expectJson, getAuth } from '@/lib/api';
 import { storage } from '@/lib/storage';
 
 jest.mock('expo-router', () => ({
@@ -17,6 +17,8 @@ jest.mock('@/lib/storage', () => ({
 jest.mock('@/lib/api', () => ({
   authFetch: jest.fn(),
   expectJson: jest.fn(),
+  getAuth: jest.fn(),
+  getAuthId: jest.fn(),
 }));
 jest.mock('@/lib/notifications', () => ({
   addNotification: jest.fn().mockResolvedValue(undefined),
@@ -25,6 +27,7 @@ jest.mock('@/lib/notifications', () => ({
 const WID = 9;
 
 function seedSession() {
+  (getAuth as jest.Mock).mockResolvedValue({ id: WID, role: 'worker', token: 'tok' });
   (storage.get as jest.Mock).mockImplementation(async (key: string) =>
     key === 'workmithra:auth' ? JSON.stringify({ id: WID, role: 'worker', token: 'tok' }) : null,
   );

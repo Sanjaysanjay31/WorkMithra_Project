@@ -1,10 +1,10 @@
 import Avatar from '@/components/avatar';
 import BottomNav from '@/components/bottom-nav';
-import { authFetch, readApiError } from '@/lib/api';
+import { authFetch, getAuth, readApiError } from '@/lib/api';
 import { useI18n } from '@/lib/i18n';
-import { pickImageNative, pickImageWeb } from '@/lib/image-picker';
+import { pickImageWithPreview } from '@/lib/image-picker';
 import { unregisterPush } from '@/lib/push';
-import { UploadFilePart, uploadMultipart } from '@/lib/upload';
+import { uploadMultipart } from '@/lib/upload';
 import { disconnectSocket } from '@/lib/socket';
 import { clearAllWorkMitraStorage, storage } from '@/lib/storage';
 import { ReviewResponse } from '@/lib/types';
@@ -109,11 +109,8 @@ export default function ProfilePage() {
   async function load() {
     let uid = '';
     try {
-      const authRaw = await storage.get('workmithra:auth');
-      if (authRaw) {
-        const auth = JSON.parse(authRaw);
-        if (auth.id) { uid = String(auth.id); setCurrentUserId(uid); }
-      }
+      const auth = await getAuth();
+      if (auth?.id) { uid = String(auth.id); setCurrentUserId(uid); }
     } catch {}
 
     // Local cache is only used as a quick paint while backend fetch is in flight,
@@ -197,19 +194,9 @@ export default function ProfilePage() {
     try {
       // Uploads go through uploadMultipart (XHR): global fetch rejects
       // { uri, name, type } parts on native with "Unsupported FormDataPart".
-      let part: UploadFilePart;
-      if (Platform.OS === 'web') {
-        const file = await pickImageWeb();
-        if (!file) { setUploading(false); return; }
-        part = file;
-      } else {
-        const asset = await pickImageNative();
-        if (!asset) { setUploading(false); return; }
-        const name = asset.fileName || asset.uri.split('/').pop() || 'photo.jpg';
-        const ext = (name.split('.').pop() || 'jpg').toLowerCase();
-        const mime = asset.mimeType || (ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg');
-        part = { uri: asset.uri, name, type: mime };
-      }
+      const picked = await pickImageWithPreview();
+      if (!picked) { setUploading(false); return; }
+      const part = picked.part;
       const data = await uploadMultipart<{ url: string }>('/upload-profile-image', part, {
         fields: { user_id: currentUserId, role: 'user' },
       });
@@ -239,13 +226,10 @@ export default function ProfilePage() {
       // Never write the new password to storage. If a cached session for this
       // account carries a stale password field, strip it out.
       try {
-        const raw = await storage.get('workmithra:auth');
-        if (raw) {
-          const auth = JSON.parse(raw);
-          if (auth && typeof auth === 'object' && 'password' in auth) {
-            delete auth.password;
-            await storage.set('workmithra:auth', JSON.stringify(auth));
-          }
+        const auth = await getAuth();
+        if (auth && 'password' in auth) {
+          delete (auth as Record<string, unknown>).password;
+          await storage.set('workmithra:auth', JSON.stringify(auth));
         }
       } catch {}
       setCurrentPwd(''); setNewPwd(''); setConfirmPwd(''); setShowPwdForm(false);
@@ -514,7 +498,7 @@ function Field({
   label, icon, value, onChange, placeholder, keyboardType, secure,
 }: {
   label: string;
-  icon: any;
+  icon: React.ComponentProps<typeof Ionicons>['name'];
   value: string;
   onChange: (v: string) => void;
   placeholder?: string;

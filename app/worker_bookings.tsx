@@ -1,19 +1,19 @@
 import Avatar from '@/components/avatar';
 import BottomNav from '@/components/bottom-nav';
 import FrameModal from '@/components/frame-modal';
-import { authFetch, expectJson, readApiError } from '@/lib/api';
+import { authFetch, expectJson, getAuth, readApiError } from '@/lib/api';
 import { BookingStatus, isActiveStatus, normalizeBookingStatus } from '@/lib/booking-status';
 import { formatBookingDateTime, isBookingDateTimePast } from '@/lib/format';
-import { pickImageNative, pickImageWeb } from '@/lib/image-picker';
+import { pickImageWithPreview } from '@/lib/image-picker';
 import { platformShadow } from '@/lib/shadow';
-import { storage } from '@/lib/storage';
-import { UploadFilePart, uploadMultipart } from '@/lib/upload';
+import { uploadMultipart } from '@/lib/upload';
 import { ensureSocket, onBookingRequest, onBookingStatusChanged, onPaymentReceived } from '@/lib/socket';
 import { BookingResponse, ReviewResponse } from '@/lib/types';
 import { Ionicons } from '@expo/vector-icons';
 import { Stack, useFocusEffect, useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Image, KeyboardAvoidingView, Modal, Platform, RefreshControl, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Alert, Image, KeyboardAvoidingView, Modal,
+RefreshControl, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 
 // Same Present/Past split as the client's bookings screen: Present holds
 // actionable requests, Past is the history with completed/not-completed
@@ -155,11 +155,8 @@ export default function WorkerBookings() {
   useEffect(() => {
     (async () => {
       try {
-        const authRaw = await storage.get('workmithra:auth');
-        if (authRaw) {
-          const auth = JSON.parse(authRaw);
-          if (auth.id) setUid(String(auth.id));
-        }
+        const auth = await getAuth();
+        if (auth?.id) setUid(String(auth.id));
       } catch {}
     })();
   }, []);
@@ -407,22 +404,10 @@ export default function WorkerBookings() {
     try {
       // Uploads go through uploadMultipart (XHR): global fetch rejects
       // { uri, name, type } parts on native with "Unsupported FormDataPart".
-      let part: UploadFilePart;
-      let preview = '';
-      if (Platform.OS === 'web') {
-        const file = await pickImageWeb();
-        if (!file) { setUploadingReportImage(false); return; }
-        part = file;
-        preview = URL.createObjectURL(file);
-      } else {
-        const asset = await pickImageNative();
-        if (!asset) { setUploadingReportImage(false); return; }
-        const name = asset.fileName || asset.uri.split('/').pop() || 'photo.jpg';
-        const ext = (name.split('.').pop() || 'jpg').toLowerCase();
-        const mime = asset.mimeType || (ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg');
-        part = { uri: asset.uri, name, type: mime };
-        preview = asset.uri;
-      }
+      const picked = await pickImageWithPreview();
+      if (!picked) { setUploadingReportImage(false); return; }
+      const part = picked.part;
+      const preview = picked.preview;
       const data = await uploadMultipart<{ url: string }>('/upload-review-image', part);
       setReportImages((imgs) => [...imgs, { url: data.url, preview }]);
     } catch (e: any) {

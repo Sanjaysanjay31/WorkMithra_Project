@@ -1,6 +1,6 @@
 import Avatar from '@/components/avatar';
 import BottomNav from '@/components/bottom-nav';
-import { authFetch } from '@/lib/api';
+import { authFetch, getAuth } from '@/lib/api';
 import { isCompletedStatus, normalizeBookingStatus } from '@/lib/booking-status';
 import { unreadCount } from '@/lib/notifications';
 import { platformShadow } from '@/lib/shadow';
@@ -68,11 +68,8 @@ export default function WorkerDashboard() {
   useEffect(() => {
     (async () => {
       try {
-        const authRaw = await storage.get('workmithra:auth');
-        if (authRaw) {
-          const auth = JSON.parse(authRaw);
-          if (auth.id) setUserId(String(auth.id));
-        }
+        const auth = await getAuth();
+        if (auth?.id) setUserId(String(auth.id));
       } catch {}
     })();
   }, []);
@@ -465,7 +462,7 @@ function DetailGroup({ title, children }: { title: string; children: React.React
   );
 }
 
-function Detail({ icon, label, value }: { icon: any; label: string; value?: string }) {
+function Detail({ icon, label, value }: { icon: React.ComponentProps<typeof Ionicons>['name']; label: string; value?: string }) {
   return (
     <View style={styles.detailRow}>
       <Ionicons name={icon} size={14} color="#6F42C1" />

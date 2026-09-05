@@ -30,6 +30,17 @@ type Props = {
   onDismiss: (reason?: string) => void;
 };
 
+/** Minimal shapes for the Razorpay checkout.js web API (no bundled types). */
+type RazorpayWebResponse = {
+  razorpay_order_id: string;
+  razorpay_payment_id: string;
+  razorpay_signature: string;
+};
+type RazorpayWebInstance = {
+  open: () => void;
+  on: (event: string, cb: (resp: { error?: { description?: string } }) => void) => void;
+};
+
 export default function RazorpayCheckout({ order, description, prefill, onSuccess, onDismiss }: Props) {
   // Guard: postMessage can race with the dismiss handler — deliver once.
   const doneRef = useRef(false);
@@ -55,42 +66,53 @@ export default function RazorpayCheckout({ order, description, prefill, onSucces
   };
 
   // ---- Web platform: inject checkout.js and open the modal in-page ----
+  // Config is built inside the effect from props so the modal always uses
+  // the order it mounted with (no stale closure over a render-scope object).
   useEffect(() => {
     if (Platform.OS !== 'web') return;
     let cancelled = false;
+    const cfg = {
+      key: order.key_id,
+      order_id: order.order_id,
+      amount_paise: order.amount_paise,
+      currency: order.currency || 'INR',
+      description: description || 'Job payment',
+      prefill: prefill || {},
+    };
     (async () => {
       try {
         await loadCheckoutScript();
         if (cancelled) return;
-        const w = window as any;
+        const w = window as unknown as { Razorpay: new (opts: Record<string, unknown>) => RazorpayWebInstance };
         const rzp = new w.Razorpay({
-          key: config.key,
-          amount: config.amount_paise,
-          currency: config.currency,
+          key: cfg.key,
+          amount: cfg.amount_paise,
+          currency: cfg.currency,
           name: 'WorkMithra',
-          description: `${config.description} (TEST MODE)`,
-          order_id: config.order_id,
-          prefill: config.prefill,
+          description: `${cfg.description} (TEST MODE)`,
+          order_id: cfg.order_id,
+          prefill: cfg.prefill,
           theme: { color: '#6F42C1' },
           modal: { ondismiss: () => finishDismiss() },
-          handler: (response: any) =>
+          handler: (response: RazorpayWebResponse) =>
             finishSuccess({
               razorpay_order_id: response.razorpay_order_id,
               razorpay_payment_id: response.razorpay_payment_id,
               razorpay_signature: response.razorpay_signature,
             }),
         });
-        rzp.on('payment.failed', (resp: any) =>
-          finishDismiss((resp?.error?.description as string) || 'Payment failed'),
+        rzp.on('payment.failed', (resp: { error?: { description?: string } }) =>
+          finishDismiss(resp?.error?.description || 'Payment failed'),
         );
         rzp.open();
-      } catch (e: any) {
-        finishDismiss(e?.message || 'Could not load Razorpay checkout');
+      } catch (e: unknown) {
+        finishDismiss(e instanceof Error ? e.message : 'Could not load Razorpay checkout');
       }
     })();
     return () => {
       cancelled = true;
     };
+    // Mount-only: a payment modal is bound to the order it opened with.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -160,10 +182,12 @@ export default function RazorpayCheckout({ order, description, prefill, onSucces
         </View>
         <WebView
           style={styles.webview}
-          originWhitelist={['*']}
+          originWhitelist={['https://*']}
           javaScriptEnabled
           domStorageEnabled
-          source={{ html }}
+          source={{ html, baseUrl: 'https://checkout.razorpay.com' }}
+          onError={() => finishDismiss('Could not load the payment page. Check your connection.')}
+          onHttpError={() => finishDismiss('Payment page failed to load. Please try again.')}
           onMessage={(event) => {
             try {
               const msg = JSON.parse(event.nativeEvent.data);
@@ -190,7 +214,7 @@ export default function RazorpayCheckout({ order, description, prefill, onSucces
 
 function loadCheckoutScript(): Promise<void> {
   return new Promise((resolve, reject) => {
-    const w = window as any;
+    const w = window as unknown as { Razorpay?: unknown };
     if (w.Razorpay) return resolve();
     const existing = document.querySelector('script[data-rzp-checkout]');
     if (existing) {

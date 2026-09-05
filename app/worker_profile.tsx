@@ -1,12 +1,12 @@
 import Avatar from '@/components/avatar';
 import BottomNav from '@/components/bottom-nav';
-import { authFetch, readApiError } from '@/lib/api';
+import { authFetch, getAuth, readApiError } from '@/lib/api';
 import { AvailabilitySlot, listAvailability, upsertAvailability } from '@/lib/availability';
 import { useI18n } from '@/lib/i18n';
-import { pickImageNative, pickImageWeb } from '@/lib/image-picker';
+import { pickImageWithPreview } from '@/lib/image-picker';
 import { disconnectSocket } from '@/lib/socket';
 import { clearAllWorkMitraStorage, storage } from '@/lib/storage';
-import { UploadFilePart, uploadMultipart } from '@/lib/upload';
+import { uploadMultipart } from '@/lib/upload';
 import { ReviewResponse } from '@/lib/types';
 import { Ionicons } from '@expo/vector-icons';
 import { Stack, useRouter } from 'expo-router';
@@ -194,11 +194,8 @@ export default function WorkerProfilePage() {
   async function load() {
     let wid = '';
     try {
-      const authRaw = await storage.get('workmithra:auth');
-      if (authRaw) {
-        const auth = JSON.parse(authRaw);
-        if (auth.id) { wid = String(auth.id); setCurrentWorkerId(wid); }
-      }
+      const auth = await getAuth();
+      if (auth?.id) { wid = String(auth.id); setCurrentWorkerId(wid); }
     } catch {}
 
     // Use local cache only if it belongs to the current worker id.
@@ -363,19 +360,9 @@ export default function WorkerProfilePage() {
     try {
       // Uploads go through uploadMultipart (XHR): global fetch rejects
       // { uri, name, type } parts on native with "Unsupported FormDataPart".
-      let part: UploadFilePart;
-      if (Platform.OS === 'web') {
-        const file = await pickImageWeb();
-        if (!file) { setUploading(false); return; }
-        part = file;
-      } else {
-        const asset = await pickImageNative();
-        if (!asset) { setUploading(false); return; }
-        const name = asset.fileName || asset.uri.split('/').pop() || 'photo.jpg';
-        const ext = (name.split('.').pop() || 'jpg').toLowerCase();
-        const mime = asset.mimeType || (ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg');
-        part = { uri: asset.uri, name, type: mime };
-      }
+      const picked = await pickImageWithPreview();
+      if (!picked) { setUploading(false); return; }
+      const part = picked.part;
       const data = await uploadMultipart<{ url: string }>('/upload-profile-image', part, {
         fields: { user_id: currentWorkerId, role: 'worker' },
       });
@@ -650,7 +637,7 @@ export default function WorkerProfilePage() {
                           {React.createElement('input', {
                             type: 'time',
                             value: st.start_time,
-                            onChange: (e: any) => onAvailTimeChange(d.key, 'start_time', e.target.value),
+                            onChange: (e: { target: { value: string } }) => onAvailTimeChange(d.key, 'start_time', e.target.value),
                             style: { flex: 1, padding: 6, fontSize: 13, border: 'none', outline: 'none', background: 'transparent', color: '#333' },
                           })}
                         </View>
@@ -660,7 +647,7 @@ export default function WorkerProfilePage() {
                           {React.createElement('input', {
                             type: 'time',
                             value: st.end_time,
-                            onChange: (e: any) => onAvailTimeChange(d.key, 'end_time', e.target.value),
+                            onChange: (e: { target: { value: string } }) => onAvailTimeChange(d.key, 'end_time', e.target.value),
                             style: { flex: 1, padding: 6, fontSize: 13, border: 'none', outline: 'none', background: 'transparent', color: '#333' },
                           })}
                         </View>
@@ -866,7 +853,7 @@ function Field({
   label, icon, value, onChange, placeholder, keyboardType, secure, last,
 }: {
   label: string;
-  icon: any;
+  icon: React.ComponentProps<typeof Ionicons>['name'];
   value: string;
   onChange: (v: string) => void;
   placeholder?: string;

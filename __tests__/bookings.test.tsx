@@ -1,7 +1,7 @@
 import React from 'react';
 import { render } from '@testing-library/react-native';
 import BookingsPage from '../app/bookings';
-import { authFetch, expectJson } from '@/lib/api';
+import { authFetch, expectJson, getAuth } from '@/lib/api';
 import { storage } from '@/lib/storage';
 
 jest.mock('expo-router', () => ({
@@ -17,11 +17,14 @@ jest.mock('@/lib/storage', () => ({
 jest.mock('@/lib/api', () => ({
   authFetch: jest.fn(),
   expectJson: jest.fn(),
+  getAuth: jest.fn(),
+  getAuthId: jest.fn(),
 }));
 
 const UID = 42;
 
 function seedSession() {
+  (getAuth as jest.Mock).mockResolvedValue({ id: UID, role: 'user', token: 'tok' });
   (storage.get as jest.Mock).mockImplementation(async (key: string) =>
     key === 'workmithra:auth' ? JSON.stringify({ id: UID, role: 'user', token: 'tok' }) : null,
   );

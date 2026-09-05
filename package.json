@@ -51,7 +51,6 @@
     "socket.io-client": "^4.8.3"
   },
   "devDependencies": {
-    "@expo/config-plugins": "^57.0.9",
     "@react-native/jest-preset": "^0.86.3",
     "@testing-library/react-native": "^13.3.3",
     "@types/jest": "^29.5.14",
@@ -63,5 +62,12 @@
     "react-test-renderer": "^19.2.3",
     "typescript": "~6.0.3"
   },
-  "private": true
+  "private": true,
+  "expo": {
+    "doctor": {
+      "reactNativeDirectoryCheck": {
+        "exclude": ["expo-av"]
+      }
+    }
+  }
 }

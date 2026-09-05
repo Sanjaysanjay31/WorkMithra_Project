@@ -8,11 +8,10 @@ import {
   speak as speakTTS,
   webSTT,
 } from '@/lib/ai';
-import { authFetch, expectJson } from '@/lib/api';
+import { authFetch, expectJson, getAuth } from '@/lib/api';
 import { useI18n } from '@/lib/i18n';
 import { platformShadow } from '@/lib/shadow';
 import { ensureSocket, onMessageReceived } from '@/lib/socket';
-import { storage } from '@/lib/storage';
 import { Ionicons } from '@expo/vector-icons';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
@@ -155,12 +154,9 @@ export default function ChatScreen() {
       let uid = '';
       let role: 'user' | 'worker' = 'user';
       try {
-        const authRaw = await storage.get('workmithra:auth');
-        if (authRaw) {
-          const auth = JSON.parse(authRaw);
-          if (auth?.id) uid = String(auth.id);
-          if (auth?.role === 'worker') role = 'worker';
-        }
+        const auth = await getAuth();
+        if (auth?.id) uid = String(auth.id);
+        if (auth?.role === 'worker') role = 'worker';
       } catch (error) {
         console.warn('Failed to parse auth data', error);
       }

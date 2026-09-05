@@ -1,11 +1,10 @@
 import Avatar from '@/components/avatar';
 import BottomNav from '@/components/bottom-nav';
-import { authFetch, readApiError } from '@/lib/api';
+import { authFetch, getAuth, readApiError } from '@/lib/api';
 import { normalizeBookingStatus } from '@/lib/booking-status';
-import { pickImageNative, pickImageWeb } from '@/lib/image-picker';
+import { pickImageWithPreview } from '@/lib/image-picker';
 import { platformShadow } from '@/lib/shadow';
-import { storage } from '@/lib/storage';
-import { UploadFilePart, uploadMultipart } from '@/lib/upload';
+import { uploadMultipart } from '@/lib/upload';
 import { BookingResponse, ReviewResponse, UserProfileResponse } from '@/lib/types';
 import { Ionicons } from '@expo/vector-icons';
 import * as Location from 'expo-location';
@@ -159,22 +158,10 @@ export default function UserProfilePage() {
     try {
       // Uploads go through uploadMultipart (XHR): global fetch rejects
       // { uri, name, type } parts on native with "Unsupported FormDataPart".
-      let part: UploadFilePart;
-      let preview = '';
-      if (Platform.OS === 'web') {
-        const file = await pickImageWeb();
-        if (!file) { setUploadingImage(false); return; }
-        part = file;
-        preview = URL.createObjectURL(file);
-      } else {
-        const asset = await pickImageNative();
-        if (!asset) { setUploadingImage(false); return; }
-        const name = asset.fileName || asset.uri.split('/').pop() || 'photo.jpg';
-        const ext = (name.split('.').pop() || 'jpg').toLowerCase();
-        const mime = asset.mimeType || (ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg');
-        part = { uri: asset.uri, name, type: mime };
-        preview = asset.uri;
-      }
+      const picked = await pickImageWithPreview();
+      if (!picked) { setUploadingImage(false); return; }
+      const part = picked.part;
+      const preview = picked.preview;
       const data = await uploadMultipart<{ url: string }>('/upload-review-image', part);
       setFeedbackImages((imgs) => [...imgs, { url: data.url, preview }]);
     } catch (e: any) {
@@ -253,11 +240,8 @@ export default function UserProfilePage() {
       // 0. This worker's own id — needed to spot their own review in the
       // list and swap the form for a read-only "your review" card.
       try {
-        const authRaw = await storage.get('workmithra:auth');
-        if (authRaw) {
-          const auth = JSON.parse(authRaw);
-          if (auth.id) setMyWid(String(auth.id));
-        }
+        const auth = await getAuth();
+        if (auth?.id) setMyWid(String(auth.id));
       } catch {}
       // Deep link from the requests screen ("Review client" / "View my
       // rating") carries the booking — open its review form straight away.
@@ -520,7 +504,15 @@ export default function UserProfilePage() {
                 <TouchableOpacity
                   style={styles.callBtn}
                   accessibilityLabel="Call client"
-                  onPress={() => Linking.openURL(`tel:${client.phone}`)}
+                  onPress={async () => {
+                    const url = `tel:${client.phone}`;
+                    try {
+                      if (await Linking.canOpenURL(url)) await Linking.openURL(url);
+                      else Alert.alert('Call', 'Calling is not supported on this device');
+                    } catch {
+                      Alert.alert('Call', 'Could not start the call');
+                    }
+                  }}
                 >
                   <Ionicons name="call" size={18} color="#fff" />
                   <Text style={styles.callBtnText}>  Call Client</Text>
@@ -566,7 +558,12 @@ export default function UserProfilePage() {
                 return (
                   <View style={styles.mapEmbedWrap}>
                     {Platform.OS === 'web' ? (
-                      <iframe style={{ width: '100%', height: 240, border: 0, borderRadius: 12 } as any} src={src} />
+                      React.createElement('iframe', {
+                        style: { width: '100%', height: 240, border: 0, borderRadius: 12 } as React.CSSProperties,
+                        src,
+                        title: 'Map showing client location',
+                        loading: 'lazy',
+                      })
                     ) : (
                       <WebView source={{ uri: src }} style={{ width: '100%', height: 240, borderRadius: 12 }} />
                     )}
@@ -576,11 +573,17 @@ export default function UserProfilePage() {
 
               <TouchableOpacity
                 style={styles.openMapsBtn}
-                onPress={() => {
+                onPress={async () => {
                   if (!client.latitude || !client.longitude) return Alert.alert('Map', 'Client location not available');
                   const origin = workerLoc ? `${workerLoc.lat},${workerLoc.lng}` : '';
                   const dest = `${client.latitude},${client.longitude}`;
-                  Linking.openURL(`https://www.google.com/maps/dir/?api=1&origin=${origin}&destination=${dest}&travelmode=driving`);
+                  const url = `https://www.google.com/maps/dir/?api=1&origin=${origin}&destination=${dest}&travelmode=driving`;
+                  try {
+                    if (await Linking.canOpenURL(url)) await Linking.openURL(url);
+                    else Alert.alert('Map', 'Could not open Google Maps on this device');
+                  } catch {
+                    Alert.alert('Map', 'Could not open Google Maps on this device');
+                  }
                 }}
               >
                 <Ionicons name="map" size={16} color="#fff" />
@@ -830,7 +833,7 @@ function DetailGroup({ title, children }: { title: string; children: React.React
   );
 }
 
-function Detail({ icon, label, value }: { icon: any; label: string; value?: string }) {
+function Detail({ icon, label, value }: { icon: React.ComponentProps<typeof Ionicons>['name']; label: string; value?: string }) {
   return (
     <View style={styles.detailRow}>
       <Ionicons name={icon} size={13} color="#6F42C1" />

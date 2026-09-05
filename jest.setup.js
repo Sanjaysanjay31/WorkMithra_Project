@@ -15,6 +15,11 @@ jest.mock('react-native-safe-area-context', () => {
   };
 });
 
+// react-native-reanimated — the root layout imports it for its side effects
+// (required in production by babel-preset-expo). The native worklets module
+// doesn't exist under Jest, so stub the import instead of loading it.
+jest.mock('react-native-reanimated', () => ({}));
+
 // expo-status-bar — used by the root layout.
 jest.mock('expo-status-bar', () => ({ StatusBar: () => null }));
 

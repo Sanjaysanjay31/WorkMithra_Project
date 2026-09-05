@@ -12,7 +12,7 @@ import { BASE_URL, getToken } from '@/lib/api';
 
 export type UploadFilePart = File | { uri: string; name: string; type: string };
 
-export async function uploadMultipart<T = any>(
+export async function uploadMultipart<T = Record<string, unknown>>(
   path: string,
   file: UploadFilePart,
   opts: {
@@ -43,8 +43,8 @@ export async function uploadMultipart<T = any>(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      let data: any = {};
-      try { data = xhr.responseText ? JSON.parse(xhr.responseText) : {}; } catch { data = {}; }
+      let data: Record<string, unknown> = {};
+      try { data = xhr.responseText ? JSON.parse(xhr.responseText) as Record<string, unknown> : {}; } catch { data = {}; }
       if (xhr.status >= 200 && xhr.status < 300) {
         resolve(data as T);
         return;
@@ -55,7 +55,9 @@ export async function uploadMultipart<T = any>(
       const message = typeof detail === 'string'
         ? detail
         : Array.isArray(detail)
-          ? detail.map((e: any) => e?.msg || e).join(', ')
+          ? detail.map((e: unknown) => (typeof e === 'object' && e !== null && 'msg' in e
+              ? String((e as { msg: unknown }).msg)
+              : String(e))).join(', ')
           : `Upload failed (${xhr.status})`;
       reject(new Error(message));
     };
@@ -71,8 +73,8 @@ export async function uploadMultipart<T = any>(
       fd.append(opts.fieldName ?? 'file', file as any);
       for (const [k, v] of Object.entries(opts.fields ?? {})) fd.append(k, v);
       xhr.send(fd);
-    } catch (e: any) {
-      fail(e?.message || 'Could not start the upload');
+    } catch (e: unknown) {
+      fail(e instanceof Error ? e.message : 'Could not start the upload');
     }
   });
 }

@@ -7,7 +7,6 @@
     "icon": "./assets/images/icon.png",
     "scheme": "workmithra",
     "userInterfaceStyle": "automatic",
-    "newArchEnabled": true,
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.sanjaysanjay31.workmithra",
@@ -26,16 +25,13 @@
         "backgroundImage": "./assets/images/android-icon-background.png",
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
-      "usesCleartextTraffic": true,
-      "edgeToEdgeEnabled": true,
-      "predictiveBackGestureEnabled": false,
+      "package": "com.sanjaysanjay31.workmithra",
       "permissions": [
         "RECORD_AUDIO",
         "ACCESS_FINE_LOCATION",
         "ACCESS_COARSE_LOCATION",
         "POST_NOTIFICATIONS"
-      ],
-      "package": "com.sanjaysanjay31.workmithra"
+      ]
     },
     "web": {
       "output": "static",

@@ -5,12 +5,12 @@
 
 import { io, Socket } from 'socket.io-client';
 import { AppState } from 'react-native';
-import { BASE_URL, getAuth, getToken } from '@/lib/api';
-
-// Socket.IO connects to the same backend as the REST API.
-const API_URL = BASE_URL;
+import { getAuth, getBaseUrl, getToken } from '@/lib/api';
 
 let socket: Socket | null = null;
+// The user id the current socket authenticated as. Tracks account switches so
+// ensureSocket() reconnects instead of reusing a stale identity.
+let socketUserId: number | null = null;
 
 // Reconnect automatically when the app returns to the foreground. Registered
 // once at module load; ensureSocket() no-ops when logged out or already
@@ -29,15 +29,21 @@ function registerAppStateResume(): void {
 /**
  * Connect + authenticate the socket for the currently logged-in user, if any.
  * Safe to call repeatedly (e.g. on app mount): it no-ops when logged out or
- * when a socket already exists.
+ * when a socket already exists for the SAME user. If the account changed
+ * (logout → login as someone else without a restart), the stale socket is
+ * torn down and rebuilt so events authenticate as the new user.
  */
 export async function ensureSocket(): Promise<Socket | null> {
   registerAppStateResume();
-  if (socket) return socket;
   try {
     const auth = await getAuth();
     if (!auth?.id) return null;
-    return initializeSocket(Number(auth.id));
+    const userId = Number(auth.id);
+    if (socket && socketUserId !== userId) {
+      disconnectSocket();
+    }
+    if (socket) return socket;
+    return initializeSocket(userId);
   } catch (e) {
     console.warn('ensureSocket failed:', e);
     return null;
@@ -60,7 +66,9 @@ export function initializeSocket(userId: number): Socket {
   }
 
   try {
-    socket = io(API_URL, {
+    // Socket.IO connects to the same backend as the REST API. Resolved at
+    // connect time (not import time) so a late Metro host value is honored.
+    socket = io(getBaseUrl(), {
       reconnection: true,
       reconnectionDelay: 1000,
       reconnectionDelayMax: 5000,
@@ -71,12 +79,16 @@ export function initializeSocket(userId: number): Socket {
       autoConnect: true,
       forceNew: false,
     });
+    // Remember the identity up-front so a second ensureSocket() for a
+    // different user (before 'connect' fires) still triggers a rebuild.
+    socketUserId = userId;
 
     // Handle connection
     socket.on('connect', async () => {
       // Authenticate after connection — the backend verifies the JWT and
       // rejects the socket if the token doesn't match the claimed user id.
       if (userId) {
+        socketUserId = userId;
         const token = await getToken();
         socket?.emit('authenticate', { user_id: userId, token });
       }
@@ -130,6 +142,7 @@ export function disconnectSocket(): void {
       // already closed — nothing to clean up
     }
     socket = null;
+    socketUserId = null;
   }
 }
 
@@ -156,7 +169,7 @@ export function getSocketId(): string | null {
  */
 export function joinRoom(roomId: string): void {
   if (!socket) {
-    console.error('Socket not initialized');
+    console.warn('Socket not initialized — call ensureSocket() after login');
     return;
   }
   socket.emit('join_room', { room_id: roomId });
@@ -167,7 +180,7 @@ export function joinRoom(roomId: string): void {
  */
 export function leaveRoom(roomId: string): void {
   if (!socket) {
-    console.error('Socket not initialized');
+    console.warn('Socket not initialized — call ensureSocket() after login');
     return;
   }
   socket.emit('leave_room', { room_id: roomId });
@@ -198,7 +211,7 @@ export function onMessageReceived(
   }) => void
 ): () => void {
   if (!socket) {
-    console.error('Socket not initialized');
+    console.warn('Socket not initialized — call ensureSocket() after login');
     return () => {};
   }
 
@@ -215,7 +228,7 @@ export function onMessageReceived(
  */
 export function setTypingIndicator(receiverId: number, isTyping: boolean): void {
   if (!socket) {
-    console.error('Socket not initialized');
+    console.warn('Socket not initialized — call ensureSocket() after login');
     return;
   }
 
@@ -232,7 +245,7 @@ export function onTypingIndicator(
   callback: (data: { user_id: number; is_typing: boolean; timestamp: string }) => void
 ): () => void {
   if (!socket) {
-    console.error('Socket not initialized');
+    console.warn('Socket not initialized — call ensureSocket() after login');
     return () => {};
   }
 
@@ -270,7 +283,7 @@ export function onBookingRequest(
   }) => void
 ): () => void {
   if (!socket) {
-    console.error('Socket not initialized');
+    console.warn('Socket not initialized — call ensureSocket() after login');
     return () => {};
   }
 
@@ -298,7 +311,7 @@ export function onBookingStatusChanged(
   }) => void
 ): () => void {
   if (!socket) {
-    console.error('Socket not initialized');
+    console.warn('Socket not initialized — call ensureSocket() after login');
     return () => {};
   }
 
@@ -323,7 +336,7 @@ export function onPaymentReceived(
   }) => void
 ): () => void {
   if (!socket) {
-    console.error('Socket not initialized');
+    console.warn('Socket not initialized — call ensureSocket() after login');
     return () => {};
   }
 
@@ -360,7 +373,7 @@ export function onNotificationCreated(
   }) => void
 ): () => void {
   if (!socket) {
-    console.error('Socket not initialized');
+    console.warn('Socket not initialized — call ensureSocket() after login');
     return () => {};
   }
 
@@ -380,7 +393,7 @@ export function onNotificationCreated(
  */
 export function setUserStatus(status: 'online' | 'available' | 'busy' | 'offline'): void {
   if (!socket) {
-    console.error('Socket not initialized');
+    console.warn('Socket not initialized — call ensureSocket() after login');
     return;
   }
 
@@ -394,7 +407,7 @@ export function onUserStatusChanged(
   callback: (data: { user_id: number; status: string; timestamp: string }) => void
 ): () => void {
   if (!socket) {
-    console.error('Socket not initialized');
+    console.warn('Socket not initialized — call ensureSocket() after login');
     return () => {};
   }
 
@@ -412,7 +425,7 @@ export function onUserOnline(
   callback: (data: { user_id: number; online_users: number[]; timestamp: string }) => void
 ): () => void {
   if (!socket) {
-    console.error('Socket not initialized');
+    console.warn('Socket not initialized — call ensureSocket() after login');
     return () => {};
   }
 
@@ -430,7 +443,7 @@ export function onUserOffline(
   callback: (data: { user_id: number; timestamp: string }) => void
 ): () => void {
   if (!socket) {
-    console.error('Socket not initialized');
+    console.warn('Socket not initialized — call ensureSocket() after login');
     return () => {};
   }
 
@@ -446,7 +459,7 @@ export function onUserOffline(
  */
 export function requestOnlineUsers(): void {
   if (!socket) {
-    console.error('Socket not initialized');
+    console.warn('Socket not initialized — call ensureSocket() after login');
     return;
   }
 
@@ -460,7 +473,7 @@ export function onOnlineUsers(
   callback: (data: { users: Record<number, string>; count: number; timestamp: string }) => void
 ): () => void {
   if (!socket) {
-    console.error('Socket not initialized');
+    console.warn('Socket not initialized — call ensureSocket() after login');
     return () => {};
   }
 
@@ -476,7 +489,7 @@ export function onOnlineUsers(
  */
 export function requestUserStatus(userId: number): void {
   if (!socket) {
-    console.error('Socket not initialized');
+    console.warn('Socket not initialized — call ensureSocket() after login');
     return;
   }
 
@@ -490,7 +503,7 @@ export function onUserStatusResponse(
   callback: (data: { user_id: number; status: string; is_online: boolean; timestamp: string }) => void
 ): () => void {
   if (!socket) {
-    console.error('Socket not initialized');
+    console.warn('Socket not initialized — call ensureSocket() after login');
     return () => {};
   }
 
@@ -512,7 +525,7 @@ export function onUserJoinedRoom(
   callback: (data: { user_id: number; room_id: string; timestamp: string }) => void
 ): () => void {
   if (!socket) {
-    console.error('Socket not initialized');
+    console.warn('Socket not initialized — call ensureSocket() after login');
     return () => {};
   }
 
@@ -530,7 +543,7 @@ export function onUserLeftRoom(
   callback: (data: { user_id: number; room_id: string; timestamp: string }) => void
 ): () => void {
   if (!socket) {
-    console.error('Socket not initialized');
+    console.warn('Socket not initialized — call ensureSocket() after login');
     return () => {};
   }
 
@@ -550,7 +563,7 @@ export function onUserLeftRoom(
  */
 export function ping(): void {
   if (!socket) {
-    console.error('Socket not initialized');
+    console.warn('Socket not initialized — call ensureSocket() after login');
     return;
   }
 
@@ -562,7 +575,7 @@ export function ping(): void {
  */
 export function onPong(callback: (data: { timestamp: string }) => void): () => void {
   if (!socket) {
-    console.error('Socket not initialized');
+    console.warn('Socket not initialized — call ensureSocket() after login');
     return () => {};
   }
 
@@ -578,7 +591,7 @@ export function onPong(callback: (data: { timestamp: string }) => void): () => v
  */
 export function requestStats(): void {
   if (!socket) {
-    console.error('Socket not initialized');
+    console.warn('Socket not initialized — call ensureSocket() after login');
     return;
   }
 
@@ -599,7 +612,7 @@ export function onStats(
   }) => void
 ): () => void {
   if (!socket) {
-    console.error('Socket not initialized');
+    console.warn('Socket not initialized — call ensureSocket() after login');
     return () => {};
   }
 

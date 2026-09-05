@@ -27,6 +27,16 @@ import LanguagePicker from './language-picker';
 
 type Msg = { who: 'ai' | 'me'; text: string };
 
+/** Read the current value of an Animated.Value without touching privates. */
+function animCurrent(v: Animated.Value): number {
+  const get = (v as unknown as { __getValue?: () => number }).__getValue;
+  try {
+    return typeof get === 'function' ? get.call(v) : 0;
+  } catch {
+    return 0;
+  }
+}
+
 const LANG_NAME: Record<string, string> = {
   'en-IN': 'English',
   'hi-IN': 'Hindi',
@@ -63,7 +73,7 @@ export function AIAssistant() {
   const [collected, setCollected] = useState<Record<string, any>>({});
 
   const listRef = useRef<FlatList<Msg>>(null);
-  const greetTimerRef = useRef<any>(null);
+  const greetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Ref-based mic guard: the `listening` state is stale inside the async
   // handler, so a ref is needed to actually block a double-tap.
   const listeningRef = useRef(false);
@@ -235,12 +245,12 @@ export function AIAssistant() {
   // Keep the FAB inside the actual frame — the measured size is the source of
   // truth on every platform (phones of any size, web frame, rotation). Also
   // re-clamps positions restored from storage that no longer fit.
-  const onContainerLayout = (event: any) => {
+  const onContainerLayout = (event: { nativeEvent: { layout: { width: number; height: number } } }) => {
     const { width, height } = event.nativeEvent.layout;
     if (!width || !height) return;
     frameSizeRef.current = { w: width, h: height };
-    const x = Math.max(0, Math.min((fabPos.x as any)._value, width - FAB_SIZE));
-    const y = Math.max(0, Math.min((fabPos.y as any)._value, height - FAB_SIZE));
+    const x = Math.max(0, Math.min(animCurrent(fabPos.x), width - FAB_SIZE));
+    const y = Math.max(0, Math.min(animCurrent(fabPos.y), height - FAB_SIZE));
     fabPos.setValue({ x, y });
   };
 
@@ -256,16 +266,16 @@ export function AIAssistant() {
       onPanResponderTerminationRequest: () => false,
       onPanResponderGrant: () => {
         movedRef.current = true;
-        const x = (fabPos.x as any)._value || 0;
-        const y = (fabPos.y as any)._value || 0;
+        const x = animCurrent(fabPos.x) || 0;
+        const y = animCurrent(fabPos.y) || 0;
         fabPos.setOffset({ x, y });
         fabPos.setValue({ x: 0, y: 0 });
       },
       onPanResponderMove: Animated.event([null, { dx: fabPos.x, dy: fabPos.y }], { useNativeDriver: false }),
       onPanResponderRelease: () => {
         fabPos.flattenOffset();
-        let x = (fabPos.x as any)._value;
-        let y = (fabPos.y as any)._value;
+        let x = animCurrent(fabPos.x);
+        let y = animCurrent(fabPos.y);
         x = Math.max(0, Math.min(x, frameSizeRef.current.w - FAB_SIZE));
         y = Math.max(0, Math.min(y, frameSizeRef.current.h - FAB_SIZE));
         fabPos.setValue({ x, y });

@@ -5,11 +5,15 @@ import RootLayout from '../app/_layout';
 jest.mock('expo-router', () => {
   const Stack = ({ children }: { children?: React.ReactNode }) => children ?? null;
   (Stack as any).Screen = function Screen() { return null; };
+  const ThemeProvider = ({ children }: { children?: React.ReactNode }) => children ?? null;
   return {
     useRouter: () => ({ push: jest.fn(), replace: jest.fn(), back: jest.fn() }),
     usePathname: () => '/',
   useFocusEffect: (cb: any) => { jest.requireActual<typeof import('react')>('react').useEffect(cb); },
     Stack,
+    ThemeProvider,
+    DarkTheme: {},
+    DefaultTheme: {},
     useLocalSearchParams: () => ({ id: '1' }),
   };
 });

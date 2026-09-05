@@ -1,12 +1,12 @@
 import Avatar from '@/components/avatar';
 import BottomNav from '@/components/bottom-nav';
-import { authFetch, readApiError } from '@/lib/api';
+import { authFetch, getAuth, readApiError } from '@/lib/api';
 import { AvailabilitySlot, listAvailability } from '@/lib/availability';
 import { normalizeBookingStatus } from '@/lib/booking-status';
-import { pickImageNative, pickImageWeb } from '@/lib/image-picker';
+import { pickImageWithPreview } from '@/lib/image-picker';
 import { ensureSocket } from '@/lib/socket';
 import { storage } from '@/lib/storage';
-import { UploadFilePart, uploadMultipart } from '@/lib/upload';
+import { uploadMultipart } from '@/lib/upload';
 import { JobHistoryResponse, ReviewResponse, WorkerResponse } from '@/lib/types';
 import { Ionicons } from '@expo/vector-icons';
 import DateTimePicker from '@react-native-community/datetimepicker';
@@ -181,22 +181,10 @@ export default function WorkerInfoPage() {
     try {
       // Uploads go through uploadMultipart (XHR): global fetch rejects
       // { uri, name, type } parts on native with "Unsupported FormDataPart".
-      let part: UploadFilePart;
-      let preview = '';
-      if (Platform.OS === 'web') {
-        const file = await pickImageWeb();
-        if (!file) { setUploadingImage(false); return; }
-        part = file;
-        preview = URL.createObjectURL(file);
-      } else {
-        const asset = await pickImageNative();
-        if (!asset) { setUploadingImage(false); return; }
-        const name = asset.fileName || asset.uri.split('/').pop() || 'photo.jpg';
-        const ext = (name.split('.').pop() || 'jpg').toLowerCase();
-        const mime = asset.mimeType || (ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg');
-        part = { uri: asset.uri, name, type: mime };
-        preview = asset.uri;
-      }
+      const picked = await pickImageWithPreview();
+      if (!picked) { setUploadingImage(false); return; }
+      const part = picked.part;
+      const preview = picked.preview;
       const data = await uploadMultipart<{ url: string }>('/upload-review-image', part);
       setFeedbackImages((imgs) => [...imgs, { url: data.url, preview }]);
     } catch (e: any) {
@@ -340,11 +328,8 @@ export default function WorkerInfoPage() {
 
   async function getCurrentUid(): Promise<string> {
     try {
-      const authRaw = await storage.get('workmithra:auth');
-      if (authRaw) {
-        const auth = JSON.parse(authRaw);
-        if (auth.id) return String(auth.id);
-      }
+      const auth = await getAuth();
+      if (auth?.id) return String(auth.id);
     } catch {}
     return '';
   }
@@ -450,7 +435,16 @@ export default function WorkerInfoPage() {
     return haversineKm(clientLoc.lat, clientLoc.lng, Number(worker.latitude), Number(worker.longitude));
   }, [clientLoc, worker]);
 
-  const handleCall = () => worker?.phone && Linking.openURL(`tel:${worker.phone}`);
+  const handleCall = async () => {
+    if (!worker?.phone) return;
+    const url = `tel:${worker.phone}`;
+    try {
+      if (await Linking.canOpenURL(url)) await Linking.openURL(url);
+      else Alert.alert('Call', 'Calling is not supported on this device');
+    } catch {
+      Alert.alert('Call', 'Could not start the call');
+    }
+  };
 
   useEffect(() => {
     ensureSocket();
@@ -912,7 +906,7 @@ export default function WorkerInfoPage() {
                         type: 'date',
                         value: bookDate,
                         min: new Date().toISOString().slice(0, 10),
-                        onChange: (e: any) => setBookDate(e.target.value),
+                        onChange: (e: { target: { value: string } }) => setBookDate(e.target.value),
                         style: { flex: 1, padding: 10, fontSize: 13, border: 'none', outline: 'none', background: 'transparent', color: '#333' },
                       })}
                     </View>
@@ -921,7 +915,7 @@ export default function WorkerInfoPage() {
                       {React.createElement('input', {
                         type: 'time',
                         value: bookTime ? bookTime.slice(0, 5) : '',
-                        onChange: (e: any) => setBookTime(e.target.value),
+                        onChange: (e: { target: { value: string } }) => setBookTime(e.target.value),
                         style: { flex: 1, padding: 10, fontSize: 13, border: 'none', outline: 'none', background: 'transparent', color: '#333' },
                       })}
                     </View>
@@ -1020,7 +1014,12 @@ export default function WorkerInfoPage() {
                 return (
                   <View style={styles.mapEmbedWrap}>
                     {Platform.OS === 'web' ? (
-                      <iframe style={{ width: '100%', height: 260, border: 0, borderRadius: 12 } as any} src={src} />
+                      React.createElement('iframe', {
+                        style: { width: '100%', height: 260, border: 0, borderRadius: 12 } as React.CSSProperties,
+                        src,
+                        title: 'Map showing worker location',
+                        loading: 'lazy',
+                      })
                     ) : (
                       <WebView source={{ uri: src }} style={{ width: '100%', height: 260, borderRadius: 12 }} />
                     )}
@@ -1030,14 +1029,20 @@ export default function WorkerInfoPage() {
 
               <TouchableOpacity
                 style={styles.openMapsBtn}
-                onPress={() => {
+                onPress={async () => {
                   if (!worker.latitude || !worker.longitude) {
                     Alert.alert('Map', 'Worker location not available');
                     return;
                   }
                   const origin = clientLoc ? `${clientLoc.lat},${clientLoc.lng}` : '';
                   const dest = `${worker.latitude},${worker.longitude}`;
-                  Linking.openURL(`https://www.google.com/maps/dir/?api=1&origin=${origin}&destination=${dest}&travelmode=driving`);
+                  const url = `https://www.google.com/maps/dir/?api=1&origin=${origin}&destination=${dest}&travelmode=driving`;
+                  try {
+                    if (await Linking.canOpenURL(url)) await Linking.openURL(url);
+                    else Alert.alert('Map', 'Could not open Google Maps on this device');
+                  } catch {
+                    Alert.alert('Map', 'Could not open Google Maps on this device');
+                  }
                 }}
               >
                 <Ionicons name="map" size={18} color="#fff" />

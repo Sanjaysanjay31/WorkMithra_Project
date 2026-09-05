@@ -47,7 +47,7 @@ function useWebKeyboardHeight(): number {
   const [keyboardHeight, setKeyboardHeight] = useState(0);
   useEffect(() => {
     if (Platform.OS !== 'web' || typeof window === 'undefined') return;
-    const vv: any = (window as any).visualViewport;
+    const vv = (window as unknown as { visualViewport?: VisualViewport }).visualViewport;
     if (!vv) return;
     const update = () => {
       const overlap = window.innerHeight - vv.height - (vv.offsetTop || 0);
@@ -189,6 +189,12 @@ export default function RootLayout() {
       <Stack.Screen name="login" options={{ headerShown: false }} />
       <Stack.Screen name="register" options={{ headerShown: false }} />
       <Stack.Screen name="forgot-password" options={{ headerShown: false }} />
+      <Stack.Screen name="homePage" options={{ headerShown: false }} />
+      <Stack.Screen name="bookings" options={{ headerShown: false }} />
+      <Stack.Screen name="profile" options={{ headerShown: false }} />
+      <Stack.Screen name="worker_info" options={{ headerShown: false }} />
+      <Stack.Screen name="worker_availability" options={{ headerShown: false }} />
+      <Stack.Screen name="worker_payments" options={{ headerShown: false }} />
       <Stack.Screen name="worker_dashboard" options={{ headerShown: false }} />
       <Stack.Screen name="worker_bookings" options={{ headerShown: false }} />
       <Stack.Screen name="worker_profile" options={{ headerShown: false }} />

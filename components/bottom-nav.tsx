@@ -8,6 +8,8 @@ import { unregisterPush } from '@/lib/push';
 import { disconnectSocket } from '@/lib/socket';
 import { useI18n } from '@/lib/i18n';
 
+import type { ShadowStyle } from '@/lib/shadow';
+
 export type NavRoute =
   | 'home' | 'bookings' | 'switch_role' | 'profile'
   | 'dashboard' | 'requests' | 'payments' | 'profile_worker';
@@ -15,7 +17,7 @@ export type NavRoute =
 interface NavItem {
   id: NavRoute;
   label: string;
-  icon: string;
+  icon: React.ComponentProps<typeof Ionicons>['name'];
   route: Href;
 }
 
@@ -106,7 +108,7 @@ export default function BottomNav({ currentRoute, role = 'user' }: BottomNavProp
             >
               <View style={[styles.iconWrap, active && styles.iconWrapActive]}>
                 <Ionicons
-                  name={(active ? item.icon : `${item.icon}-outline`) as any}
+                  name={(active ? item.icon : `${item.icon}-outline`) as React.ComponentProps<typeof Ionicons>['name']}
                   size={22}
                   color={active ? ACTIVE : INACTIVE}
                 />
@@ -130,7 +132,7 @@ const styles = StyleSheet.create({
     ...Platform.select({
       ios: { shadowColor: '#000', shadowOpacity: 0.08, shadowOffset: { width: 0, height: -2 }, shadowRadius: 8 },
       android: { elevation: 12 },
-      web: { boxShadow: '0 -2px 10px rgba(0,0,0,0.06)' as any },
+      web: { boxShadow: '0 -2px 10px rgba(0,0,0,0.06)' } as ShadowStyle,
     }),
   },
   navBar: {

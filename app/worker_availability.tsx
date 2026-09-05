@@ -1,7 +1,7 @@
 import BottomNav from '@/components/bottom-nav';
+import { getAuth } from '@/lib/api';
 import { AvailabilitySlot, listAvailability, upsertAvailability } from '@/lib/availability';
 import { platformShadow } from '@/lib/shadow';
-import { storage } from '@/lib/storage';
 import { Ionicons } from '@expo/vector-icons';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { Stack } from 'expo-router';
@@ -101,11 +101,8 @@ export default function WorkerAvailabilityPage() {
       setLoadError('');
       let wid = 0;
       try {
-        const raw = await storage.get('workmithra:auth');
-        if (raw) {
-          const auth = JSON.parse(raw);
-          if (auth.id) wid = Number(auth.id);
-        }
+        const auth = await getAuth();
+        if (auth?.id) wid = Number(auth.id);
       } catch {}
       if (!wid) {
         // Not logged in — never fall back to a guessed worker id.
@@ -194,7 +191,7 @@ export default function WorkerAvailabilityPage() {
                 {React.createElement('input', {
                   type: 'time',
                   value: st.start_time,
-                  onChange: (e: any) => onTimeChange(d.key, 'start_time', e.target.value),
+                  onChange: (e: { target: { value: string } }) => onTimeChange(d.key, 'start_time', e.target.value),
                   style: { flex: 1, padding: 6, fontSize: 13, border: 'none', outline: 'none', background: 'transparent', color: '#333' },
                 })}
               </View>
@@ -204,7 +201,7 @@ export default function WorkerAvailabilityPage() {
                 {React.createElement('input', {
                   type: 'time',
                   value: st.end_time,
-                  onChange: (e: any) => onTimeChange(d.key, 'end_time', e.target.value),
+                  onChange: (e: { target: { value: string } }) => onTimeChange(d.key, 'end_time', e.target.value),
                   style: { flex: 1, padding: 6, fontSize: 13, border: 'none', outline: 'none', background: 'transparent', color: '#333' },
                 })}
               </View>
